@@ -25,8 +25,8 @@
 namespace lift::plugin {
 
 std::uint64_t pluginNowNs() {
-    using Clock = std::chrono::steady_clock;
-    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch());
+    using SteadyClock = std::chrono::steady_clock;
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now().time_since_epoch());
     return static_cast<std::uint64_t>(ns.count());
 }
 
@@ -46,14 +46,14 @@ std::uint64_t threadCycles() {
 // ★ 只在首次使用时跑一次（4 × 200 µs ≈ 0.8 ms）。`script_quickjs.cpp` 的 `call()` 在计时窗之前
 //   **预热**它 ⇒ 那 0.8 ms 不进 `js_cpu_ns` 预算窗（第一次回调的 `gap_us` 会看到它）。
 double calibrateCyclesPerNs() {
-    using Clock = std::chrono::steady_clock;
+    using SteadyClock = std::chrono::steady_clock;
     double best = 0.0;
     for (int i = 0; i < 4; ++i) {
         const std::uint64_t c0 = threadCycles();
-        const auto t0 = Clock::now();
-        while (std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count() < 200'000) {
+        const auto t0 = SteadyClock::now();
+        while (std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - t0).count() < 200'000) {
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         const std::uint64_t c1 = threadCycles();
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
         if (ns <= 0 || c1 <= c0) continue;

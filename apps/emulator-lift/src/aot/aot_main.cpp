@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
     bool input_plan_trace = false;
     std::string audio_mode = "off";  // ★ 本臂缺省 off（不开设备 / 不跑混音：与改动前逐位相同）
     // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。它**不是档位**：给了它而档位是 off ⇒
-    //   引擎走"设备无关的 dump 路径"（虚拟时钟；档位仍写 off、摘要 device=none）。
+    //   引擎走"设备无关的 dump 路径"（墙钟游标；档位仍写 off、摘要 device=none）。
     //   ⛔ `--audio` 的值域只有 off / sdl（`virtual` 档已于 2026-11-22 移除）。
     std::string audio_dump;
     // ★ `--sound`（缺省关）：**真的**进 `AudioEngine` 的静音门（`mute_ = !sound`）—— 不再是

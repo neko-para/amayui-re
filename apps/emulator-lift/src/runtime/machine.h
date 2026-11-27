@@ -90,13 +90,12 @@ struct RunOptions {
     std::uint32_t until_ea = 0;      // 非 0 ⇒ 到达即停
     std::uint64_t max_insns = 0;     // 非 0 ⇒ 执行到该条数即停
     bool stop_on_first_shim = false; // L1
-    bool trace_shims = false;        // 打进 trace_out（缺省 stdout；确定性）
-    std::FILE* trace_out = nullptr;  // A4 逐字节比对用：两次运行各写一个文件再比（缺省 stdout）
+    bool trace_shims = false;        // 打进 trace_out（缺省 stdout）
+    std::FILE* trace_out = nullptr;  // 各写一个文件再比（缺省 stdout；⚠ 墙钟 ⇒ 不承诺两次相同）
     bool trace_blocks = false;       // 块级 trace（调试）
-    // ★ A4 口径：默认虚拟时钟；`real_time=true` 才接宿主时钟 —— 此时逐字节断言必须由调用方跳过并明说。
-    bool real_time = false;
+    // ★ 时钟口径：**只有墙钟**（`Clock`）。⛔ 没有 `real_time` 开关，也不承诺逐字节确定性。
     bool trace_inputs = false;       // 打印输入清单（exe 路径串 / 命令行 / 环境块 / 时钟起点）
-    // 探索用墙钟上限（秒，0 = 不限）。不是确定性判据：确定性比对用 max_insns / max_frames。
+    // 探索用墙钟上限（秒，0 = 不限）。⚠ 它不是确定性判据（墙钟档下同一条命令两次跑不到同一处）。
     double time_limit_sec = 0.0;
     // ★ guest 热点 profile（诊断；默认关）：块命中数记在 Block 实体上，跑完按"命中 × 块内指令数"排序。
     //   ⛔ 这不是性能判据本身：A/B 用墙钟，profile 只回答"热点在哪"。
@@ -125,7 +124,6 @@ struct TraceInputs {
     //   `exit`/`title`/`cancel` = 不弹框、直接按该选择返回（`REQ-01M72JFZ87DJNT52DW4HB8SEV6`）。
     CloseConfirmPolicy close_confirm = CloseConfirmPolicy::Ask;
     std::uint64_t clock_start_100ns = 0;
-    bool real_time = false;
 };
 
 struct RunResult {
@@ -246,8 +244,8 @@ public:
     bool configureNativeOverrides(const std::string& list, std::string* err);
     NativeOverrideTable& overrides() { return overrides_; }
     const NativeOverrideTable& overrides() const { return overrides_; }
-    // ★ 方案 D（docs/thread-model-feasibility.md §5.1）：音频设备模型 + 喂料泵。
-    //   `mode=Off` = 旧 silent 口径；`Sdl` = 真设备（默认 CLI）；`Virtual` = 确定性时钟（CTest/dump）。
+    // ★ 音频设备模型 + 喂料线程（判据见 `runtime/audio_policy.h` / `docs/03-emulator/audio.md`）。
+    //   `mode=Off` = 没有音频输出；`Sdl` = 真设备（默认 CLI）。`--audio-dump` 是独立的输出位置。
     //   ★ `sound=false`（缺省）= 静音：全流程照跑，只在最终交付点把缓冲置 0（`--sound` 才出声）。
     bool configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err);
     AudioEngine& audio() { return audio_; }
@@ -376,7 +374,7 @@ public:
     BlockCache& cache() { return cache_; }
     ShimRegistry& shims() { return shims_; }
     const ShimRegistry& shims() const { return shims_; }
-    VirtualClock& clock() { return clock_; }
+    Clock& clock() { return clock_; }
     GuestHeap& heap() { return heap_; }
     HandleTable& handles() { return handles_; }
     Vfs& vfs() { return vfs_; }
@@ -415,10 +413,10 @@ public:
 
     // 诊断
     void reportBaseGaps(std::FILE* out) const;
-    // A4 输入清单（plan §5 A4）：trace 的"输入"必须显式 —— 换个 --exe 路径写法就是另一条执行路径。
+    // 输入清单：trace 的"输入"必须显式 —— 换个 --exe 路径写法就是另一条执行路径。
     TraceInputs traceInputs() const;
     void dumpTraceInputs(std::FILE* out) const;
-    std::uint64_t traceInputsHash() const;  // 输入归一化后的指纹（两次运行必须相同）
+    std::uint64_t traceInputsHash() const;  // 输入归一化后的指纹（只覆盖输入，⛔ 不含墙钟读数）
     // 机器可读的缺口/覆盖快照（给 `tools/lift.mjs report` 用；⛔ 人读输出不要靠它）
     void reportCoverageJson(std::FILE* out) const;
     // ★ 运行摘要的**档位**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：
@@ -482,7 +480,7 @@ private:
     Decoder decoder_;
     BlockCache cache_;
     ShimRegistry shims_;
-    VirtualClock clock_;
+    Clock clock_;
     Vfs vfs_;
     GuestHeap heap_;
     HandleTable handles_;

@@ -38,16 +38,13 @@ namespace {
 constexpr std::uint32_t kSampleRate = 48000u;
 constexpr std::uint32_t kBlockAlign = 4u;  // 16 bit / 2 ch
 constexpr std::uint32_t kBytesPerSec = kSampleRate * kBlockAlign;  // 192000
-// 设备时钟的单位换算：VirtualClock 每 10,000,000 tick = 1 s。
+// 设备时钟的单位换算：Clock 每 10,000,000 tick = 1 s。
 constexpr std::uint64_t kTicksPerSec = 10'000'000ull;
 
-// ★ 预读 lead 的**唯一一份**常量在 `runtime/audio_policy.h`（`kLeadBytes` / `kThreadLeadBytes` /
-//   `leadBytesFor()`）—— `mixStep()` 与 `begin()` 的日志行只调 `leadBytesFor(thread_mode_)`。
-//   ⛔ 不要在这里再写一份三元表达式（那正是"改了一处、另一处还在用 600ms"的来源）。
-//   下面两条断言把 `audio_policy.h` 的字节数与**本文件的音频格式**钉在一起：
+// ★ 预读 lead 的**唯一一份**常量在 `runtime/audio_policy.h`（`kThreadLeadBytes`）——
+//   `mixStep()` 与 `begin()` 的日志行只读它。⛔ 不要在这里再写一份字面量。
+//   下面这条断言把 `audio_policy.h` 的字节数与**本文件的音频格式**钉在一起：
 //   改了采样率 / 声道而忘了改 lead ⇒ 编译期红，不是运行期悄悄欠料。
-static_assert(kLeadBytes == (static_cast<std::uint64_t>(kBytesPerSec) * 600ull) / 1000ull,
-              "audio_policy.h 的 kLeadBytes 与 48k/16bit/2ch 的字节率漂了");
 static_assert(kThreadLeadBytes == (static_cast<std::uint64_t>(kBytesPerSec) * 100ull) / 1000ull,
               "audio_policy.h 的 kThreadLeadBytes 与 48k/16bit/2ch 的字节率漂了");
 
@@ -117,8 +114,8 @@ AudioEngine::AudioEngine() = default;
 
 AudioEngine::~AudioEngine() { end(); }
 
-void AudioEngine::attach(X86* cpu, GuestMemory* mem, VirtualClock* clock) {
-    // ★ 过渡期重载（见 audio.h）：宿主没有布局 ⇒ `begin()` 会显式 Warn 并走 D 泵。
+void AudioEngine::attach(X86* cpu, GuestMemory* mem, Clock* clock) {
+    // ★ 过渡期重载（见 audio.h）：宿主没有布局 ⇒ `resumeFeeder()` 会显式 Warn 且不建线程。
     //   最终形态只有四参版本；⛔ 不要在这里伪造一份 `GuestLayout`（那会让"没布局"变成静默假绿）。
     cpu_ = cpu;
     mem_ = mem;
@@ -130,7 +127,7 @@ void AudioEngine::attach(X86* cpu, GuestMemory* mem, VirtualClock* clock) {
     feeder_layout_invalid_ = false;
 }
 
-void AudioEngine::attach(X86* cpu, GuestMemory* mem, VirtualClock* clock, const GuestLayout& layout) {
+void AudioEngine::attach(X86* cpu, GuestMemory* mem, Clock* clock, const GuestLayout& layout) {
     attach(cpu, mem, clock);
     // ★ 拷贝两个 EA（+ 尺寸），不存指针：`Machine` 的 `audio_` 声明在 `layout_` 之前，
     //   析构逆序会让 `const GuestLayout*` 悬垂。布局常量本身仍只有一份（`runtime/image.h`）。
@@ -138,7 +135,7 @@ void AudioEngine::attach(X86* cpu, GuestMemory* mem, VirtualClock* clock, const 
     feeder_stack_top_ = layout.feeder_stack_top;
     feeder_stack_size_ = layout.feeder_stack_size;
     feeder_layout_given_ = true;
-    // 宿主给了布局但值不可用（0）⇒ `begin()` 响亮失败，⛔ 不静默退回 D 泵。
+    // 宿主给了布局但值不可用（0）⇒ `begin()` 响亮失败，⛔ 不静默退化。
     feeder_layout_invalid_ = layout.feeder_teb == 0 || layout.feeder_stack_top == 0 ||
                              layout.feeder_stack_size == 0;
 }
@@ -176,7 +173,7 @@ bool AudioEngine::configure(AudioMode mode, const std::string& dump_path, bool s
     //   guest 的 DS 调用全都照跑，只在交付点覆盖缓冲（见 `generateTo`）。
     mute_ = !sound;
     // ★ `--audio-dump` **不是档位**（值域只有 off / sdl）：它要一条**设备无关**的混音路径
-    //   （虚拟时钟 + 交付点写 WAV）。这里只记两个 sink 事实，⛔ 不改 `configured_mode_`
+    //   （墙钟游标 + 交付点写 WAV）。这里只记两个 sink 事实，⛔ 不改 `configured_mode_`
     //   （`--audio off --audio-dump` 的档位仍是 off、摘要仍写 `device=none`）。
     //   ★ 夹具另有 `enableDeviceFreeMixForTest()`（不进 CLI）：它和 dump 走同一条路径。
     dump_requested_ = !dump_path_.empty();
@@ -219,17 +216,15 @@ bool AudioEngine::begin(std::string* err) {
         if (err) *err = "AudioEngine 没有 attach（cpu/mem/clock）";
         return false;
     }
-    // ★ 游标原点（S2，`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：**没有真设备**的档（dump / 夹具 /
-    //   无墙钟的 sdl）的 `played_` 必须相对**这一轮引擎的起点**算。AOT 的时钟是墙钟（`AotHost::init` 里 `setRealTime(true)`）⇒ `now100ns()`
-    //   是 steady_clock 的**绝对值**（自开机）；直接拿它当游标 ⇒ `played_` 落在 1e10 量级 ⇒
-    //   `generateTo` 的越界门恒命中、`mixed/pushed` 恒 0、dump 只有 44 B 头（本单的 S2）。
-    //   ⛔ 不许改成"把 `setRealTime(false)` 关掉"绕过（那会改 AOT 时钟档 / guest 可见时间语义）；
+    // ★ 游标原点（S2，`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：**没有真设备**时（dump / 夹具）的
+    //   `played_` 必须相对**这一轮引擎的起点**算。时钟是墙钟 ⇒ `now100ns()` 是 steady_clock 的
+    //   **绝对值**（自开机）；直接拿它当游标 ⇒ `played_` 落在 1e10 量级 ⇒ `generateTo` 的越界门
+    //   恒命中、`mixed/pushed` 恒 0、dump 只有 44 B 头（本单的 S2）。
     //   ⛔ 也不许把原点写成 0（那等于把墙钟当相对时间）。
     origin_100ns_ = clock_->now100ns();
     // ★ 布局可用性在**碰设备 / dump 之前**判：宿主明确给了 `GuestLayout` 但值不可用（0）⇒ 响亮失败。
-    //   ⛔ 不静默退回 D 泵（那正是旧代码"声明能起、失败了再回退"的形状）；这也让纯用例能在
-    //   没有音频设备的机器上判这条（begin 在 openSdl 之前就返回 false）。
-    if (mode_ == AudioMode::Sdl && clock_->realTime() && feeder_layout_given_ && feeder_layout_invalid_) {
+    //   ⛔ 不静默退化；这也让纯用例能在没有音频设备的机器上判这条（begin 在 openSdl 之前就返回 false）。
+    if (mode_ == AudioMode::Sdl && feeder_layout_given_ && feeder_layout_invalid_) {
         if (err) {
             *err = "音频 feeder 布局不可用（GuestLayout::feeder_teb / feeder_stack_top / "
                    "feeder_stack_size 有 0）⇒ 拒绝 begin";
@@ -243,7 +238,7 @@ bool AudioEngine::begin(std::string* err) {
         if (!openSdl()) {
             // ★ 设备打不开 = **没有音频输出**：落回 `Off`（`enabled()==false` ⇒ 不跑混音、
             //   不注册 buffer），摘要如实写 `device=none`。⛔ 没有第二个档位可以退（`virtual`
-            //   已于 2026-11-22 移除），也⛔ 不保留"其实还有 D 泵在跑"的 `fallback` 含义。
+            //   已于 2026-11-22 移除），也⛔ 不保留"其实还有别的喂料路线在跑"的 `fallback` 含义。
             //   ★ 例外只有 `--audio-dump`：那是**显式要了**离线 PCM 的 sink；此时 dump 继续
             //     （仍报 `mode=off device=none`），warn 里点名。
             mode_ = AudioMode::Off;
@@ -257,31 +252,21 @@ bool AudioEngine::begin(std::string* err) {
             sdl_device_opened_ = true;
         }
     }
-    // ★ S0 定档：判据**只有一份**（`runtime/audio_policy.h` 的 `audioThreadMode()`，两个事实：
-    //   生效档位 / 宿主时钟）。⛔ 不要在这里写内联判据，也⛔ 不要把 `has_machine` /
-    //   `feederLayoutAvailable()` 这类运行时布尔加进谓词：真 feeder 线程要的 TEB/栈由
-    //   `attach(...)` 的 `const GuestLayout&` 在装配期**结构上**保证（见 audio.h 的 attach 注释）。
-    //   ★ `mode_` 在上一块里可能已被"打不开设备 ⇒ Off"改过 ⇒ 这里读到的是**真档位**。
-    const bool want_thread = audioThreadMode(mode_, clock_ != nullptr && clock_->realTime());
-    thread_mode_ = want_thread && feeder_layout_given_;
-    if (want_thread && !feeder_layout_given_) {
-        // 过渡期：三参 attach（宿主没给布局）⇒ 显式 Warn + D 泵。⛔ 不是静默降级。
-        logAt(LogLevel::Warn,
-              "音频：宿主没有提供 GuestLayout（三参 attach）⇒ 主线程 D 泵（lead=%llu B；"
-              "真 feeder 线程需要 GuestLayout::feeder_teb / feeder_stack_*）",
-              static_cast<unsigned long long>(leadBytesFor(false)));
-    }
     begun_ = true;
-    if (thread_mode_) startMixThread();
+    // ★ 输出位置只由 sink 决定：有混音要跑就起 **mixer 线程**（它推进设备游标 / 生成 / 投递通知）。
+    //   喂料（feeder 线程）由 guest 的 `CreateThread(0x4B5AA0)` + `ResumeThread` 触发，见 resumeFeeder。
+    //   ⛔ 没有"主线程泵"这条第二路线：`--audio` 只决定有没有输出、输出到哪。
+    //   ★ 夹具（`device_free_for_test_`）自己用 `mixOnceForTest()` 同步推进，不起线程
+    //     （否则设备模型的断言会与 5 ms 周期的 mixer 抢时序）。
+    if (enabled() && !device_free_for_test_) startMixThread();
     if (enabled()) {
         logAt(LogLevel::Info,
-              "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；feeder=%s；"
+              "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；feeder=host-thread；"
               "muted=%d%s；PCM 由 guest 解码器产生，宿主只做混音与输出",
               audioModeName(mode_), kSampleRate,
-              static_cast<unsigned long long>(leadBytesFor(thread_mode_)),
-              sdl_device_opened_ ? "SDL 设备已消费字节" : "VirtualClock",
-              thread_mode_ ? "host-thread（方案 C）" : "主线程泵（方案 D）", mute_ ? 1 : 0,
-              mute_ ? "（缺省；--sound 可听）" : "（--sound）");
+              static_cast<unsigned long long>(kThreadLeadBytes),
+              sdl_device_opened_ ? "SDL 设备已消费字节" : "墙钟",
+              mute_ ? 1 : 0, mute_ ? "（缺省；--sound 可听）" : "（--sound）");
     }
     return true;
 }
@@ -431,14 +416,13 @@ void AudioEngine::abortFill() {
     }
     feeder_.exited = true;
     feeder_.runnable = false;
-    feeder_.exit_requested = false;
     pending_.clear();
 }
 
 void AudioEngine::end() {
     if (!begun_ && !dump_ && !stream_) return;
     stopMixThread();
-    if (thread_mode_ && feeder_thread_.joinable()) joinFeeder();
+    joinFeeder();
     abortFill();
     if (feeder_.registered && !feeder_.exited) {
         logAt(LogLevel::Info, "运行结束：喂料泵仍在运行（fills=%llu）⇒ 直接关闭（不再写 guest）",
@@ -484,10 +468,9 @@ const AudioEngine::Buffer* AudioEngine::find(std::uint32_t state_ea) const {
     return nullptr;
 }
 
-// ★ 走 `mutex_`（递归）：调用方可能已持它（`pump` 的 D 分支 / `fireCrossings` 的调用链），
+// ★ 走 `mutex_`（递归）：调用方可能已持它（`fireCrossings` 的调用链），
 //   也可能没持（`feederEvent` 在令牌里）。锁序是 **令牌 → `mutex_`**（每个 DS shim 都是这个
-//   顺序）⇒ feeder 持令牌时取 `mutex_` 是安全的；⛔ 反过来"持 `mutex_` 再等令牌"只有 D 模式的
-//   `pump()` 会做，而 D 模式没有 feeder 线程。
+//   顺序）⇒ feeder 持令牌时取 `mutex_` 是安全的。
 //   返回指针只在 `mutex_` 内有效：调用方必须在同一次持锁里读完 `generation`（`buffers_` 是
 //   vector ⇒ 别的线程 `addBuffer` / `removeBuffer` 会让它失效）。
 AudioEngine::Buffer* AudioEngine::findByObj(std::uint32_t obj_ea) {
@@ -503,7 +486,6 @@ bool AudioEngine::isFeederThread() const {
     //   ★ 用 feeder 线程**自己**登记的 id，而不是 `feeder_thread_.joinable()/get_id()`：
     //     `joinFeeder()` 会在主线程 join 同一个 `std::thread` 对象，而 feeder 此刻可能正跑
     //     fill 并在其中调 `stop()` ⇒ 并发读 `std::thread` 是数据竞争。id 是 atomic 的、只读一次。
-    if (!thread_mode_) return false;
     const std::thread::id id = feeder_tid_.load();
     return id != std::thread::id{} && id == std::this_thread::get_id();
 }
@@ -663,7 +645,6 @@ void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::u
         ++b->generation;
         dropPending(old_obj);
         // ★ 自等判据：feeder 自己（fill 内 Release / EOF 自停）⇒ 不等，直接往下写。
-        //   ⛔ 不要加 `thread_mode_ &&`（理由见 `removeBuffer` 同一条注记）。
         if (!isFeederThread() && filling_obj_.load() == old_obj) {
             waitFill(old_obj, lock);
             // ★★ `waitFill` 放开了 `mutex_` ⇒ `buffers_`（vector）可能已被 erase / 重排，
@@ -726,17 +707,13 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
         buffers_.erase(it);
         // ★ D2：`pending_` 归 `pending_mutex_` 管；这里以前是唯一一处**在 `mutex_` 下裸动 deque**
         //   的地方（宿主 UB：feeder / `enqueue` 都在 `pending_mutex_` 下动它）。
-        //   ⚠ **例外**：D 模式（没有 real-time 的 sdl 档 / 设备无关的 dump 路径）没有 feeder
-        //   线程、也没有 mixer 线程 ⇒ `pump()` 是单执行流，**有意**不持 `pending_mutex_` 直接
-        //   操作 `pending_`（不能跨 fill 持锁：混音器每次 `enqueue` 都会被 fill 的 380–460 ms 堵住）。
-        //   ⛔ 不要在 thread 模式里加任何无锁 `pending_` 路径。
+        //   ★ 喂料路线只剩 feeder 线程 / mixer 线程 ⇒ `pending_` 的每次改动都在 `pending_mutex_` 下。
+        //   ⛔ 不要在这里加无锁 `pending_` 路径。
         dropPending(obj);
-        // ★ 自等判据（与 `stop()` 的 :598 同文）：feeder **自己**调进来（fill 内的 DS `Release` /
+        // ★ 自等判据（与 `stop()` 同文）：feeder **自己**调进来（fill 内的 DS `Release` /
         //   EOF 自停 `0x4B6C58`）必须早退，否则它等的是自己 —— 不是永久挂死（`waitFillDone`
         //   上限 = `kFillWaitTimeoutMs`），但那 3 s 会每刀都吃一次。
-        //   ⛔ 判据只写 `!isFeederThread()`，**不要**再加 `thread_mode_ &&`：`isFeederThread()`
-        //   自己已经含 `!thread_mode_ ⇒ false`；而 D 模式下 `filling_obj_` 恒 0，加门零收益，
-        //   却会让夹具（纯档只有 Virtual）永远走不进这个分支 ⇒ 守卫恒绿。
+        //   ⛔ 判据只写 `!isFeederThread()`（它自己就是"我在不在 feeder 线程"的唯一判据）。
         if (!isFeederThread() && filling_obj_.load() == obj) waitFill(obj, lock);
         // 等完直接返回：这个 state 已经从模型里删了，没有"重查 / 重建"的必要。
         return;
@@ -827,7 +804,7 @@ void AudioEngine::stop(std::uint32_t state_ea) {
     ++b->generation;
     const std::uint32_t obj = b->obj_ea;
     dropPending(obj);
-    if (thread_mode_ && !isFeederThread() && filling_obj_.load() == obj) {
+    if (!isFeederThread() && filling_obj_.load() == obj) {
         // feeder 自己调（EOF 路径 `0x4B6C58`）必须跳过，否则自等。
         waitFill(obj, lock);
         // ★★ Yield 之后**必须重新查表**：等待期间别的线程可能已经 erase / 重排 `buffers_`
@@ -865,7 +842,7 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
     ++b->generation;
     const std::uint32_t obj = b->obj_ea;
     dropPending(obj);
-    if (thread_mode_ && !isFeederThread() && filling_obj_.load() == obj) {
+    if (!isFeederThread() && filling_obj_.load() == obj) {
         waitFill(obj, lock);
         // ★★ 同上：Yield 之后必须重新查表。
         b = find(state_ea);
@@ -1008,8 +985,8 @@ void AudioEngine::restore(const Context& c, std::uint32_t* shim_result) {
     std::memcpy(cpu_->xmm, c.xmm, sizeof(c.xmm));
     cpu_->shim.thread_id = c.thread_id;
     cpu_->shim.last_error = c.last_error;
-    // `GuestCallStack::resume()` 在续延返回之后写 eip/esp/eax；把 eax 通过 *shim_result 交回，
-    // eip/esp 由"借用 [esp] = snapshot.eip + cleanup=0"那套保证（见 pump()）。
+    // `GuestCallStack::resume()` 在续延返回之后写 eip/esp/eax；喂料路线里没有主线程借 `[esp]`
+    // 这回事了（feeder 用自己的 guest 栈），这里只把 eax 通过 *shim_result 交回。
     *shim_result = c.r[kEax];
 }
 
@@ -1062,7 +1039,7 @@ void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_play
                                            ? (new_frame - start_frame) * b.fmt.avg_bytes / kSampleRate
                                            : 0ull);
         if (rel_new <= rel_old) continue;
-        // ★ 一次推进可能跨过多个通知点（fill 期间虚拟时钟仍在走）。必须按**位置**排序后再入队：
+        // ★ 一次推进可能跨过多个通知点（墙钟在走）。必须按**位置**排序后再入队：
         //   按 quarter 序号入队会把"回绕 0"排在"3/4"之前（实测错序：0,1,2,0,3…）。
         std::vector<std::pair<std::uint64_t, std::uint32_t>> crosses;
         for (std::uint32_t i = 0; i < b.notify_count; ++i) {
@@ -1348,8 +1325,8 @@ void AudioEngine::mixStep() {
     // 调用方持有 mutex_。
     advanceDevice();
     if (mode_ == AudioMode::Sdl && sdl_ok_) {
-        // 预读 lead 的**唯一一份**判据在 `audio_policy.h`（⛔ 不要在这里再写三元表达式）。
-        const std::uint64_t lead = leadBytesFor(thread_mode_);
+        // 预读 lead 的**唯一一份**判据在 `audio_policy.h`（⛔ 不要在这里再写字面量）。
+        const std::uint64_t lead = kThreadLeadBytes;
         const std::uint64_t target = played_ + lead;
         if (target > generated_) generateTo(target);
         bool playing = false;
@@ -1398,257 +1375,12 @@ void AudioEngine::stopMixThread() {
     if (mix_thread_.joinable()) mix_thread_.join();
 }
 
-AudioPump AudioEngine::pump() {
-    if (!enabled() || !begun_ || !cpu_ || !mem_) return AudioPump::Idle;
-    // ★★ 锁序前提 —— 下面这个早退**就是**它（⛔ 不要删、不要放宽、不要把 thread 模式放到它后面）：
-    //   `pump()` 是全文**唯一**一处 `mutex_ → 令牌` 的路径（本函数里 `std::lock_guard` 取
-    //   `mutex_`、`GuestToken::Guard` 取令牌），与全局锁序（**令牌 → `mutex_`**：每个 DS shim /
-    //   `feederEvent`）相反。它不成环靠两条：
-    //     ① **thread 档在取 `mutex_` 之前就返回**（就是下面这个 if）⇒ 既有 feeder 又有 mixer 的
-    //        并行档**永远走不到**反向锁序；
-    //     ② D 档（`thread_mode_ == false`）没有 feeder 线程、也没有 mixer 线程
-    //        （`begin()` 只在 thread 档起 mixer；`startFeederThread` 只在 `resumeFeeder` 的
-    //        thread 分支被调）⇒ 除本线程外没有令牌持有者。
-    //   ⇒ "持 `mutex_` 等令牌"永远等不到一个"要拿 `mutex_` 才能放令牌"的线程 ⇒ 反向锁序不成环。
-    //   ⛔ 早退**不许**挪到 `lock(mutex_)` 之后；⛔ 也不许"thread 档也顺手 mix 一下"。
-    //   真线程模式：主线程也**不要**每块都去抢 audio mutex（那会和 mixer/feeder 形成
-    //   cache-line ping-pong，实测把 fill 从 400ms 拖到 650ms）。直接无锁返回。
-    if (thread_mode_) {
-        if (feeder_error_.load()) {
-            last_error_ = "音频 feeder 线程失败（详见 stderr）";
-            return AudioPump::Error;
-        }
-        return AudioPump::Idle;
-    }
-    // ★ 走到这里的**只有** `thread_mode_ == false`（上面那块已返回）⇒ 本引擎当前没有 feeder
-    //   线程、也没有 mixer 线程。这就是上面那条不变量 ② 的唯一来源：
-    //   `thread_mode_` 只在 `begin()` 由**纯谓词** `audioThreadMode(mode, realTime)`
-    //   （`runtime/audio_policy.h`，唯一一份）置真，且额外要求 `attach` 给了 `GuestLayout`
-    //   （结构前提）。它从 true 变 false 的路径只有一条：`startFeederThread()` 里
-    //   `setupFeederContext()` 失败（布局被占 / 栈提交失败 / Decoder 失败）—— 那一步发生在
-    //   **建线程之前**（失败时 `thread_mode_` 改回 false、`stopMixThread()`，日志"退回主线程泵"）
-    //   ⇒ **不存在"feeder 线程已经在跑、而 `pump()` 走 D"的状态**（两条臂同一条论证；
-    //     AOT 在新谓词下也会走到这条防御网）。
-    //   ⛔ 因此这里**不再加**"是否曾经起过线程"的闩/断言位：它要防的状态今天不可达，删掉它
-    //     少一份过期保证。⚠ 但若将来给 `std::thread` 的构造加 catch 并继续运行、或加 feeder
-    //     restart，**先回来改这里**：那时 `pump()` 的反向锁序前提（"除本线程外没有令牌持有者"）
-    //     就不再成立，需要重新引入一道可判的硬门。
+void AudioEngine::mixOnceForTest() {
+    // ★ 仅夹具：同步跑一次混音（产品路径由 5 ms 的 mixer 线程调同一个 `mixStep`）。
+    //   ⛔ 不铺 guest 帧、⛔ 不执行 guest 代码（喂料是 feeder 线程的事）。
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // ★ **D 档专属**的铺帧守卫（thread 档在它们之前就返回，走不到这里）：
-    //   单执行流纪律 —— 任何嵌套 guest 调用进行中都不混音、不铺新帧。
-    //   fill 自己会写 guest 环；此时读环 = 真机上"另一个线程正在写"的竞态，D 里必须避免。
-    if (in_fill_) return AudioPump::Idle;
-    if (cpu_->calls && cpu_->calls->active()) return AudioPump::Idle;
-    if (cpu_->shim.callback.active) return AudioPump::Idle;
-    if (cpu_->shim.timer_firing) return AudioPump::Idle;
-
+    if (!begun_) return;
     mixStep();
-
-    if (!feeder_.registered || !feeder_.runnable || feeder_.exited) return AudioPump::Idle;
-    if (feeder_.exit_requested) {
-        feeder_.exited = true;
-        feeder_.runnable = false;
-        feeder_.exit_requested = false;
-        pending_.clear();
-        logAt(LogLevel::Info, "喂料泵收到退出事件（#60）⇒ 退出；fills=%llu",
-              static_cast<unsigned long long>(stats_.fills));
-        return AudioPump::Idle;
-    }
-
-    while (!pending_.empty()) {
-        const AudioNotifyEvent ev = pending_.front();
-        // ★ 与 `feederEvent` 同一条语义（两条重播路径必须一个判据）：Stop / SetCurrentPosition
-        //   之后，之前排队的条目作废。D 模式下同一线程其实不会过期，但成本为零、少一处"两种
-        //   模式行为不同"的隐式约定。`findByObj` 走递归 `mutex_`（本函数已持有）。
-        const Buffer* gen_b = findByObj(ev.obj);
-        if (gen_b == nullptr || gen_b->generation != ev.generation) {
-            pending_.pop_front();
-            ++stats_.stale;
-            continue;
-        }
-        std::uint32_t slot = 0;
-        std::uint32_t stream = 0;
-        if (!findSlot(ev.obj, &slot, &stream)) {
-            if (!warned_slot_mismatch_) {
-                warned_slot_mismatch_ = true;
-                logAt(LogLevel::Warn,
-                      "通知的 obj=0x%08X 在 Sound+0x654 的 15 个槽里找不到（[stream+0x40C] 不匹配）⇒ "
-                      "丢掉该通知；音频布局可能已漂（fills 会停）",
-                      ev.obj);
-            }
-            pending_.pop_front();
-            ++stats_.dropped;
-            continue;
-        }
-        const std::uint32_t cs = feeder_.sound + kSoundCsBase + 24u * slot;
-        if (!mem_->committed(cs, 0x18)) {
-            pending_.pop_front();
-            ++stats_.dropped;
-            continue;
-        }
-        const std::uint32_t owner = guestCriticalSectionOwner(*cpu_, cs);
-        if (owner != 0 && owner != feeder_.thread_id) {
-            // ★ D.4-③：主线程正持有这个槽的 CS（真机上 feeder 会阻塞）。本次不填，
-            //   保留在队首，下一个块边界再试。⛔ 不插进"主线程正在改这个槽"的中途。
-            ++stats_.deferred;
-            return AudioPump::Idle;
-        }
-        const std::uint32_t slot_obj = mem_->rd32(feeder_.sound + kSoundSlots + 4u * slot);
-        if (slot_obj == 0 || slot_obj != stream) {
-            if (!warned_slot_mismatch_) {
-                warned_slot_mismatch_ = true;
-                logAt(LogLevel::Warn,
-                      "槽 %u 的 SoundBuffer*=0x%08X 与通知的 obj=0x%08X 不一致 ⇒ 丢掉该通知", slot,
-                      slot_obj, ev.obj);
-            }
-            pending_.pop_front();
-            ++stats_.dropped;
-            continue;
-        }
-        std::string err;
-        if (!guestEnterCriticalSectionAs(*cpu_, cs, feeder_.thread_id, &err)) {
-            last_error_ = "音频泵进入临界区失败：" + err;
-            return AudioPump::Error;
-        }
-        const std::uint32_t inf_ea = feeder_.sound + kSoundInflight + 4u * slot;
-        const std::uint32_t inf = mem_->committed(inf_ea, 4) ? mem_->rd32(inf_ea) : 0u;
-        if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf + 1u);
-        pending_.pop_front();
-
-        // ---- 保存整份 guest 上下文，借用 [esp] 作为"返回点" ----
-        snapshot_ = capture();
-        if (!mem_->committed(snapshot_.r[kEsp], 4)) {
-            if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf);
-            guestLeaveCriticalSectionAs(*cpu_, cs, feeder_.thread_id, nullptr);
-            last_error_ = "音频泵：guest esp 不在已提交栈上";
-            return AudioPump::Error;
-        }
-        borrowed_esp_ = snapshot_.r[kEsp];
-        saved_ret_ = mem_->rd32(borrowed_esp_);
-        borrowed_ret_ = true;
-        mem_->wr32(borrowed_esp_, snapshot_.eip);  // `start()` 会把它当作 ret_ea 读走
-        cpu_->shim.thread_id = feeder_.thread_id;
-        cpu_->shim.last_error = 0;
-        in_fill_ = true;
-        fill_cs_ = cs;
-        fill_inf_ea_ = inf_ea;
-
-        AudioEngine* self = this;
-        // ★ 单令牌（guest_token.h）：这条 pump 路径会**铺一个 guest 帧**（dispatcher 随后执行它）。
-        //   主线程此时已持有令牌（Machine::run 的块边界）⇒ 这里只是重入；它保证
-        //   "将来谁在别的线程调 pump()" 也会被令牌挡住（⛔ 不许有第二条无令牌的 guest 入口）。
-        GuestToken::Guard pump_token(guestToken());
-        guestToken().check("audio.pump");
-        const std::uint32_t quarter = ev.quarter;
-        const auto fill_start = std::chrono::steady_clock::now();
-        // ★ 只读诊断（`late_q`）：**fill 开始**那一刻的滞后量。公式与"为什么带符号/不归一"见
-        //   `fillLagQuarter` 的定义注释。⚠ 必须在 `startNestedGuestCall` **之前**取（那才是 fill 开始）。
-        std::uint32_t lag_bytes = 0;
-        double lag_q = 0.0;
-        const std::uint32_t ev_obj = ev.obj;  // trace 用（捕获；`ev` 本身不捕，只捕需要的字段）
-        const bool lag_ok = fillLagQuarter(ev_obj, quarter, &lag_bytes, &lag_q);
-        // ★ 写见证的前一次读（design §1.2 事实 3 的 D 臂）：在 fill **开始**之前读 `[+0x2468]`，
-        //   与 continuation 里的后一次读比较；变了 = 这一刀写了环。guest 内存是数据面，不需要令牌。
-        const bool witness_pre_ok = mem_->committed(stream + kStreamWrittenLaps, 4);
-        const std::uint32_t witness_pre = witness_pre_ok ? mem_->rd32(stream + kStreamWrittenLaps) : 0u;
-        const bool started = startNestedGuestCall(
-            *cpu_, kSub4B6C30, {quarter}, 0u, "audio:feeder",
-            [self, slot, quarter, stream, cs, inf_ea, fill_start, lag_ok, lag_bytes, lag_q, ev_obj,
-             witness_pre_ok, witness_pre](X86& c, std::uint32_t cb_result, std::uint32_t* out) {
-                if (c.mem->committed(inf_ea, 4)) {
-                    const std::uint32_t cur = c.mem->rd32(inf_ea);
-                    if (cur > 0) c.mem->wr32(inf_ea, cur - 1u);
-                }
-                std::string leave_err;
-                if (!guestLeaveCriticalSectionAs(c, cs, self->feeder_.thread_id, &leave_err)) {
-                    std::fprintf(stderr, "[audio] 离开槽临界区失败：%s\n", leave_err.c_str());
-                }
-                self->restore(self->snapshot_, out);
-                self->in_fill_ = false;
-                ++self->stats_.fills;
-                {
-                    // ★ 写见证的后一次读（design §1.2 事实 3）：fill 已跑完，`[+0x2468]` 的前后
-                    //   比较 = "这一刀到底写没写环"（⛔ 不是内容比对）。`guest_silence` = 收尾时
-                    //   `[+0x2458] >= 2`（引擎"放完 + memset 0"⇒ 记见证 ⇒ 不判陈旧）。
-                    const bool post_ok = c.mem->committed(stream + kStreamWrittenLaps, 4);
-                    const std::uint32_t post = post_ok ? c.mem->rd32(stream + kStreamWrittenLaps) : 0u;
-                    const bool guest_silence = c.mem->committed(stream + kStreamDone, 4) &&
-                                               c.mem->rd32(stream + kStreamDone) >= 2u;
-                    std::lock_guard<std::recursive_mutex> lk(self->mutex_);
-                    // ★ S3（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的缺口 #3）：**D 泵这一刀也要记字节数**。
-                    //   口径与 `feederEvent` 的收尾**逐字同一条**（那里唯一的写法）：
-                    //   `[stream+0x444]`（环长 L）`/ 4`。⛔ 不要另立一条口径 —— 两条喂料路径
-                    //   （feeder 线程 / 主线程 D 泵）的 `fill_bytes` 必须是同一个量，否则
-                    //   "喂了多少字节"在 AOT（恒 D 泵）与解释器（可能 thread 档）之间不可比。
-                    //   ⛔ 读不到就不记（与 feeder 那条的 `committed` 判据一致：⛔ 不把 0 当好读数）。
-                    if (c.mem->committed(stream + kStreamBytes, 4))
-                        self->stats_.fill_bytes += c.mem->rd32(stream + kStreamBytes) / 4u;
-                    self->noteFillWitness(ev_obj, quarter, witness_pre_ok && post_ok, witness_pre, post,
-                                          guest_silence);
-                }
-
-                // ★ 只读诊断计数（dumpSummary 的 `fill_max_ms` / `fill_slow`）：⛔ 不参与判定。
-                const std::uint64_t fill_us = static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
-                                                                         fill_start)
-                        .count());
-                self->stats_.fill_max_us = std::max(self->stats_.fill_max_us, fill_us);
-                if (fill_us > 1000000ull) ++self->stats_.fill_slow;
-                if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
-                    const double ms = static_cast<double>(fill_us) / 1000.0;
-                    // ★ 只读诊断：`[stream+0x2450]`（循环重解码标志）/`+0x2458`/`+0x2470` 是 B1 的
-                    //   判据；**读不到就打 `?`**（⛔ 不打 0）。`bytes=` 与 `late_q` 的分母同一个值。
-                    char f2450[16];
-                    char f2458[16];
-                    char f2470[16];
-                    char bytes_txt[16];
-                    char late_txt[24];
-                    traceDword(c.mem, stream + 0x2450u, f2450, sizeof f2450);
-                    traceDword(c.mem, stream + 0x2458u, f2458, sizeof f2458);
-                    traceDword(c.mem, stream + 0x2470u, f2470, sizeof f2470);
-                    if (lag_ok) {
-                        std::snprintf(bytes_txt, sizeof bytes_txt, "%u", lag_bytes);
-                        std::snprintf(late_txt, sizeof late_txt, "%0.2f", lag_q);
-                    } else {
-                        std::snprintf(bytes_txt, sizeof bytes_txt, "?");
-                        std::snprintf(late_txt, sizeof late_txt, "?");
-                    }
-                    std::fprintf(stderr,
-                                 "[audio] fill slot=%u quarter=%u ret=%u state=%u wrote=%u L=%u "
-                                 "obj=0x%08X bytes=%s 2450=%s 2458=%s 2470=%s late_q=%s %.2f ms\n",
-                                 slot, quarter, cb_result,
-                                 c.mem->committed(stream + 0x2458, 4) ? c.mem->rd32(stream + 0x2458) : 0u,
-                                 c.mem->committed(stream + 0x2468, 4) ? c.mem->rd32(stream + 0x2468) : 0u,
-                                 c.mem->committed(stream + kStreamBytes, 4) ? c.mem->rd32(stream + kStreamBytes) : 0u,
-                                 ev_obj, bytes_txt, f2450, f2458, f2470, late_txt, ms);
-                }
-                return true;
-            },
-            &err, /*callee_ecx=*/stream);
-        if (!started) {
-            in_fill_ = false;
-            if (borrowed_ret_) {
-                if (mem_->committed(borrowed_esp_, 4)) mem_->wr32(borrowed_esp_, saved_ret_);
-                borrowed_ret_ = false;
-            }
-            // 铺帧阶段已经改过线程身份 / last_error；失败时也要还回去（否则主线程带着 0x1008 继续跑）。
-            cpu_->shim.thread_id = snapshot_.thread_id;
-            cpu_->shim.last_error = snapshot_.last_error;
-            if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf);
-            guestLeaveCriticalSectionAs(*cpu_, cs, feeder_.thread_id, nullptr);
-            last_error_ = "音频泵铺 sub_4B6C30 帧失败：" + err;
-            return AudioPump::Error;
-        }
-        return AudioPump::Suspended;
-    }
-    return AudioPump::Idle;
-}
-
-void AudioEngine::afterGuestCall() {
-    if (borrowed_ret_) {
-        if (mem_ && mem_->committed(borrowed_esp_, 4)) mem_->wr32(borrowed_esp_, saved_ret_);
-        borrowed_ret_ = false;
-    }
 }
 
 bool AudioEngine::shouldOwnThread(std::uint32_t start_ea) const {
@@ -1667,7 +1399,6 @@ bool AudioEngine::registerFeeder(std::uint32_t start_ea, std::uint32_t param, st
     feeder_.registered = true;
     feeder_.runnable = false;
     feeder_.exited = false;
-    feeder_.exit_requested = false;
     feeder_.start_ea = start_ea;
     feeder_.sound = param;
     feeder_.thread_id = thread_id;
@@ -1683,12 +1414,17 @@ bool AudioEngine::registerFeeder(std::uint32_t start_ea, std::uint32_t param, st
 void AudioEngine::resumeFeeder() {
     if (!feeder_.registered || feeder_.exited) return;
     feeder_.runnable = true;
-    if (thread_mode_) {
-        startFeederThread();
-        logAt(LogLevel::Info, "喂料泵已启动（host-thread）；等待设备游标越过通知点");
+    // ★ 唯一喂料路线 = 真宿主 feeder 线程。布局是结构前提 ⇒ 没布局就**响亮**不启动
+    //   （`feederFailed()` 会让块边界 / 收口停下并点名，⛔ 不是"继续跑但没声"）。
+    if (!feeder_layout_given_) {
+        setFeederError("音频 feeder 线程没有 GuestLayout（三参 attach）⇒ 无法启动");
+        logAt(LogLevel::Warn,
+              "音频：宿主没有提供 GuestLayout（三参 attach）⇒ feeder 线程无法启动；"
+              "真 feeder 需要 GuestLayout::feeder_teb / feeder_stack_*");
         return;
     }
-    logAt(LogLevel::Info, "喂料泵已启动（runnable）；等待设备游标越过通知点");
+    startFeederThread();
+    logAt(LogLevel::Info, "喂料泵已启动（host-thread）；等待设备游标越过通知点");
 }
 
 bool AudioEngine::isFeederHandle(std::uint32_t handle) const {
@@ -1697,62 +1433,45 @@ bool AudioEngine::isFeederHandle(std::uint32_t handle) const {
 
 void AudioEngine::noteEventSet(std::uint32_t handle) {
     if (!feeder_.registered || handle == 0 || handle != feeder_.quit_event) return;
-    if (thread_mode_) {
-        {
-            std::lock_guard<std::mutex> lk(pending_mutex_);
-            stop_requested_ = true;
-        }
-        feeder_cv_.notify_all();
-        logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ feeder 线程退出", handle);
-        return;
+    {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        stop_requested_ = true;
     }
-    feeder_.exit_requested = true;
-    logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ 喂料泵将在下一个块边界退出", handle);
+    feeder_cv_.notify_all();
+    logAt(LogLevel::Info, "SetEvent(quit=0x%08X) ⇒ feeder 线程退出", handle);
 }
 
 void AudioEngine::joinFeeder() {
     if (!feeder_.registered) return;
-    if (thread_mode_) {
-        // 主线程可能正持有某个槽 CS 停在 run 里；feeder 会永久阻塞在 Enter 上 ⇒ 先放开本线程的锁。
-        // ★ 单令牌：`releaseAll` 会写 guest 可见的 CS 字段 ⇒ 必须在令牌里做。
-        //   `end()` 那条路径主线程**不持**令牌，而 feeder 可能正在 fill 里 ⇒ 先取一次再放。
-        //   若 feeder 正持令牌跑 fill，这里会等它跑完（join 本来也要等）；若它正阻塞在
-        //   `releaseAll` 要放开的那个 CS 上，它已经 Yield 了令牌 ⇒ 这里能立刻取到。
-        {
-            const bool held = guestToken().heldByCurrentThread();
-            if (!held) guestToken().acquire();
-            if (cpu_ && cpu_->cs_table) cpu_->cs_table->releaseAll(*cpu_, cpu_->shim.thread_id);
-            if (!held) guestToken().release();
-        }
-        {
-            std::lock_guard<std::mutex> lk(pending_mutex_);
-            stop_requested_ = true;
-        }
-        feeder_cv_.notify_all();
-        // ★ 单令牌：主线程可能正持有令牌（这是 guest 的 WaitForSingleObject shim 调进来的）。
-        //   不放开就 join ⇒ feeder 永远等不到令牌跑完手上的块 ⇒ 死锁。
-        //   Yield 在"本线程没持令牌"时是无操作（`end()` 里 join 就是这种情形）。
-        GuestToken::YieldGuard yield(guestToken());
-        if (feeder_thread_.joinable()) feeder_thread_.join();
-        feeder_.exited = true;
-        feeder_.runnable = false;
-        feeder_.exit_requested = false;
-        {
-            std::lock_guard<std::mutex> lk(pending_mutex_);
-            pending_.clear();
-        }
-        logAt(LogLevel::Info, "WaitForSingleObject(喂料线程) ⇒ feeder 线程已 join（fills=%llu）",
-              static_cast<unsigned long long>(stats_.fills));
-        return;
+    // 主线程可能正持有某个槽 CS 停在 run 里；feeder 会永久阻塞在 Enter 上 ⇒ 先放开本线程的锁。
+    // ★ 单令牌：`releaseAll` 会写 guest 可见的 CS 字段 ⇒ 必须在令牌里做。
+    //   `end()` 那条路径主线程**不持**令牌，而 feeder 可能正在 fill 里 ⇒ 先取一次再放。
+    //   若 feeder 正持令牌跑 fill，这里会等它跑完（join 本来也要等）；若它正阻塞在
+    //   `releaseAll` 要放开的那个 CS 上，它已经 Yield 了令牌 ⇒ 这里能立刻取到。
+    {
+        const bool held = guestToken().heldByCurrentThread();
+        if (!held) guestToken().acquire();
+        if (cpu_ && cpu_->cs_table) cpu_->cs_table->releaseAll(*cpu_, cpu_->shim.thread_id);
+        if (!held) guestToken().release();
     }
-    if (!feeder_.exited) {
-        feeder_.exited = true;
-        feeder_.runnable = false;
-        feeder_.exit_requested = false;
+    {
+        const std::lock_guard<std::mutex> lk(pending_mutex_);
+        stop_requested_ = true;
+    }
+    feeder_cv_.notify_all();
+    // ★ 单令牌：主线程可能正持有令牌（这是 guest 的 WaitForSingleObject shim 调进来的）。
+    //   不放开就 join ⇒ feeder 永远等不到令牌跑完手上的块 ⇒ 死锁。
+    //   Yield 在"本线程没持令牌"时是无操作（`end()` 里 join 就是这种情形）。
+    GuestToken::YieldGuard yield(guestToken());
+    if (feeder_thread_.joinable()) feeder_thread_.join();
+    feeder_.exited = true;
+    feeder_.runnable = false;
+    {
+        const std::lock_guard<std::mutex> lk(pending_mutex_);
         pending_.clear();
-        logAt(LogLevel::Info, "WaitForSingleObject(喂料线程) ⇒ 泵标记退出（fills=%llu）；此后不再写 guest 环",
-              static_cast<unsigned long long>(stats_.fills));
     }
+    logAt(LogLevel::Info, "WaitForSingleObject(喂料线程) ⇒ feeder 线程已 join（fills=%llu）",
+          static_cast<unsigned long long>(stats_.fills));
 }
 
 void AudioEngine::installFeederShim(std::uint32_t stub_ea, std::uint32_t shim_id) {
@@ -1903,15 +1622,10 @@ void AudioEngine::startFeederThread() {
     if (feeder_thread_.joinable()) return;
     std::string err;
     if (!setupFeederContext(&err)) {
-        // ★ 这条回退**不是**定档判据（定档 = `begin()` 里的 `audioThreadMode()`，唯一一份）：
-        //   `thread_mode_` 已经为真的前提下才可能走到这里 ⇒ 它只是"该起线程但起不来"的**防御网**
-        //   （布局被占 / 栈提交失败 / Decoder 失败）。
-        //   ★ AOT 臂**可以走到这里**（新谓词下 `--audio sdl` + 墙钟 + 布局可用 ⇒ thread 档）：
-        //     回退发生在 `std::thread` 构造**之前**，且 `thread_mode_ = false` 之后才 `stopMixThread()`
-        //     ⇒ "feeder 已在跑而 pump 走 D" 这个状态仍然不可达（见 `pump()` 的锁序注释）。
-        logAt(LogLevel::Warn, "feeder 真线程启动失败（%s）⇒ 退回主线程泵", err.c_str());
-        thread_mode_ = false;
-        stopMixThread();
+        // ★ 没有第二条喂料路线可以退 ⇒ **响亮失败**：置 `feeder_error_`（块边界 / 收口会停并点名），
+        //   ⛔ 不许变成"继续跑但没声"。失败发生在 `std::thread` 构造**之前** ⇒ 没有半启动状态。
+        logAt(LogLevel::Warn, "feeder 真线程启动失败（%s）", err.c_str());
+        setFeederError("音频 feeder 线程启动失败：" + err);
         return;
     }
     stop_requested_ = false;
@@ -2308,8 +2022,7 @@ bool AudioEngine::runFeederGuest(std::string* err) {
         //   ⛔ 不解引用 `audio_cpu_.native_blocks` —— 那指向 Machine 的表（快照来源），
         //      `hits / declines / fallbacks / disabled` 都是非原子裸字段：共享 = 数据竞争，且
         //      feeder 的一次 `Declined` 会 `disabled = true` **永久停用主线程**那一项。
-        //   ⛔ 不 tick 时钟：`VirtualClock::now_100ns_` 非原子（`clock.h`），主线程在同一对象上
-        //      `tick(1)` ⇒ 无锁 RMW = UB；而 real-time 下 `now100ns()` 根本不读它 ⇒ 零收益。
+        //   ⛔ 不碰时钟：唯一档 = 墙钟，`now100ns()` 不随指令数走（没有"tick 时钟"这回事）。
         //   ⛔ 不碰 `window_prof_`（主线程独占的非原子容器）、⛔ 不加 `noteInsn` / trace 打印
         //      （feeder 的块执行路径本来就不做；那是热路径，不是语义差）。
         //   ★ `audio_cpu_.insns += n` 保留：feeder 侧它今天没有读者（只对齐语义），读数看 `guest=`。
@@ -2421,13 +2134,6 @@ AudioEngine::Snapshot AudioEngine::snapshot() const {
     s.underrun_silence_events = stats_.underrun_silence_events;
     s.fill_overlapped = stats_.fill_overlapped;
     s.fill_witnessed = stats_.fill_witnessed;
-    // ★ 喂料路线与两笔"延迟"账（只读；AOT 的 `audio-pump:` 行用它们）：
-    //   thread_mode = 真 feeder 线程 vs 主线程 D 泵；lead_bytes = 预读；dev_sample_frames = 设备缓冲。
-    //   ⛔ 不要把 `dev_sample_frames` 与 `lead_bytes` 相加成一个"总延迟"——一笔是设备取走数据的粒度，
-    //   一笔是提前垫多少内容，它们不是同一维度的量。
-    s.thread_mode = thread_mode_;
-    s.lead_bytes = leadBytesFor(thread_mode_);
-    s.dev_sample_frames = dev_sample_frames_;
     return s;
 }
 

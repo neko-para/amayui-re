@@ -152,7 +152,7 @@ struct WindowReport {
 
 class WindowProfiler {
 public:
-    using Clock = std::chrono::steady_clock;
+    using SteadyClock = std::chrono::steady_clock;
 
     // 宿主侧归因的固定槽位（闭集合：加一项就改这里 + 打印）
     enum HostSlot : int {
@@ -196,8 +196,8 @@ public:
     //   `addOverrideInsns` = native override 直接补进 `cpu_.insns` 的条数（不在任何块里）。
     void addOverrideInsns(std::uint64_t n);
     // dispatcher 迭代边界：`iterationEnd` 把"没被上面任何一段覆盖的墙钟"记进 interp。
-    void iterationBegin(Clock::time_point now);
-    void iterationEnd(Clock::time_point now);
+    void iterationBegin(SteadyClock::time_point now);
+    void iterationEnd(SteadyClock::time_point now);
 
     // ---- guest 影子调用栈（inclusive；窗口外 no-op）----
     //   `frame_esp` = 这一帧**进入时**的 guest esp（= 被调方入口的栈顶，指向返回地址）。
@@ -221,10 +221,10 @@ private:
         std::uint32_t frame_esp = 0;
         // 压帧**之前**的栈顶帧（0 = 没有父帧：顶层进入 / 窗口起点已在函数内部）⇒ 边表的父。
         std::uint32_t parent_key = 0;
-        Clock::time_point start{};
+        SteadyClock::time_point start{};
     };
-    void attributeFrame(const Frame& f, Clock::time_point now);
-    void closeAllFrames(Clock::time_point now, bool count_open);
+    void attributeFrame(const Frame& f, SteadyClock::time_point now);
+    void closeAllFrames(SteadyClock::time_point now, bool count_open);
     void recordEdge(std::uint32_t parent, std::uint32_t child);
     static std::uint64_t edgeKey(std::uint32_t parent, std::uint32_t child) {
         return (static_cast<std::uint64_t>(parent) << 32) | static_cast<std::uint64_t>(child);
@@ -235,8 +235,8 @@ private:
     bool finished_ = false;
 
     std::string label_;
-    Clock::time_point begin_wall_{};
-    Clock::time_point end_wall_{};
+    SteadyClock::time_point begin_wall_{};
+    SteadyClock::time_point end_wall_{};
     std::uint64_t begin_frame_ = 0;
     std::uint64_t begin_insns_ = 0;
     std::uint64_t begin_guest_ms_ = 0;
@@ -252,10 +252,10 @@ private:
     std::uint64_t iterations_ = 0;
 
     // 一次 dispatcher 迭代：守卫用"迭代墙钟 − 已记段"补 interp
-    Clock::time_point iter_start_{};
+    SteadyClock::time_point iter_start_{};
     std::uint64_t iter_attributed_ns_ = 0;
     // 上一个迭代的终点：下一个迭代的起点从它算起（⇒ 迭代之间的间隙也进账，不落进 unattributed）
-    Clock::time_point prev_end_{};
+    SteadyClock::time_point prev_end_{};
     bool prev_end_valid_ = false;
 
     // 快照（全局累计量 → 窗口内增量）

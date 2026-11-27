@@ -21,8 +21,8 @@ namespace {
 
 // 生产路径的宿主墙钟（毫秒；⛔ 不是 guest 虚拟时钟，⛔ 不扣暂停）。
 std::uint64_t steadyNowMs() {
-    using Clock = std::chrono::steady_clock;
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch());
+    using SteadyClock = std::chrono::steady_clock;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::now().time_since_epoch());
     return static_cast<std::uint64_t>(ms.count());
 }
 

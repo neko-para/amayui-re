@@ -14,7 +14,7 @@
 namespace lift {
 namespace {
 
-std::uint64_t nsBetween(WindowProfiler::Clock::time_point a, WindowProfiler::Clock::time_point b) {
+std::uint64_t nsBetween(WindowProfiler::SteadyClock::time_point a, WindowProfiler::SteadyClock::time_point b) {
     if (b <= a) return 0;
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
@@ -35,7 +35,7 @@ const char* WindowProfiler::hostSlotName(int slot) {
 void WindowProfiler::begin(const std::string& label, std::uint64_t frame, std::uint64_t insns,
                            std::uint64_t guest_ms) {
     label_ = label;
-    begin_wall_ = Clock::now();
+    begin_wall_ = SteadyClock::now();
     begin_frame_ = frame;
     begin_insns_ = insns;
     begin_guest_ms_ = guest_ms;
@@ -70,7 +70,7 @@ void WindowProfiler::begin(const std::string& label, std::uint64_t frame, std::u
 
 void WindowProfiler::end(std::uint64_t frame, std::uint64_t insns, std::uint64_t guest_ms) {
     if (!active_) return;
-    end_wall_ = Clock::now();
+    end_wall_ = SteadyClock::now();
     end_frame_ = frame;
     end_insns_ = insns;
     end_guest_ms_ = guest_ms;
@@ -366,7 +366,7 @@ void WindowProfiler::addOverrideInsns(std::uint64_t n) {
     override_insns_ += n;
 }
 
-void WindowProfiler::iterationBegin(Clock::time_point now) {
+void WindowProfiler::iterationBegin(SteadyClock::time_point now) {
     if (!active_) return;
     // ★ 起点优先用**上一个迭代的终点**：两次迭代之间的那几十纳秒（退出守卫 → while 条件 →
     //   循环体开头）也是窗口内的墙钟，丢掉它就会在 `unattributed` 里累积成整毫秒。
@@ -375,7 +375,7 @@ void WindowProfiler::iterationBegin(Clock::time_point now) {
     ++iterations_;
 }
 
-void WindowProfiler::iterationEnd(Clock::time_point now) {
+void WindowProfiler::iterationEnd(SteadyClock::time_point now) {
     if (!active_) return;
     const std::uint64_t elapsed = nsBetween(iter_start_, now);
     // 已记段比整段还长 ⇒ 有重叠（例如 shim 里又嵌套了块）。⛔ 不在这里吞掉：
@@ -387,7 +387,7 @@ void WindowProfiler::iterationEnd(Clock::time_point now) {
     iter_attributed_ns_ = 0;
 }
 
-void WindowProfiler::attributeFrame(const Frame& f, Clock::time_point now) {
+void WindowProfiler::attributeFrame(const Frame& f, SteadyClock::time_point now) {
     if (f.fn_key == 0) return;
     const std::uint64_t dur = nsBetween(f.start, now);
     // ★ 父子边：按帧累计（递归边会把每一层都算进去 ⇒ 自边的 incl 可以超过该函数的 incl；
@@ -406,7 +406,7 @@ void WindowProfiler::attributeFrame(const Frame& f, Clock::time_point now) {
     }
 }
 
-void WindowProfiler::closeAllFrames(Clock::time_point now, bool count_open) {
+void WindowProfiler::closeAllFrames(SteadyClock::time_point now, bool count_open) {
     for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) attributeFrame(*it, now);
     if (count_open) open_at_end_ += stack_.size();
     stack_.clear();
@@ -437,7 +437,7 @@ void WindowProfiler::pushCall(std::uint32_t fn_key, std::uint32_t ret_ea, std::u
     // ★ 父 = 压帧**之前**的栈顶帧。栈空 ⇒ 没有父帧（顶层进入 / 窗口起点已在函数内部），
     //   ⛔ 不猜一个"main"，只记进 `edge_no_parent_`（边表覆盖不到它，汇总里打出来）。
     f.parent_key = stack_.empty() ? 0u : stack_.back().fn_key;
-    f.start = Clock::now();
+    f.start = SteadyClock::now();
     {
         const std::uint32_t depth = static_cast<std::uint32_t>(stack_.size()) + 1u;
         const auto it = max_depth_.find(fn_key);
@@ -460,14 +460,14 @@ void WindowProfiler::popRet(std::uint32_t eip) {
     if (stack_.back().ret_ea == eip) {
         Frame f = stack_.back();
         stack_.pop_back();
-        attributeFrame(f, Clock::now());
+        attributeFrame(f, SteadyClock::now());
         return;
     }
     // ★ 对不上：可能是尾调用（jmp 进另一个函数）或宿主铺的 guest 回调帧。
     //   往下找"返回地址正好是 eip"的帧；找到就把它上面的都收掉（那些是误压的）。
     for (std::size_t i = stack_.size(); i > 0; --i) {
         if (stack_[i - 1].ret_ea != eip) continue;
-        const auto now = Clock::now();
+        const auto now = SteadyClock::now();
         while (stack_.size() > i) {
             Frame f = stack_.back();
             stack_.pop_back();
@@ -491,7 +491,7 @@ void WindowProfiler::popNoReturn(std::uint32_t fn_key) {
     if (stack_.back().fn_key == fn_key) {
         Frame f = stack_.back();
         stack_.pop_back();
-        attributeFrame(f, Clock::now());
+        attributeFrame(f, SteadyClock::now());
         return;
     }
     ++unbalanced_;
@@ -507,7 +507,7 @@ std::size_t WindowProfiler::dropFramesBelowEsp(std::uint32_t target_esp) {
     while (!stack_.empty() && stack_.back().frame_esp != 0 && stack_.back().frame_esp < target_esp) {
         Frame f = stack_.back();
         stack_.pop_back();
-        attributeFrame(f, Clock::now());
+        attributeFrame(f, SteadyClock::now());
         ++dropped;
     }
     return dropped;

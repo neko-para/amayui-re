@@ -1,8 +1,10 @@
-// emulator-lift · 虚拟时钟（确定性判据 A4 的基础）
+// emulator-lift · 时钟（**只有一个档：墙钟**）
 //
-// ★ 默认**虚拟时钟**：`timeGetTime` / `GetTickCount` / `QueryPerformanceCounter` 同源，
-//   每执行一条指令走固定的 100ns 数，⛔ 不许把真时钟进 trace（plan §8.3-1）。
-//   `--real-time` 才接宿主时钟，此时 A4 的逐字节断言**自动跳过并明说**。
+// ★ 口径：guest 可见的时间 = **宿主墙钟**。`timeGetTime` / `GetTickCount` / `QueryPerformanceCounter`
+//   全部读同一个 `steady_clock` 单调读数（见 `now100ns()`），⚠ **不承诺逐帧 / 逐字节确定性**：
+//   同一条命令跑两次的 `insns` / trace 会因宿主调度而不同（2026-11-27 用户裁决：虚拟时钟移除）。
+//   ⛔ 不要加回"虚拟档 / `--real-time` 开关 / 每条指令 +1 tick"那套：它与音频 feeder 线程、
+//      输入时间线、墙钟超时互相打架（原 `VirtualClock` 的双态已整档删除）。
 // ★ 全部 inline：时钟是叶子设施，为一个 getter 建一个 .cpp 不值得。
 #pragma once
 
@@ -11,32 +13,19 @@
 
 namespace lift {
 
-class VirtualClock {
+class Clock {
 public:
-    void setTicksPerInsn(std::uint64_t ticks) { ticks_per_insn_ = ticks ? ticks : 1; }
-    std::uint64_t ticksPerInsn() const { return ticks_per_insn_; }
-    void setRealTime(bool on) {
-        if (real_ == on) return;
-        real_ = on;
-        captureWallBase();
-    }
-    bool realTime() const { return real_; }
-
-    void tick(std::uint64_t insns = 1) { now_100ns_ += ticks_per_insn_ * insns; }
-    void advance100ns(std::uint64_t v) { now_100ns_ += v; }
+    Clock() { captureWallBase(); }
 
     // =================================================================================
     // ★ 控制层暂停 = **冻结区间对 guest 不可见**（`design.md` §3.3）：
     //   冻结期间 guest 读到的 `now100ns()` / `nowMs()` 不前进；解冻后把整段暂停从 raw 里减掉。
     //   ⇒ guest 看到的时间序列与"没暂停"**逐位相同**（暂停前/后的读数也逐位相同）。
-    //
-    // ★ 默认档（从不 freeze）：`paused_100ns_ == 0 && !frozen_` ⇒ `now100ns()` 与改动前**逐位等价**
-    //   （raw - 0）。⛔ 这不是"新增的时钟档位"：虚拟档（`real_ == false`）一个分支都不多。
-    // ★ 本头是**两臂共享面**（解释器 `Machine::clock()` 也用它）⇒ 未冻结路径的行为不许变。
+    // ★ 默认档（从不 freeze）：`paused_100ns_ == 0 && !frozen_` ⇒ `now100ns()` 就是 raw 读数。
     // =================================================================================
-    // 进入冻结。`real_ == false`（虚拟时钟档）⇒ 无操作：那一档的时间由 `tick()` 推进，不读墙钟。
+    // 进入冻结。
     void freeze() {
-        if (!real_ || frozen_) return;
+        if (frozen_) return;
         frozen_ = true;
         freeze_start_100ns_ = rawNow100ns();
     }
@@ -64,7 +53,6 @@ public:
     }
     // 100 ns 单位（与 Win32 的 FILETIME 同源）
     std::uint64_t now100ns() const {
-        if (!real_) return now_100ns_;
         const std::uint64_t raw = rawNow100ns();
         if (!frozen_) return raw - paused_100ns_;
         // 冻结中：时间停在 freeze_start_ - paused_（再取 raw 也不会前进）。
@@ -72,7 +60,7 @@ public:
     }
     // 毫秒（timeGetTime / GetTickCount）
     std::uint32_t nowMs() const { return static_cast<std::uint32_t>(now100ns() / 10000ull); }
-    // QPC：仿真频率固定 ⇒ 可复现
+    // QPC：仿真频率固定 3,579,545 Hz（Win32 常见值；不是宿主 TSC）。
     std::int64_t qpc() const {
         const std::uint64_t t = now100ns();
         return static_cast<std::int64_t>((t * 3579545ull) / 10000000ull);
@@ -81,20 +69,17 @@ public:
 
     std::uint64_t epoch100ns() const { return epoch_100ns_; }  // FILETIME 起点（1601）之后的基础偏移
     void setEpoch100ns(std::uint64_t v) { epoch_100ns_ = v; }
-    void reset() { now_100ns_ = 0; }
 
     // =================================================================================
     // ★ 墙钟 vs uptime（BUG-30）：`now100ns()` / `nowMs()` / `qpc()` 是**单调 uptime**
-    //   （零点 = 宿主启动，虚拟档 = 从 0 起算的虚拟时间），⛔ 不当 epoch 展开。
+    //   （零点 = 宿主启动），⛔ 不当 epoch 展开。
     //   墙钟是**另一条读数**，单位与 `now100ns()` 相同（100 ns），起点 **1970-01-01 00:00:00Z**：
     //
     //       wall100ns() = wall_base_100ns_ + now100ns()
     //
-    //   · `real_ == true`：`wall_base_100ns_` 在 `setRealTime(true)` 那一刻捕获为
+    //   · `wall_base_100ns_` 在构造 / 换时钟来源那一刻捕获为
     //     `system_clock::now() - rawNow100ns()`（= "单调时钟零点那一刻的墙钟"）
     //     ⇒ 之后只随**单调增量**走：宿主调时（NTP 回拨 / 手动改钟）既不会让墙钟倒退、也不会让它跳。
-    //   · 虚拟档：`wall_base_100ns_` 缺省 **0** ⇒ 墙钟 = 1970-01-01 + 虚拟 now
-    //     （与 BUG-30 修前 `GetSystemTime` 的展开**逐位相同**，纯档行为不变）。
     //   ★ 冻结语义与 `now100ns()` **同源**：暂停区间对墙钟同样不可见（存档时间戳不因暂停漂）。
     //   ★ `system_clock` 的起点按 **Unix epoch（1970）** 处理（MSVC / libstdc++ / libc++ 实测如此；
     //     这是本读数的口径，不是标准保证）。
@@ -110,7 +95,7 @@ public:
     }
 
     // ★ 测试缝：注入"原始墙钟读数"（100ns）。nullptr = `steady_clock`（生产路径）。
-    //   ⛔ 只给 CTest 用：它只影响 `real_ == true` 档，且不改任何判据（冻结语义的判据靠它才不需要真睡）。
+    //   ⛔ 只给 CTest 用：用例靠它把时间做成可控读数（不必真睡），不改任何生产判据。
     using RawNowFn = std::uint64_t (*)();
     void setRawNowForTest(RawNowFn fn) {
         raw_now_fn_ = fn;
@@ -121,7 +106,7 @@ public:
     }
 
 private:
-    // 原始墙钟（100 ns）：未注入 ⇒ `steady_clock`（与改动前**同一个**取时表达式）。
+    // 原始墙钟（100 ns）：未注入 ⇒ `steady_clock`。
     std::uint64_t rawNow100ns() const {
         if (raw_now_fn_ != nullptr) return raw_now_fn_();
         const auto now = std::chrono::steady_clock::now().time_since_epoch();
@@ -137,23 +122,19 @@ private:
     }
 
     // 捕获墙钟 base = "单调零点那一刻的墙钟"（1970 起算）。
-    // 虚拟档 / 测试已注入 ⇒ 清零 / 保留注入值；⛔ 不在每次读数里取 `system_clock`（那会让墙钟随宿主调时跳）。
+    // 测试已注入 ⇒ 保留注入值；⛔ 不在每次读数里取 `system_clock`（那会让墙钟随宿主调时跳）。
     void captureWallBase() {
         if (wall_base_pinned_) return;
         wall_base_100ns_ = 0;
-        if (!real_) return;
         const std::int64_t sys = systemNow100ns();
         const std::int64_t raw = static_cast<std::int64_t>(rawNow100ns());
         wall_base_100ns_ = sys > raw ? static_cast<std::uint64_t>(sys - raw) : 0;
     }
 
-    std::uint64_t ticks_per_insn_ = 1;
-    std::uint64_t now_100ns_ = 0;
     std::uint64_t epoch_100ns_ = 0;
     // 墙钟 base（1970 起算的 100 ns；见 `wall100ns()` 的口径）。
     std::uint64_t wall_base_100ns_ = 0;
     bool wall_base_pinned_ = false;  // 测试注入 ⇒ 不再由 system_clock 捕获
-    bool real_ = false;
     // 控制层暂停（`freeze()` / `unfreeze()`）：冻结区间对 guest 不可见。
     bool frozen_ = false;
     std::uint64_t freeze_start_100ns_ = 0;  // 本次冻结开始时的 raw 读数

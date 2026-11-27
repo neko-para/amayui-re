@@ -99,7 +99,7 @@
 
 namespace {
 
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 constexpr std::uint32_t kCodeEa = 0x00401000u;
 constexpr const char* kDiagEnv = "LIFT_TOKEN_DIAG_SKIP_LOCK";
@@ -226,12 +226,12 @@ double measureLockUnlockNs() {
     samples.reserve(kMicroSamples);
     for (int s = 0; s < kMicroSamples; ++s) {
         std::mutex m;  // 每个样本一把新锁：不跨样本复用一个可能进过慢路径的锁
-        const auto t0 = Clock::now();
+        const auto t0 = SteadyClock::now();
         for (int i = 0; i < kMicroIters; ++i) {
             m.lock();
             m.unlock();
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         samples.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count() /
                           static_cast<double>(kMicroIters));
     }
@@ -244,11 +244,11 @@ double measureSteadyClockNs() {
     samples.reserve(kMicroSamples);
     for (int s = 0; s < kMicroSamples; ++s) {
         std::uint64_t acc = 0;
-        const auto t0 = Clock::now();
+        const auto t0 = SteadyClock::now();
         for (int i = 0; i < kMicroIters; ++i) {
-            acc += static_cast<std::uint64_t>(Clock::now().time_since_epoch().count());
+            acc += static_cast<std::uint64_t>(SteadyClock::now().time_since_epoch().count());
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         g_sink = g_sink + acc;
         samples.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count() /
                           static_cast<double>(kMicroIters));
@@ -262,12 +262,12 @@ double measureTokenRoundTripNs() {
     std::vector<double> samples;
     samples.reserve(kMicroSamples);
     for (int s = 0; s < kMicroSamples; ++s) {
-        const auto t0 = Clock::now();
+        const auto t0 = SteadyClock::now();
         for (int i = 0; i < kMicroIters; ++i) {
             tok.acquire();
             tok.release();
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         samples.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count() /
                           static_cast<double>(kMicroIters));
     }
@@ -352,9 +352,9 @@ ScanCells measureCells(const std::vector<std::uint32_t>& ks) {
                     const std::uint64_t want = base_insns + insns_done + slice_insns;
                     lift::RunOptions opt;
                     opt.max_insns = want;  // 精确停在块边界
-                    const auto t0 = Clock::now();
+                    const auto t0 = SteadyClock::now();
                     const lift::RunResult r = m.run(opt);
-                    const auto t1 = Clock::now();
+                    const auto t1 = SteadyClock::now();
                     if (r.reason != lift::StopReason::MaxInsns || r.insns != want) {
                         std::fprintf(stderr,
                                      "dispatch-tax: k=%u 的自造循环没有精确跑完"

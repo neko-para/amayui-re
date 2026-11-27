@@ -13,7 +13,8 @@
 //     are case sensitive"）；`Local\` / `Global\` 前缀按文档的两种写法剥掉（本模拟器只有一个会话）。
 //   · **阻塞不实现**（单线程 guest ⇒ 真阻塞就是死锁）：未 signaled 的等待一律返回
 //     `WAIT_TIMEOUT`(258)，**并打一行** —— 这是 SCOPE §3 允许的偏差形态，⛔ 不许静默。
-//   · `Sleep` / `SleepEx` **不睡**：只把 `cpu.clock` 前进 `ms*10000`（100 ns 单位），保证确定性。
+//   · `Sleep` / `SleepEx` **不推进 guest 时间**（唯一档 = 墙钟；没有虚拟时钟可推），只
+//     `std::this_thread::yield()` 一次 —— 与"单线程 guest 真阻塞就是死锁"同一条理由。
 //   · **SList 是 guest 侧结构**：`SLIST_HEADER` 在 x86 上是 **8 字节**（`{Next(4), Depth(2),
 //     CpuId/Sequence(2)}`，见 winnt.h 的 `_X86_` 分支），`SLIST_ENTRY` 是 **4 字节**（只有 `Next`）。
 //     ⚠ 任务书写的"16 字节节点 / Alignment+Depth"是 **x64** 布局；本 guest 是 32 位 PE ⇒
@@ -36,7 +37,8 @@
 //      `bWaitAll=TRUE` 且全部 signaled ⇒ 返回 `WAIT_OBJECT_0` 并逐个消费。
 //   5. **`PulseEvent` 不做"唤醒等待者再复位"**：先把 signaled 置真、**立刻**置假（单线程无等待者
 //      ⇒ 这次脉冲等于丢失，与真机对空列表的行为一致）。
-//   6. **`Sleep(INFINITE)` / `SleepEx(INFINITE)`** 不阻塞：按 1 秒推进虚拟时钟并打印一行。
+//   6. **`Sleep(INFINITE)` / `SleepEx(INFINITE)`** 立即返回（按 1 秒记）并打印一行（真机永不返回；
+//      guest 业务单线程，真挂死会让整跑没有收口）。
 //   7. **alertable 等待（`*Ex` / `SleepEx`）永不返回 `WAIT_IO_COMPLETION`(0xC0)**：本模拟器没有
 //      APC 队列、没有 I/O 完成回调、没有第二个线程 ⇒ 唯一可能的返回值是 `WAIT_OBJECT_0` /
 //      `WAIT_TIMEOUT` / `WAIT_FAILED`。`bAlertable` 被接受但只有"提示一次"的效果（文档口径：
@@ -63,8 +65,10 @@
 //      `FreeLibraryAndExitThread` / `CreateTimerQueue*` / `DeleteTimerQueueTimer` 保持
 //      `addUnimplemented`（执行到就响亮失败）。伪线程不执行 start routine ⇒ 这些通常不会被触发；
 //      真触发 = 有 guest 代码依赖线程体，需人工检查后再补。
+#include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "runtime/audio.h"
@@ -906,17 +910,24 @@ void shimSignalObjectAndWait(X86& cpu, ShimCall& call) {
     call.result = waitOne(cpu, hw, timeout, "SignalObjectAndWait");
 }
 
-// ---- SleepEx / SwitchToThread ----
+// ---- Sleep / SleepEx（墙钟：**不推进 guest 时间**，只让出一次 CPU）----
+//   ★ 唯一档 = 墙钟 ⇒ 没有"把 guest 时间推 ms 毫秒"这回事（旧虚拟时钟的语义已删除）。
+//     真正的等 = 宿主墙钟自己往前走；这里只 `yield` 一次，避免单线程 guest 死循环占满 CPU。
+//   ★ Sleep 期间不持令牌（yield 不碰令牌）：音频 feeder / mixer 线程照常跑。
+void sleepHostMs(std::uint32_t ms) {
+    (void)ms;
+    std::this_thread::yield();
+}
+
 void shimSleepEx(X86& cpu, ShimCall& call) {
-    if (!cpu.clock) shimAbort("kernel32", "SleepEx", "cpu.clock 为空（Machine 没装配虚拟时钟）");
     std::uint32_t ms = call.u32(0);
     noteAlertable(cpu, "SleepEx", call.u32(1) != 0);
     if (ms == kInfinite) {
-        // 偏差 6：真机永不返回；这里按 1 秒推进并留一行
-        shimLog("kernel32", "SleepEx", "SleepEx(INFINITE) 不阻塞（单线程 guest）—— 按 1 秒推进虚拟时钟");
+        // 偏差 6：真机永不返回；这里按 1 秒后返回并留一行（没有虚拟时钟可推）。
+        shimLog("kernel32", "SleepEx", "SleepEx(INFINITE) 按 1 秒后返回（单线程 guest）");
         ms = 1000;
     }
-    cpu.clock->advance100ns(static_cast<std::uint64_t>(ms) * 10000ull);
+    sleepHostMs(ms);
     call.result = 0;  // 时间到 ⇒ 0（永不 WAIT_IO_COMPLETION，偏差 7）
 }
 
@@ -1286,16 +1297,16 @@ void shimGetProcessAffinityMask(X86& cpu, ShimCall& call) {
     call.result = 1;
 }
 
-// ---- Sleep（不睡，只推虚拟时钟）----
+// ---- Sleep（墙钟：不推进 guest 时间，只 yield）----
 void shimSleep(X86& cpu, ShimCall& call) {
-    if (!cpu.clock) shimAbort("kernel32", "Sleep", "cpu.clock 为空（Machine 没装配虚拟时钟）");
+    (void)cpu;
     std::uint32_t ms = call.u32(0);
     if (ms == kInfinite) {
-        // 偏差 6：真机永不返回；这里按 1 秒推进并留一行
-        shimLog("kernel32", "Sleep", "Sleep(INFINITE) 不阻塞（单线程 guest）—— 按 1 秒推进虚拟时钟");
+        // 偏差 6：真机永不返回；这里按 1 秒后返回并留一行（没有虚拟时钟可推）。
+        shimLog("kernel32", "Sleep", "Sleep(INFINITE) 按 1 秒后返回（单线程 guest）");
         ms = 1000;
     }
-    cpu.clock->advance100ns(static_cast<std::uint64_t>(ms) * 10000ull);
+    sleepHostMs(ms);
     call.result = 0;
 }
 

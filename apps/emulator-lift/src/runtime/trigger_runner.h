@@ -21,7 +21,7 @@
 // ★ 钟由**参数**传入（`atPoint(..., now_ms, ...)`）：runner 不持第二把钟 ⇒ 驱动方把"这一拍的
 //   墙钟读数"给一次，`AfterDelay` / timeout / per-arm 重置全用同一个数。
 //   `setClockForTest` / `setNsClockForTest` 只给 `begin()`（它没有 now_ms 参数）与 budget 用。
-//   ⛔ 不接 `VirtualClock` / `attachClock` / `pausedTotalMs()`（那是配方执行器的钟，**扣暂停**；
+//   ⛔ 不接 `Clock` / `attachClock` / `pausedTotalMs()`（那是配方执行器的钟，**扣暂停**；
 //   这里的墙钟**不扣**，两者语义相反 —— 见合同 §4.2 440–441 与 D3）。
 //
 // ★ 预算：**2 ms 只罩用户 JS 本体**（判据在 `PluginHost::runCallback`，靠 `CallbackDiag::js_cpu_ns`

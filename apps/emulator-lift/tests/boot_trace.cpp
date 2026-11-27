@@ -1,14 +1,10 @@
-// emulator-lift · boot trace（A4；`LIFT_STRESS` 档：跑真游戏，判据 = 确定性读数）
+// emulator-lift · boot trace（`LIFT_STRESS` 档：跑真游戏，判据 = 到达 L2 + 输入清单可比）
 //
-// ★ 判据（plan §5 A4）：跑到 L2（`--until ea 0x4BA890`）成功；**同一条命令跑两次，trace 逐字节相同**。
-//   这里不打印整条 trace（30 万条会淹掉输出），而是把"可复现"折成三个机械可比的量：
-//     ① 停下来的原因与 eip；
-//     ② 执行过的指令数；
-//     ③ 最终寄存器 / 标志 / x87 元信息 + 已提交内存摘要的哈希。
-//   三个量两次完全相同 ⇒ 虚拟时钟与"宿主侧不许引入随机源"（plan §8.3）这两条成立。
-// ★ 2026-11-13 瘦身：4 次 run → 2 次（两次都带 shim trace，同一对 run 上比 hash **与** trace 字节）；
-//   删掉"安装树已知写入点"探针 —— 它自己承认近乎恒真（boot_trace 没给 VFS 设 `--game-dir`），
-//   等 boot 真接上 VFS 根时再写。
+// ★ 判据（plan §5 A4 的原判据已随虚拟时钟一起移除，2026-11-27）：跑到 L2（`--until ea 0x4BA890`）
+//   成功；两次运行的**输入清单**（exe 路径串 / guest 命令行 / 环境块）相同。
+//   ⚠ 时钟 = **墙钟**（唯一档）⇒ `insns` / trace 字节 / 状态 hash **不承诺跨次相同**，⛔ 不作判据。
+//   （旧判据"同一条命令跑两次 trace 逐字节相同"依赖虚拟时钟，已删除。）
+// ★ 2026-11-13 瘦身：4 次 run → 2 次（两次都带 shim trace）；trace 文件仍写出，只作诊断。
 // ★ 如果没到 L2，本测试**红**并打印卡在哪个 EA —— 那是诚实的结果，不是"跳过"。
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +39,7 @@ struct Outcome {
     std::uint32_t ea = 0;
     std::uint64_t insns = 0;
     std::uint64_t hash = 0;
-    std::uint64_t inputs_hash = 0;  // A4 输入清单的指纹（与"执行结果"分开记）
-    bool real_time = false;
+    std::uint64_t inputs_hash = 0;  // 输入清单的指纹（与"执行结果"分开记）
     std::string detail;
     bool ok = false;
 };
@@ -90,10 +85,8 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
     h = fnv(h, &heap_used, sizeof(heap_used));
     h = fnv(h, &heap_peak, sizeof(heap_peak));
     out.hash = h;
-    // ★ A4 的输入清单（plan §5 A4）：exe 路径串 / guest 命令行 / 环境块 / 时钟起点。
-    //   "同一条命令跑两次逐字节相同"只对**固定输入**成立 ⇒ 输入清单自己也要可比。
+    // ★ 输入清单（plan §5 A4）：只覆盖输入，**不含**墙钟读数 ⇒ 两次运行可比。
     out.inputs_hash = m.traceInputsHash();
-    out.real_time = m.clock().realTime();
     out.ok = true;
     return out;
 }
@@ -158,17 +151,10 @@ int main() {
     std::printf("run2: reason=%s eip=%08X insns=%llu hash=%016llX inputs=%016llX\n", lift::stopReasonName(b.reason),
                 b.ea, (unsigned long long)b.insns, (unsigned long long)b.hash, (unsigned long long)b.inputs_hash);
 
-    // ★ A4 输入清单：两次运行必须看到同一组输入（`--exe` 的路径串 / 命令行 / 环境块 / 时钟起点）
+    // ★ 输入清单：两次运行必须看到同一组输入（`--exe` 的路径串 / 命令行 / 环境块）。
+    //   ⚠ 时钟 = 墙钟 ⇒ 执行结果（insns / trace 字节 / hash）**不承诺**两次相同，不在这里断言。
     g_current_case = "same-inputs";
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(a.inputs_hash), static_cast<std::int64_t>(b.inputs_hash));
-    LIFT_CHECK(!a.real_time);  // 默认必须是虚拟时钟（真时钟 ⇒ 逐字节断言自动跳过）
-
-    // ① 可复现（这一条与环境无关，永远该绿）
-    g_current_case = "determinism";
-    LIFT_CHECK(a.reason == b.reason);
-    LIFT_CHECK_EQ_U32(a.ea, b.ea);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(a.insns), static_cast<std::int64_t>(b.insns));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(a.hash), static_cast<std::int64_t>(b.hash));
 
     // ② 到达 L2
     g_current_case = "reaches-L2";
@@ -181,23 +167,16 @@ int main() {
     LIFT_CHECK(a.reason == lift::StopReason::UntilEa);
     LIFT_CHECK_EQ_U32(a.ea, kWinMain);
 
-    // ③ A4 的**逐字节**判据：同一次初始化的 shim trace 写两份文件后逐字节比较。
-    //   旧实现只哈希寄存器 / FPU 元信息 / heap 计数 —— trace 本身一条都没比过（M1a 审计 T2）。
-    g_current_case = "trace-bytes-identical";
+    // ③ trace 确实产出了内容（⛔ 不断言两次相同：墙钟档下 trace 字节不作判据）。
+    g_current_case = "trace-produced";
     {
         std::ifstream in_a(ta, std::ios::binary);
         std::ifstream in_b(tb, std::ios::binary);
         const std::string sa((std::istreambuf_iterator<char>(in_a)), std::istreambuf_iterator<char>());
         const std::string sb((std::istreambuf_iterator<char>(in_b)), std::istreambuf_iterator<char>());
         std::printf("trace: run1=%zu bytes run2=%zu bytes\n", sa.size(), sb.size());
-        LIFT_CHECK(!sa.empty());  // 空 trace 不能因为"两边都空"而假绿
-        if (sa != sb) {
-            std::size_t i = 0;
-            while (i < sa.size() && i < sb.size() && sa[i] == sb[i]) ++i;
-            std::fprintf(stderr, "A4 红：trace 第 %zu 字节不同（a=%zu 字节，b=%zu 字节）\n", i, sa.size(),
-                         sb.size());
-        }
-        LIFT_CHECK(sa == sb);
+        LIFT_CHECK(!sa.empty());  // 空 trace 不能算"跑过"
+        LIFT_CHECK(!sb.empty());
     }
     std::remove(utf8(ta).c_str());
     std::remove(utf8(tb).c_str());

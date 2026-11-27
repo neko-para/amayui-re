@@ -32,7 +32,7 @@
 //   · 队列深度用 `queue_.depth()`（含两级）而**不是** `readyDepth()`：② 之前 staged 可以非空，
 //     用 ready 深度会让"刚提交、还没提升"的那一拍早退 ⇒ 那条 intent 永远等不到下一拍。
 //
-// ★ **钟 = 宿主墙钟**（`pluginNowNs() / 1e6`），⛔ **不接** `VirtualClock` / `attachClock` /
+// ★ **钟 = 宿主墙钟**（`pluginNowNs() / 1e6`），⛔ **不接** `Clock` / `attachClock` /
 //   `pausedTotalMs()`：这里是墙钟，扣暂停是配方执行器（`InputPlan`）的口径 —— 两者**故意不同**
 //   （与 `TriggerRunner::atPoint` 收到的那个 `now_ms` 是同一个数）。
 //

@@ -2734,17 +2734,6 @@ add_executable(lift-aot-audio-flags tests/aot_audio_flags.cpp)
 target_link_libraries(lift-aot-audio-flags PRIVATE emulator-lift-runtime)
 add_test(NAME aot-audio-flags COMMAND lift-aot-audio-flags)
 
-# ---- S3（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的 ③）：**泵闸门**的纯判据 ----------------
-# ★ 判据 = `runtime/audio_pump_gate.h`（纯头，只 `<cstdint>`）：off 档 20 万块边界一次都不 due
-#   （= `pump()` 调用次数 0）、节流恰好每 kCheckStride 一次、嵌套 guest 期间不 due 且解除后立刻补、
-#   thread 档不 due。红了意味着什么见 `tests/aot_audio_pump.cpp` 的文件头。
-# ★ 为什么单独一条 CTest 而不是塞进 `aot-audio-flags`：它是**另一条判据线**（热路径的调用许可 +
-#   节流 + 记账），红了要先看"闸门"而不是"参数面"；且变异条目要能点名它。
-# ★ 顶层无条件注册 ⇒ **pure** 档（§12.4 判据 = 注册位置）：不碰设备 / 资产 / guest 内存。
-add_executable(lift-aot-audio-pump tests/aot_audio_pump.cpp)
-target_link_libraries(lift-aot-audio-pump PRIVATE emulator-lift-runtime)
-add_test(NAME aot-audio-pump COMMAND lift-aot-audio-pump)
-
 # ---- `--sound` / `--audio` / `--audio-dump` 的**接线**（洞 4/5/6/7 的机械判据）-------------
 # ★ 判据 = **引擎自己打的读数**（`audio     : … muted=0|1`）+ WAV 的结构，⛔ 不是 `kAotSoundNotice`
 #   那句文案（旧 `cli-aot-flags` 的 `sound-accepted-with-once-notice` 只断言自己的文案 ⇒ 自证式）。

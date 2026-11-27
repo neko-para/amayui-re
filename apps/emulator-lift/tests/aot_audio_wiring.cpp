@@ -1,8 +1,8 @@
 // emulator-lift · **AOT 臂**的 `--sound` / `--audio` / `--audio-dump` **接线**（CLI 级 + 真子进程 + 真 run）
 //
 // 判据（红了意味着什么）—— 全部读**引擎自己打出来的读数**，⛔ 无一读"手写的说明文本"：
-//   ① 只给 `--sound`（不给 `--audio` / `--audio-dump`）⇒ 收口摘要里**没有** `audio     :` 一行，
-//      也没有 `audio-pump:` 一行（档位 = off ⇒ `AudioEngine::enabled()` 为假 ⇒ 那两行不打）。
+//   ① 只给 `--sound`（不给 `--audio` / `--audio-dump`）⇒ 收口摘要里**没有** `audio     :` 一行
+//      （档位 = off ⇒ `AudioEngine::enabled()` 为假）。
 //      红了 ⇒ 音频读到了一条**不存在**的路径（洞 4：旧通告曾写"收口时 stdout 的 audio 一行"，
 //      而只给 `--sound` 时那一行不存在；★ 2026-11-27 起那条运行期通告已删，口径只在 `--help`）。
 //   ② `--sound --audio-dump <path>` ⇒ 有那一行，且 `muted=0`。★ `muted=` 是
@@ -22,8 +22,7 @@
 //        abort 的 run 连摘要都没有，会先在①那条前提上红。
 //   ⑤ **`--audio sdl` 打不开设备 ⇒ 没有音频输出**（CLI 级）：用父进程注入
 //      `SDL_AUDIODRIVER=<不存在的驱动>` 让子进程的 `openSdl()` 必败 ⇒ 摘要仍是
-//      `mode=off device=none muted=1`（⛔ 不是 `fallback`、⛔ 不是一行都没有），且 `audio-pump:`
-//      的 `calls=0 fills=0`。
+//      `mode=off device=none muted=1 fills=0`（⛔ 不是 `fallback`、⛔ 不是一行都没有）。
 //      ★ 判据只读引擎自己打的那一行；⛔ 不读说明文本。
 //
 // ★ 为什么必须**真 run**（而不是纯 `AudioEngine` 夹具）：`--sound` → `AotHost::configureAudio()`
@@ -79,7 +78,7 @@ std::string firstLineStartingWith(const std::string& text, const std::string& pr
     return {};
 }
 
-/** `audio     :` 那一行（**收口摘要**；⚠ `audio-pump:` 也是 `audio` 开头 ⇒ 必须再认 `mode=`）。 */
+/** `audio     :` 那一行（**收口摘要**；门 = `audio` 开头 + 含 `mode=`）。 */
 std::string audioSummaryLine(const std::string& out) {
     std::size_t pos = 0;
     while (pos <= out.size()) {
@@ -101,8 +100,8 @@ std::uint32_t readLe32(const std::string& b, std::size_t off) {    if (b.size() 
 
 // 一次 run 的公共 argv（`--exe` 由调用方拼在前面；`--appdata` 每次一个全新空目录）。
 // ★ `--max-frames 5`：判据只要"跑到收口"，5 帧足够（本机 1–2 s）。
-// ★ `--log-level info`：`audio     :` / `audio-pump:` 两行是**开发者读数**，默认档（warn）不打
-//   （2026-11-27 用户判据）⇒ 要读它们必须显式开 info。⛔ 判据本身没放宽：仍按原文读这两行。
+// ★ `--log-level info`：`audio     :` 是**开发者读数**，默认档（warn）不打
+//   （2026-11-27 用户判据）⇒ 要读它必须显式开 info。⛔ 判据本身没放宽：仍按原文读这一行。
 const std::vector<std::string> kCommonArgs = {"--max-frames", "5",       "--skip-logo", "--present",
                                               "headless",     "--time-limit", "60",
                                               "--log-level",  "info"};
@@ -180,14 +179,11 @@ int main(int argc, char** argv) {
         }
 
         const std::string audio = audioSummaryLine(r.out);
-        const std::string pump = firstLineStartingWith(r.out, "audio-pump:");
         if (!k.want_audio_line) {
-            // ①（洞 4）：只给 `--sound` ⇒ 档位 off ⇒ 两行都**不存在**。
+            // ①（洞 4）：只给 `--sound` ⇒ 档位 off ⇒ 那行**不存在**。
             if (!audio.empty())
                 lift_test::failf(__FILE__, __LINE__,
                                  "只给 --sound 时 stdout 不该有 `audio     :` 一行（档位是 off）");
-            if (!pump.empty())
-                lift_test::failf(__FILE__, __LINE__, "只给 --sound 时 stdout 不该有 `audio-pump:` 一行");
             continue;
         }
         LIFT_CHECK(!audio.empty());
@@ -209,9 +205,9 @@ int main(int argc, char** argv) {
             if (audio.find("fallback") != std::string::npos)
                 lift_test::failf(__FILE__, __LINE__,
                                  "`%s` 不该再出现 `fallback`（那是「还有 D 泵在跑」的旧含义）", k.name);
-            if (pump.find("fills=0") == std::string::npos)
+            if (audio.find("fills=0") == std::string::npos)
                 lift_test::failf(__FILE__, __LINE__, "`%s` 没有输出时 fills 必须是 0 ⇒ 拿到的：%s", k.name,
-                                 pump.c_str());
+                                 audio.c_str());
         }
         if (!k.dump_path.empty()) {
             // ④（洞 5/7）：WAV 在场 + 头自洽（正常收口由上面的 `stop      :` 保证）。

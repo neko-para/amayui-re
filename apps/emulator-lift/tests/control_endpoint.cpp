@@ -363,7 +363,7 @@ std::string readWholeFile(const std::string& path) {
 // =====================================================================================
 // 注入时钟（判据 6 的确定性读数：暂停 2 s 不需要真睡）
 // =====================================================================================
-std::uint64_t g_raw_100ns = 0;   // `VirtualClock` 的原始墙钟读数
+std::uint64_t g_raw_100ns = 0;   // `Clock` 的原始墙钟读数
 std::uint64_t g_plan_ms = 0;     // `InputPlan` 的宿主单调毫秒
 std::uint64_t fakeRawNow() { return g_raw_100ns; }
 std::uint64_t fakePlanNow() { return g_plan_ms; }
@@ -373,8 +373,7 @@ void caseClockFreezeAndPlanGuard() {
     ::lift_test::g_current_case = "clock-freeze+plan-guard";
 
     // ---- ① guest 时钟：冻结区间对 guest 不可见 ----
-    lift::VirtualClock clk;
-    clk.setRealTime(true);
+    lift::Clock clk;
     clk.setRawNowForTest(&fakeRawNow);
     g_raw_100ns = 10'000'000;  // 随便一个起点（100ns 单位 = 1 s）
     const std::uint32_t before_ms = clk.nowMs();
@@ -690,8 +689,7 @@ void caseEndpointSurface() {
     bool stop_flag = false;
     std::thread gate([&] {
         lift::WindowManager wm;   // 主线程独占对象（本线程 = 汇点线程）
-        lift::VirtualClock clk;
-        clk.setRealTime(true);
+        lift::Clock clk;
         lift::Control::Context ctx;
         ctx.clock = &clk;
         ctx.windows = &wm;
@@ -971,8 +969,7 @@ void caseScreenshotSemantics() {
     bool stop_flag = false;
     std::thread gate([&] {
         lift::WindowManager wm;
-        lift::VirtualClock clk;
-        clk.setRealTime(true);
+        lift::Clock clk;
         lift::Control::Context ctx;
         ctx.clock = &clk;
         ctx.windows = &wm;
@@ -1154,8 +1151,7 @@ void caseClickDelivery() {
     std::thread gate([&] {
         lift::WindowManager wm;
         lift::InputPlan plan;
-        lift::VirtualClock clk;
-        clk.setRealTime(true);
+        lift::Clock clk;
         std::string lerr;
         // 未满足的门：没有 guest 内存 ⇒ 恒不成立（`pending` 恒 1、`next_` 恒 0）。
         const bool loaded = plan.loadText("await script NOSUCHSCRIPT timeout 35000\n", "fake-plan", &lerr);
@@ -1656,8 +1652,7 @@ void caseResumeArmsHostHook() {
     // 主线程 = 本用例的 gate 线程（与 AOT 的块边界汇点同形：`pending()` / `watching()` ⇒ `serve()`）。
     std::thread gate([&] {
         lift::WindowManager wm;
-        lift::VirtualClock clk;
-        clk.setRealTime(true);  // `resume --for-ms` 的谓词走 guest 时钟 ⇒ 要它真的走
+        lift::Clock clk;
         lift::Control::Context ctx;
         ctx.clock = &clk;
         ctx.windows = &wm;
@@ -1766,8 +1761,7 @@ void caseTimeouts() {
         bool stop_flag = false;
         std::thread gate([&] {
             lift::WindowManager wm;
-            lift::VirtualClock clk;
-            clk.setRealTime(true);
+            lift::Clock clk;
             lift::Control::Context ctx;
             ctx.clock = &clk;
             ctx.windows = &wm;
@@ -1836,8 +1830,7 @@ void caseTimeouts() {
         bool stop_flag = false;
         std::thread gate([&] {
             lift::WindowManager wm;
-            lift::VirtualClock clk;
-            clk.setRealTime(true);
+            lift::Clock clk;
             lift::Control::Context ctx;
             ctx.clock = &clk;
             ctx.windows = &wm;

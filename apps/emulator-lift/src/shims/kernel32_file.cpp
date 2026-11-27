@@ -363,7 +363,7 @@ std::uint32_t errnoToWin32(int e) {
 // =======================================================================================
 namespace vfstime {
 
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 bool on() {
     static const bool v = std::getenv("LIFT_VFS_TIMING") != nullptr;
@@ -372,7 +372,7 @@ bool on() {
 
 std::uint64_t nowNs() {
     return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+        std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now().time_since_epoch()).count());
 }
 
 // 一次打开的段（ns）；`total` = 整次 shim 的墙钟（含没单独列出的部分）。

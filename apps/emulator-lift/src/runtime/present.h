@@ -242,9 +242,8 @@ PresentBreakdown& presentBreakdown();
 //   口径 = **最后一次 Present 调用 → 本次 run 停**之间的 guest 指令数。
 //   ★ 是"**调用**"不是"成功"：`present()` 先 `++frame_count_` 再交给 sink（sink 失败只记账、不回滚），
 //     所以 frameCount / 盖章记的都是**调用**（见 `present.cpp` 的 `present()`）。
-//   ★ 确定性只在**可复现档**（`--present headless` + 虚拟时钟）成立：那时 `tail_insns` 可进断言；
-//     real-time 档（`--present window` / `--real-time` / `--audio sdl`）下三个读数都只是单样本
-//     （同命令两轮就会不同）。`tail_wall_ms` 在任何档位都只是宿主墙钟；
+//   ★ 时钟是**墙钟**（唯一档）⇒ 三个读数都只是单样本、**不承诺跨次可复现**（同命令两轮会不同）；
+//     要可复现的判据用帧 / 指令数。`tail_wall_ms` 是宿主墙钟。
 //     `last_frame` / `insns_at_last_present` 是**跨 run 累计**值（盖章 append-only，永不清）。
 //   ★ `any == false`（本轮一次 Present 都没有）⇒ **不打这一行**；⛔ 不要把"没有这行"读成"尾段为 0"。
 // ---------------------------------------------------------------------------------------

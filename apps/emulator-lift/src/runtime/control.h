@@ -34,7 +34,7 @@
 
 namespace lift {
 
-class VirtualClock;
+class Clock;
 class WindowManager;
 
 // 协议错误码（**枚举**，⛔ 不写自由文本；名字与 `design-ws.md` §2.4 的表一一对应）。
@@ -91,7 +91,7 @@ public:
     };
 
     // 主线程一侧的命令上下文：只有 `serve()` 要动的宿主对象（⛔ 不含任何 guest 指针）。
-    //   · `clock`   = 暂停期间冻结 guest 时间（`VirtualClock::freeze/unfreeze`）；
+    //   · `clock`   = 暂停期间冻结 guest 时间（`Clock::freeze/unfreeze`）；
     //   · `windows` = `quit` 的 `postQuit(0)`（与 `--input-plan` 的 quit 同一个交付点）；
     //     ★ M1 的 `click` **入队点**也在这里：`windows->inputPlan()`（`WindowManager` 的非拥有指针）
     //     ⇒ 入的是**同一个** `InputPlan`，施加点是它自己的 guest 读点（⛔ 控制层不施加）；
@@ -102,7 +102,7 @@ public:
     //       `ControlHostSide::controlGlobalSet`（→ `runtime/script_globals.h`）；⛔ 不写 cpu_、
     //       ⛔ 不改执行流，下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
     struct Context {
-        VirtualClock* clock = nullptr;
+        Clock* clock = nullptr;
         WindowManager* windows = nullptr;
         bool* stop_requested = nullptr;
         std::uint32_t quit_code = 0;

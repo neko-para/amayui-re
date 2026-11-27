@@ -716,9 +716,12 @@ int main() {
     // =================================================================================
     g_current_case = "script-guest-ms";
     {
+        // ★ 时钟唯一档 = 墙钟 ⇒ guest_ms 是**宿主单调毫秒**（不是从 0 起算的虚拟时间）
+        //   ⇒ 触发时刻必须相对"现在"写（⛔ 不写死 `at guest_ms 3`：那在过去 ⇒ 永不触发）。
+        const std::uint64_t base_ms = m.clock().nowMs();
         const std::string script =
             "# 注入通道自检（pure CTest）\n"
-            "at guest_ms 3\n"
+            "at guest_ms " + std::to_string(base_ms + 3ull) + "\n"
             "mouse_move 812 622\n"
             "wait 1 ms\n"
             "mouse_down\n"

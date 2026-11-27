@@ -106,8 +106,7 @@ bool AotHost::init(std::string* err) {
     //     `configureAudio()` 覆盖（`configure` 只要求"还没 begin"）；缺省档不会走到那一步的差异上。
     //   ★ 生命周期（begin / end）在 `run()` 的入口 / 出口（与解释器 `machine.cpp:1059` / `:1854` 同口径）。
     //   ★ **四参 attach**：feeder 的 TEB / 专用 guest 栈来自 `GuestLayout`（`runtime/image.h` 唯一真源）。
-    //     这是结构前提（不是运行时选项）⇒ `audioThreadMode()` 只剩"档位 / 时钟"两个事实；
-    //     ⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"（AOT 有意没有 Machine）。
+    //     这是结构前提（不是运行时选项）；⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"。
     audio_.attach(&cpu_, &mem_, &clock_, layout_);
     // ★ 音频 feeder 的 guest 执行器 = **AOT IR 派发**（`AGENTS.md` §12.8：执行来源只有 IR + shim）。
     //   `entry/return` 常量由 `AudioEngine` 传入（`kSub4B6C30` / `kFeederReturnEa` 的唯一来源在 audio.cpp）。
@@ -123,10 +122,8 @@ bool AotHost::init(std::string* err) {
     cpu_.audio = &audio_;
     // ★ `WindowManager` 的 owner 线程 = 跑执行循环的这个线程（`Machine::run` 的第一句同口径）。
     windows_.setOwnerThread(std::this_thread::get_id());
-    // ★ 时钟 = **wall clock**（D2b）：这是**这台宿主**的属性，不是某一轮的选项 ⇒ 在装配期就定下来
-    //   （readout 因此也能如实打印它；`run()` 里那一行是幂等复核）。
-    clock_.setRealTime(true);
-    // ★ SEH 状态机与 x87 现场：与 `Machine::wire` 一样在装配末尾复位一次。
+    // ★ 时钟 = **墙钟**（唯一档）：这是**这台宿主**的属性，不是某一轮的选项 ⇒ 在装配期就定下来。
+    //   `Clock` 没有第二个档（⛔ 不要再加"虚拟时钟"）。
     seh_.reset();
     cpu_.fpu.reset();
     // ★ 音频 feeder 的**硬前提**自检：没有 `cs_table` 时 guest CS 会走退化路径（见上面的接线）。
@@ -495,7 +492,7 @@ void AotHost::printReadout(std::FILE* out, bool region_log, bool detail) const {
                      presenter_.hasSink() ? "sink" : "headless(no-sink)",
                      gr == nullptr ? "nullptr"
                                    : (gr->rasterActive() ? gr->rasterName() : "inactive（后端建了但没激活）"),
-                     clock_.realTime() ? "real-time" : "virtual",
+                     "wall",
                      cpu_.handles != nullptr ? "yes" : "no", cpu_.com != nullptr ? "yes" : "no",
                      cpu_.calls != nullptr ? "yes" : "no", cpu_.windows != nullptr ? "yes" : "no",
                      cpu_.fonts != nullptr ? "yes" : "no",
@@ -685,29 +682,6 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out, bool detail
     //   ★ 一次性输出（不是周期性）：落点与 `--profile` 块同处"stdout 末尾"的前一刻。
     if (detail && audio_.audioRequested()) {
         audio_.dumpSummary(out);
-        // ---- S3 泵的读数（同样受 `audioRequested()` 门；`--audio sdl` 打不开设备时它照打，
-        //   `calls=0 fills=0` = 没有输出、泵没跑 —— 与"跑过但没喂到"是两回事）----
-        //   为什么要另起一行而不塞进上面那行：`dumpSummary` 是**解释器与 AOT 共用**的一份口径
-        //   （`machine.cpp:2955` 也在用），改它的字段顺序会让两条臂的 `audio     :` 行不可比；
-        //   而 `calls=`（真调 pump 的次数）是 AOT 臂独有的量。⇒ 追加一行，⛔ 不动那一行。
-        //   ★ 判据面：`fills>0 && fill_bytes>0 && pushed>0` = "通知真被消费、字节真的喂进去了"；
-        //     `calls=0` 只在 off 档成立，而 off 档根本不打这一行 ⇒ 两者不会互相冒充。
-        const AudioEngine::Snapshot a = audio_.snapshot();
-        // ★ 本轮新增的三个只读字段（**放在行尾**，⛔ 不动前面已有的顺序/语义）：
-        //   · `feeder=host-thread` / `main-pump` = 真 feeder 线程 vs 主线程 D 泵（`Snapshot.thread_mode`）；
-        //   · `lead=` = 该档的预读字节数（`Snapshot.lead_bytes`：19200 / 115200，判据在 `audio_policy.h`）；
-        //   · `dev_frames=` = SDL **设备缓冲帧数**（`Snapshot.dev_sample_frames`；与 lead 是**两笔账**：
-        //     一笔是"提前垫多少内容"，一笔是"设备一次取走多少"，⛔ 不要相加成一个"总延迟"）。
-        std::fprintf(out,
-                     "audio-pump: calls=%llu fills=%llu fill_bytes=%llu pushed=%llu"
-                     " feeder=%s lead=%llu dev_frames=%u\n",
-                     static_cast<unsigned long long>(audio_pump_.calls()),
-                     static_cast<unsigned long long>(a.fills),
-                     static_cast<unsigned long long>(a.fill_bytes),
-                     static_cast<unsigned long long>(a.pushed_bytes),
-                     a.thread_mode ? "host-thread" : "main-pump",
-                     static_cast<unsigned long long>(a.lead_bytes),
-                     static_cast<unsigned>(a.dev_sample_frames));
     }
     // ★ Phase-0 四行（`tokenhold / holdhist / waithist / shimmax`）：**只读计量**，与解释器
     //   `Machine::dumpRunSummary` 调的是**同一个** `dumpTokenPhase0`（唯一实现 = 唯一格式）。

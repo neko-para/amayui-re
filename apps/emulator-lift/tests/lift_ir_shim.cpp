@@ -87,7 +87,7 @@ extern "C" std::uint32_t lift_cc_4D4B40(void*, std::uint8_t*, std::uint32_t, voi
 
 namespace {
 
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 // =====================================================================================
 // 常量 / 真字节
@@ -506,10 +506,10 @@ ArmResult runArm(bool lifted, const Config& c, bool probe_writes, bool lifted_on
     if (!setupFixture(fx, c, probe_writes ? &probeTimeGetTime : &probeNoResult, &stub, &out.err)) return out;
     setEntryState(fx, c);
     g_probe = ProbeState{};
-    const auto t0 = Clock::now();
+    const auto t0 = SteadyClock::now();
     const bool ran = lifted ? runLiftedArm(fx, lifted_only, &out.stats, &out.err)
                             : runInterpArm(fx, &out.stats, &out.err);
-    const auto t1 = Clock::now();
+    const auto t1 = SteadyClock::now();
     out.wall_ns =
         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
     out.snap = takeSnap(fx, c);
@@ -771,7 +771,7 @@ double median(std::vector<double> v) {
     return v[v.size() / 2];
 }
 
-std::uint64_t elapsedNs(Clock::time_point a, Clock::time_point b) {
+std::uint64_t elapsedNs(SteadyClock::time_point a, SteadyClock::time_point b) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
 }
 
@@ -1099,7 +1099,7 @@ int runMain() {
             }
             for (int rep = 0; rep < 5; ++rep) {
                 volatile std::uint32_t start = kEaCrc;
-                const auto t0 = Clock::now();
+                const auto t0 = SteadyClock::now();
                 for (std::uint64_t k = 0; k < kN; ++k) {
                     LiftRegs st = crcEntryRegs(rc);
                     std::uint32_t cur = start;
@@ -1110,21 +1110,21 @@ int runMain() {
                     }
                     sink += cur;
                 }
-                const auto t1 = Clock::now();
+                const auto t1 = SteadyClock::now();
                 tramp_ns.push_back(static_cast<double>(elapsedNs(t0, t1)) / static_cast<double>(kN));
-                const auto t2 = Clock::now();
+                const auto t2 = SteadyClock::now();
                 for (std::uint64_t k = 0; k < kN; ++k) {
                     LiftRegs st = crcEntryRegs(rc);
                     sink += lift_cc_436D00(&st, mem, start, &cpu);  // 任务书的"直接调"
                 }
-                const auto t3 = Clock::now();
+                const auto t3 = SteadyClock::now();
                 sym_ns.push_back(static_cast<double>(elapsedNs(t2, t3)) / static_cast<double>(kN));
-                const auto t4 = Clock::now();
+                const auto t4 = SteadyClock::now();
                 for (std::uint64_t k = 0; k < kN; ++k) {
                     LiftRegs st = crcEntryRegs(rc);
                     sink += direct_fn(&st, mem, start, &cpu);  // 同一条路，但走**函数指针**
                 }
-                const auto t5 = Clock::now();
+                const auto t5 = SteadyClock::now();
                 ptr_ns.push_back(static_cast<double>(elapsedNs(t4, t5)) / static_cast<double>(kN));
             }
             const double t_tramp = median(tramp_ns);
@@ -1163,7 +1163,7 @@ int runMain() {
                     {
                         volatile std::uint32_t start = kEa4D4B63;
                         LiftRegs st;
-                        const auto a = Clock::now();
+                        const auto a = SteadyClock::now();
                         for (std::uint64_t k = 0; k < kN2; ++k) {
                             entry63(st);
                             std::uint32_t cur = start;
@@ -1173,18 +1173,18 @@ int runMain() {
                                 cur = f(&st, mem, cur, &cpu);
                             }
                         }
-                        const auto b = Clock::now();
+                        const auto b = SteadyClock::now();
                         t_tramp2.push_back(static_cast<double>(elapsedNs(a, b)) / static_cast<double>(kN2));
                     }
                     {
                         volatile std::uint32_t start = kEa4D4B63;
                         LiftRegs st;
-                        const auto a = Clock::now();
+                        const auto a = SteadyClock::now();
                         for (std::uint64_t k = 0; k < kN2; ++k) {
                             entry63(st);
                             (void)direct4d(&st, mem, start, &cpu);
                         }
-                        const auto b = Clock::now();
+                        const auto b = SteadyClock::now();
                         t_ptr2.push_back(static_cast<double>(elapsedNs(a, b)) / static_cast<double>(kN2));
                     }
                 }
@@ -1225,14 +1225,14 @@ int runMain() {
                 lift::RunOptions o;
                 o.until_ea = kSentinel;
                 o.max_insns = before + kInterpBudget;
-                const auto t0 = Clock::now();
+                const auto t0 = SteadyClock::now();
                 const lift::RunResult r = fx.m.run(o);
-                const auto t1 = Clock::now();
+                const auto t1 = SteadyClock::now();
                 if (r.reason == lift::StopReason::UntilEa) interp_ns.push_back(static_cast<double>(elapsedNs(t0, t1)));
                 LiftRegs st = crcEntryRegs(rc);
-                const auto t2 = Clock::now();
+                const auto t2 = SteadyClock::now();
                 const std::uint32_t cur = lift_cc_436D00(&st, mem, kEaCrc, &cpu);
-                const auto t3 = Clock::now();
+                const auto t3 = SteadyClock::now();
                 (void)cur;
                 lifted_ns.push_back(static_cast<double>(elapsedNs(t2, t3)));
             }
@@ -1265,7 +1265,7 @@ int runMain() {
                 std::vector<double> via_lift_shim, via_invoke;
                 for (int rep = 0; rep < 3; ++rep) {
                     LiftRegs st{};
-                    const auto t0 = Clock::now();
+                    const auto t0 = SteadyClock::now();
                     for (std::uint64_t k = 0; k < kN; ++k) {
                         st = LiftRegs{};
                         st.r[0] = 0xAAAAAAAAu;
@@ -1279,9 +1279,9 @@ int runMain() {
                         st.eflags = 0x202u;
                         (void)::lift_shim(stub2, &st, &fx2.m.cpu());
                     }
-                    const auto t1 = Clock::now();
+                    const auto t1 = SteadyClock::now();
                     via_lift_shim.push_back(static_cast<double>(elapsedNs(t0, t1)) / static_cast<double>(kN));
-                    const auto t2 = Clock::now();
+                    const auto t2 = SteadyClock::now();
                     for (std::uint64_t k = 0; k < kN; ++k) {
                         lift::X86& cpu = fx2.m.cpu();
                         cpu.r[0] = 0xAAAAAAAAu;
@@ -1296,7 +1296,7 @@ int runMain() {
                         cpu.eip = stub2;
                         (void)fx2.m.shims().invokeById(cpu, id);
                     }
-                    const auto t3 = Clock::now();
+                    const auto t3 = SteadyClock::now();
                     via_invoke.push_back(static_cast<double>(elapsedNs(t2, t3)) / static_cast<double>(kN));
                 }
                 std::printf("[lift-ir-shim] lift_shim 往返（%llu 次，3 遍中位）: lift_shim=%.1f ns 直接 invokeById=%.1f ns "
@@ -1330,15 +1330,15 @@ int runMain() {
                     setEntryState(fx3, c);
                     RunStats st;
                     std::string e;
-                    const auto t0 = Clock::now();
+                    const auto t0 = SteadyClock::now();
                     const bool ok_i = runInterpArm(fx3, &st, &e);
-                    const auto t1 = Clock::now();
+                    const auto t1 = SteadyClock::now();
                     if (ok_i) interp_ns.push_back(static_cast<double>(elapsedNs(t0, t1)));
                     setEntryState(fx3, c);
                     RunStats st2;
-                    const auto t2 = Clock::now();
+                    const auto t2 = SteadyClock::now();
                     const bool ok_l = runLiftedArm(fx3, false, &st2, &e);
-                    const auto t3 = Clock::now();
+                    const auto t3 = SteadyClock::now();
                     if (ok_l) lifted_ns.push_back(static_cast<double>(elapsedNs(t2, t3)));
                     // 空跑基线：`Machine::run` 的固定开销（0 条 guest 指令，起停都同一处 until_ea）
                     setEntryState(fx3, c);
@@ -1347,9 +1347,9 @@ int runMain() {
                     o.until_ea = kEa4D4B40;
                     o.max_insns = fx3.m.cpu().insns + kInterpBudget;
                     const std::uint64_t insns_before_empty = fx3.m.cpu().insns;
-                    const auto t4 = Clock::now();
+                    const auto t4 = SteadyClock::now();
                     const lift::RunResult rr = fx3.m.run(o);
-                    const auto t5 = Clock::now();
+                    const auto t5 = SteadyClock::now();
                     if (rr.reason == lift::StopReason::UntilEa) {
                         empty_ns.push_back(static_cast<double>(elapsedNs(t4, t5)));
                         // 基线的可信度：这条 run **真的**是 0 条指令

@@ -574,7 +574,7 @@ BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* 
 // ★ 两阶段（**回退零写的结构保证**）：阶段 1 只读（G1..G8 + 扫描），阶段 2 才移位 / 落位 / 写 `g_j`；
 //   进入阶段 2 之后不可能再失败。
 //
-// ★ `replaced_insns` 闭式（**判据，不是优化细节**：dispatcher 用它补 `cpu_.insns` 与 `clock_.tick(n)`）：
+// ★ `replaced_insns` 闭式（**判据，不是优化细节**：dispatcher 用它补 `cpu_.insns`）：
 //     Stopped（`c` 次比较，`c-1` 次移位）: `63*c + 1`
 //     RanOut （`c` 次比较，`c` 次移位）  : `63*c + 7`
 //     Empty  （`g_n == 0`）             : `6` = `4 + 2` ★ **不可达**：`g_n == 0` 由 G3 先判 `Failed`

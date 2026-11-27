@@ -175,7 +175,7 @@ constexpr std::uint64_t kInterpBudget = 100000000u;      // 单组解释器条�
 constexpr double kGroupWallLimitSec = 5.0;               // 单组墙钟上限
 constexpr std::uint64_t kBuildersStatic = 56u + 55u;  // `.lst` 的静态条数（只作读数对照，⛔ 不是闭式）
 
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 std::uint64_t fnv1a(const void* p, std::size_t n) {
     const auto* b = static_cast<const std::uint8_t*>(p);
@@ -406,11 +406,11 @@ bool runLiftedArm(lift_fixture::Fixture& fx, std::uint32_t start_ea, bool lifted
             st->lifted_hits_d14 += (ea == kEaD14) ? 1u : 0u;
             st->lifted_hits_d19 += (ea == kEaD19) ? 1u : 0u;
             if (ea == kEaD19) st->saw_d19 = true;
-            const auto t0 = Clock::now();
+            const auto t0 = SteadyClock::now();
             const std::uint32_t entry_ea = ea;
             ea = f(&regs, mem, ea, &fx.m.cpu());
             const std::uint64_t dt = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+                std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - t0).count());
             st->lifted_ns += dt;
             const int slot = (entry_ea == kEaD00) ? 0 : (entry_ea == kEaD14) ? 1 : 2;
             st->lifted_ns_ea[slot] += dt;
@@ -463,9 +463,9 @@ ArmResult runArm(bool lifted, std::uint32_t n, const std::vector<std::uint8_t>& 
         lift_test::failf(__FILE__, __LINE__, "[%s] 入口 [T+0x800]=%u，期望 %u（冷/热路径的初始条件）",
                          lift_test::g_current_case, flag_in, hot ? 1u : 0u);
     setEntryState(fx, e);
-    const auto t0 = Clock::now();
+    const auto t0 = SteadyClock::now();
     const bool ran = lifted ? runLiftedArm(fx, kEaD00, false, &out.stats, &out.err) : runInterpArm(fx, &out.stats, &out.err);
-    const auto t1 = Clock::now();
+    const auto t1 = SteadyClock::now();
     out.stats.wall_ns =
         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
     if (out.stats.wall_ns > static_cast<std::uint64_t>(kGroupWallLimitSec * 1e9)) {
@@ -1458,9 +1458,9 @@ int runMain(const std::filesystem::path& self_exe) {
                     fx.m.mem().wr32(e + 8u, kBuf);
                     Stats st;
                     std::string err;
-                    const auto t0 = Clock::now();
+                    const auto t0 = SteadyClock::now();
                     if (runLiftedArm(fx, kEaD00, false, &st, &err)) {
-                        const auto t1 = Clock::now();
+                        const auto t1 = SteadyClock::now();
                         e2e_lifted_ns.push_back(
                             static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
                         for (int k = 0; k < 3; ++k) {
@@ -1481,9 +1481,9 @@ int runMain(const std::filesystem::path& self_exe) {
                     fx2.m.mem().wr32(e2 + 8u, kBuf);
                     Stats st;
                     std::string err;
-                    const auto t0 = Clock::now();
+                    const auto t0 = SteadyClock::now();
                     if (runInterpArm(fx2, &st, &err)) {
-                        const auto t1 = Clock::now();
+                        const auto t1 = SteadyClock::now();
                         e2e_interp_ns.push_back(
                             static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
                     }

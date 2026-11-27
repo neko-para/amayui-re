@@ -5,7 +5,7 @@
 //     GuestMemory（guest 地址空间）· GuestHeap（guest 堆）· Vfs（guest 世界 → 宿主路径）·
 //     ShimRegistry（导入桩）· PeImage（PE 头 / 节表 / 导入表）· GuestLayout / ProcessSetup（地址布局）·
 //     X86（cpu 状态）·
-//     **T2b 新增**：Decoder · SurfaceArena · HeadlessPresenter · Seh · VirtualClock · HandleTable ·
+//     **T2b 新增**：Decoder · SurfaceArena · HeadlessPresenter · Seh · Clock · HandleTable ·
 //     ComRegistry · GuestCallStack · WindowManager · FontEngine · AudioEngine。
 //   ⛔ 不 include `machine.h`、⛔ 不实例化 `Machine`、⛔ 不碰 `BlockCache` / `Machine::run`。
 //
@@ -43,7 +43,6 @@
 #include "aot/frame_bucket.h"  // 按帧 shim 分桶（`--profile-slow-frames`；纯逻辑 + 有界状态机）
 #include "aot/window_prof.h"  // 窗口 profile 的桶与闭式（纯头；可被 pure CTest 直接驱动）
 #include "runtime/audio.h"
-#include "runtime/audio_pump_gate.h"  // S3 泵闸门（纯头；可被 pure CTest 直接驱动）
 #include "runtime/clock.h"
 #include "runtime/com.h"
 #include "runtime/control_snapshot.h"  // 控制层快照的值类型 + `ControlHostSide`（⛔ 无 beast）
@@ -330,8 +329,8 @@ public:
     GlobalError controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) override;
     GlobalError controlGlobalSet(GlobalKind kind, std::uint32_t id, const GlobalValue& value) override;
     // 宿主时钟（控制层的 freeze/unfreeze 与 `guest_ms` 读数都要它；解释器臂同形 `Machine::clock()`）。
-    VirtualClock& clock() { return clock_; }
-    const VirtualClock& clock() const { return clock_; }
+    Clock& clock() { return clock_; }
+    const Clock& clock() const { return clock_; }
 
     // ⑤ 读数（bring-up 结束时的"起点"快照）。
     //   ★ `region_log` = `--region-log`（缺省关）：只闸 `regions   :` 那一整块（28 行）。
@@ -510,18 +509,12 @@ private:
     //   的退化路径（争用时返回**非空 err** ⇒ `AudioEngine::feederEvent` 当致命 ⇒ 第一次并发就打死
     //   feeder；guest 自己的 Enter/Leave 也没有真正互斥）。`init()` 里接 `cpu_.cs_table = &cs_`。
     CriticalSectionTable cs_;
-    VirtualClock clock_;
+    Clock clock_;
     ComRegistry com_;
     GuestCallStack calls_;
     WindowManager windows_;
     FontEngine fonts_;
     AudioEngine audio_;
-    // ★ **S3 泵闸门**（`runtime/audio_pump_gate.h` 的纯状态机，唯一一份）：块边界"该不该调
-    //   `audio_.pump()`" + 节流点 + **真调了几次**。`run()` 里那个 `if (audio_pump_.due(…))` 是
-    //   AOT 臂上 `AudioEngine::pump()` 的**唯一调用点**；off 档 `due()` 恒假 ⇒ `calls()` 恒 0
-    //   （"off 档不进 pump"的机械判据，读数见 `printRunSummary` 的 `audio-pump:` 行 /
-    //   `LIFT_AOT_AUDIO_TRACE`）。⚠ 它**不是**第二份音频语义：判据 / 记账只有这一份。
-    AudioPumpGate audio_pump_;
     SurfaceArena surfaces_;
     // ★ 宿主能力表（`host.profileBegin/End` 的唯一来源；切片 3）。`ctx = this`，两个 thunk 在 `.cpp`。
     //   ★ **声明在 `presenter_` 之前** = 析构**晚于** `presenter_`：sink 由 `presenter_` 拥有，

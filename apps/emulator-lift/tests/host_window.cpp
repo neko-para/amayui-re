@@ -9,6 +9,12 @@
 #include "runtime/machine.h"
 #include "runtime/vfs.h"
 
+namespace {
+// 夹具时钟缝：墙钟 = 注入的单调读数（`Clock::setRawNowForTest`），用例不必真睡 16 ms。
+std::uint64_t g_raw_100ns = 0;
+std::uint64_t fakeRawNow() { return g_raw_100ns; }
+}  // namespace
+
 int main() {
     using namespace lift_test;
     lift::WindowManager wm;
@@ -51,9 +57,10 @@ int main() {
     std::string err;
     LIFT_CHECK(m.initBare(&err));
     LIFT_CHECK(m.prepareStack(&err));
+    m.clock().setRawNowForTest(&fakeRawNow);
     const std::uint32_t id = wm.setTimer(m.cpu(), hwnd, 0, 16);
     LIFT_CHECK(id != 0);
-    m.clock().advance100ns(160000ull);  // 16 ms
+    g_raw_100ns += 160000ull;  // 16 ms
     wm.pumpTimers(m.cpu());
     LIFT_CHECK(wm.peek(&got, true));
     LIFT_CHECK_EQ_U32(got.message, 0x0113u);  // WM_TIMER

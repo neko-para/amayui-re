@@ -87,7 +87,7 @@
 
 namespace {
 
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 constexpr std::uint32_t kCodeEa = 0x00401000u;
 constexpr std::uint32_t kCodeStride = 0x100u;  // 每个形状一块自己的循环（同一页内，够放）
@@ -284,9 +284,9 @@ bool runPass(lift::Machine& m, const Arm& a, PassReading* out) {
     const std::uint64_t want = base + a.prologue_insns + kInsnsPerPass;
     lift::RunOptions opt;
     opt.max_insns = want;
-    const auto t0 = Clock::now();
+    const auto t0 = SteadyClock::now();
     const lift::RunResult r = m.run(opt);
-    const auto t1 = Clock::now();
+    const auto t1 = SteadyClock::now();
     const double wall_ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
 
     // ★ 前提判据（⛔ 不是性能阈值）：停因与条数必须就是我们请求的那一份。
@@ -345,9 +345,9 @@ bool runAluControl(std::uint32_t ea, const char* script, double* wall_ms, std::u
     const std::uint64_t base = m.cpu().insns;
     lift::RunOptions opt;
     opt.max_insns = base + kInsnsPerPass;
-    const auto t0 = Clock::now();
+    const auto t0 = SteadyClock::now();
     const lift::RunResult r = m.run(opt);
-    const auto t1 = Clock::now();
+    const auto t1 = SteadyClock::now();
     LIFT_CHECK(r.reason == lift::StopReason::MaxInsns);
     LIFT_CHECK(r.insns == base + kInsnsPerPass);
     *wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -419,9 +419,9 @@ double measureDependentMulNs(std::uint64_t* used_n) {
     const std::uint64_t n = g_cal_iters;  // 循环外读一次：n 对优化器不透明
     const std::uint64_t mul = g_cal_mul;  // 同上：乘数不是常数 ⇒ 折不出闭式
     std::uint64_t acc = 1;
-    const auto t0 = Clock::now();
+    const auto t0 = SteadyClock::now();
     for (std::uint64_t i = 0; i < n; ++i) acc = acc * mul + 1u;
-    const auto t1 = Clock::now();
+    const auto t1 = SteadyClock::now();
     // 防优化：把结果按位异或进一个 volatile（只写一次，不在循环里）。
     static volatile std::uint64_t sink = 0;
     sink = sink ^ acc;
@@ -434,11 +434,11 @@ double measureClockNs(std::uint64_t n) {
     double best = 1e18;
     for (int s = 0; s < 3; ++s) {
         std::uint64_t acc = 0;
-        const auto t0 = Clock::now();
+        const auto t0 = SteadyClock::now();
         for (std::uint64_t i = 0; i < n; ++i) {
-            acc += static_cast<std::uint64_t>(Clock::now().time_since_epoch().count());
+            acc += static_cast<std::uint64_t>(SteadyClock::now().time_since_epoch().count());
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         static volatile std::uint64_t sink = 0;
         sink = sink ^ acc;
         best = std::min(best, std::chrono::duration<double, std::nano>(t1 - t0).count() /
@@ -452,12 +452,12 @@ double measureLockUnlockNs(std::uint64_t n) {
     double best = 1e18;
     for (int s = 0; s < 3; ++s) {
         std::mutex mu;
-        const auto t0 = Clock::now();
+        const auto t0 = SteadyClock::now();
         for (std::uint64_t i = 0; i < n; ++i) {
             mu.lock();
             mu.unlock();
         }
-        const auto t1 = Clock::now();
+        const auto t1 = SteadyClock::now();
         best = std::min(best, std::chrono::duration<double, std::nano>(t1 - t0).count() /
                                  static_cast<double>(n));
     }

@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "runtime/clock.h"       // VirtualClock（暂停补偿的唯一读数：pausedTotalMs）
+#include "runtime/clock.h"       // Clock（暂停补偿的唯一读数：pausedTotalMs）
 #include "runtime/input.h"       // input::mouseButton / releaseProgram（唯一施加 / 收口路径）
 #include "runtime/memory.h"      // GuestMemory（身份采样只经 MarkerSampler 读它）
 #include "runtime/vfs.h"         // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -30,7 +30,8 @@ namespace {
 // ★ 计划消息的 `MSG.time`（恒 0）也在 `pointer_core.h`：`kPointerMessageTimeMs`（core 与
 //   `closeSessionIfDone` 用同一个数；⛔ 不各写一份 0）。
 
-// 与 `present.cpp` 的 `nowNs()` 同源：宿主单调时钟（⛔ 不是 `clock.h` 的 guest 虚拟时钟）。
+// 与 `present.cpp` 的 `nowNs()` 同源：宿主单调时钟（⛔ 不是 `clock.h` 的 guest 时钟 —— 那是
+// `steady_clock` 的墙钟读数，两者只在"单调"这一点上一致）。
 std::uint64_t hostNowMs() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
@@ -124,7 +125,7 @@ void InputPlan::attachGuestMemory(const GuestMemory* mem) {
 
 void InputPlan::setClockForTest(NowFn now_ms) { now_fn_ = now_ms; }
 
-void InputPlan::attachClock(const VirtualClock* clock) { clock_ = clock; }
+void InputPlan::attachClock(const Clock* clock) { clock_ = clock; }
 
 std::uint64_t InputPlan::nowMs() const {
     const std::uint64_t raw = now_fn_ != nullptr ? now_fn_() : hostNowMs();

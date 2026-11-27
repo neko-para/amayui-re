@@ -396,11 +396,11 @@ void shimMsgWaitForMultipleObjects(X86& cpu, ShimCall& call) {
                   "nCount=0 dwMilliseconds=INFINITE 且没有消息：headless 没有事件源 ⇒ 真等就是死锁"
                   "（照 GetMessageA 的口径响亮失败；P3 接 SDL 事件源后这条才会变成「等待」）");
     }
-    // 有限超时：推进虚拟时钟（确定性），然后如实返回 WAIT_TIMEOUT。
-    if (cpu.clock) cpu.clock->advance100ns(static_cast<std::uint64_t>(timeout) * 10000ull);
+    // 有限超时：**不睡**（这一步在消息泵里，睡了就吞掉这段时间的输入 / 窗口事件），
+    // 按墙钟（`Clock`）如实返回 WAIT_TIMEOUT —— 墙钟只会自己往前走，没有"推时钟"这回事。
     shimLog("user32", "MsgWaitForMultipleObjects",
-            "nCount=0 dwMilliseconds=%u dwWakeMask=0x%04X ⇒ WAIT_TIMEOUT（无事件源；虚拟时钟前进 %u ms）",
-            timeout, wake_mask, timeout);
+            "nCount=0 dwMilliseconds=%u dwWakeMask=0x%04X ⇒ WAIT_TIMEOUT（无事件源；不阻塞）",
+            timeout, wake_mask);
     call.result = kWaitTimeout;
 }
 

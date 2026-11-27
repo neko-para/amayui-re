@@ -284,12 +284,12 @@ int main() {
         const std::uint64_t before = f.m.clock().now100ns();
         LIFT_CHECK_EQ_U32(f.call(sleep, {25u, 1u}), 0u);
         const std::uint64_t after = f.m.clock().now100ns();
-        // SleepEx 精确推进 25 ms = 250000 × 100ns；差值里还含这次调用本身的指令 tick
-        // （每条指令 1×100ns，几条而己）⇒ 断言"至少 25 ms、且不超过 25 ms + 1 µs"，
-        // ⛔ 不写死 250000（那会把"夹具执行了几条指令"也钉进判据里）。
+        // ★ 时钟唯一档 = 墙钟（2026-11-27 起）：`SleepEx` **不推进 guest 时间**
+        //   （旧虚拟时钟的"精确 +25 ms"已随虚拟时钟整档删除；它只 `yield` 一次）。
+        //   这里钉住的是"不伪造时间"：读数差必须**小于**请求的 25 ms（真实执行是 µs 级）。
         const std::int64_t delta = static_cast<std::int64_t>(after - before);
-        LIFT_CHECK(delta >= 25 * 10000);
-        LIFT_CHECK(delta < 25 * 10000 + 10000);
+        LIFT_CHECK(delta >= 0);
+        LIFT_CHECK(delta < 25 * 10000);
 
         LIFT_CHECK_EQ_U32(f.call(close, {a}), 1u);
         LIFT_CHECK_EQ_U32(f.call(close, {b}), 1u);

@@ -13,12 +13,12 @@
 //     · `audio.cpp:141` 的 `mute_ = !sound`（唯一交付点 `generateTo` 末尾）。
 //   本头只负责"**把同一个 bool 组合成给人看的状态**"，⛔ 不参与 guest 语义。
 //
-// ★ **AOT 臂的音频已接线（S0–S3）**：档位由 `--audio` 决定、`--sound` 真的进 `mute_`、`--audio-dump`
-//   落 WAV、`run()` 入口 / 出口成对 `begin()` / `end()`、泵（`pump()`）已接在**块边界**（S3）。
+// ★ **AOT 臂的音频已接线**：档位由 `--audio` 决定、`--sound` 真的进 `mute_`、`--audio-dump`
+//   落 WAV、`run()` 入口 / 出口成对 `begin()` / `end()`；喂料 / 混音在宿主 feeder + mixer 线程。
 //   ⇒ `--sound` 被**接受**，但默认档**不打任何通告**（2026-11-27 用户判据：解释性文字只进 `--help`；
 //   ⛔ 不静默接受是指"不拒绝 / 不假装有声音"，不是"必须打一句说明书"）。
 // ★ 洞 4（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8`）的教训：**文案引用的每一行读数都必须真的存在**。
-//   `audio     :` / `audio-pump:` 只在 `--log-level info` **且** `AudioEngine` 已配置时打
+//   `audio     :` 只在 `--log-level info` **且** `AudioEngine` 已配置时打
 //   （`aot_host.cpp` 的 `printRunSummary`）⇒ **只给 `--sound`** 时档位是 off，那两行**不存在**
 //   ⇒ `kAotSoundHelp` 必须限定范围。
 #pragma once

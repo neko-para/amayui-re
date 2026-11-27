@@ -789,7 +789,7 @@ void shimWaitMessage(X86& cpu, ShimCall& call) {
     // ★ 投递层（S1）：队列读点，flush 在 `pumpTimers` 之前。
     input::deliverQueue(*cpu.windows, InputPoint::WaitMessage);
     cpu.windows->pumpTimers(cpu);
-    if (cpu.clock) cpu.clock->advance100ns(10000ull);  // 1 ms 虚拟时间；P0 不阻塞宿主
+    // ⛔ 不推时钟（那需要虚拟时钟）：墙钟只由真实时间/`Sleep` 推进；本 shim 不阻塞宿主。
     call.result = 1;
 }
 

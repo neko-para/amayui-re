@@ -86,9 +86,8 @@ void expectSysTime(const SysTime& t, std::uint32_t year, std::uint32_t month,
 }
 
 // 注入墙钟 base（= 单调零点那一刻的墙钟）＋单调读数；base 由 target wall - raw 反推。
-void armClock(lift::VirtualClock& clock, std::uint64_t wall_100ns, std::uint64_t raw_100ns) {
+void armClock(lift::Clock& clock, std::uint64_t wall_100ns, std::uint64_t raw_100ns) {
     g_fake_raw_100ns = raw_100ns;
-    clock.setRealTime(true);
     clock.setRawNowForTest(&fakeRawNow);
     clock.setWallBaseForTest(wall_100ns - raw_100ns);
 }
@@ -199,17 +198,17 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
-    // ④ 虚拟档：墙钟 = 固定 base + 虚拟 now；⛔ base 不进 uptime。
+    // ④ 墙钟 = 注入 base + 注入的单调读数；⛔ base 不进 uptime。
     {
-        g_current_case = "virtual-base-plus-virtual-now";
-        lift::VirtualClock clock;
-        clock.advance100ns(1234567ull);
-        LIFT_CHECK(clock.wall100ns() == 1234567ull);
+        g_current_case = "wall-base-plus-uptime";
+        lift::Clock clock;
+        g_fake_raw_100ns = 1234567ull;
+        clock.setRawNowForTest(&fakeRawNow);
         LIFT_CHECK(clock.now100ns() == 1234567ull);
         clock.setWallBaseForTest(1709642096ull * kTicksPerSec);
         LIFT_CHECK(clock.wall100ns() == 1709642096ull * kTicksPerSec + 1234567ull);
         LIFT_CHECK(clock.now100ns() == 1234567ull);
-        clock.advance100ns(10ull * kTicksPerSec);
+        g_fake_raw_100ns += 10ull * kTicksPerSec;
         LIFT_CHECK(clock.wall100ns() == 1709642106ull * kTicksPerSec + 1234567ull);
         LIFT_CHECK(clock.now100ns() == 101234567ull);
     }
@@ -217,7 +216,7 @@ int main() {
     // ⑤ 冻结语义回归：暂停区间对墙钟也不可见（与 now100ns() 同源）。
     {
         g_current_case = "freeze-freezes-wall-too";
-        lift::VirtualClock clock;
+        lift::Clock clock;
         armClock(clock, kInjectedWall, kInjectedUptime);
         LIFT_CHECK(clock.wall100ns() == kInjectedWall);
         clock.freeze();

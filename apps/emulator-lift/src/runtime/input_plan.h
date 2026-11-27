@@ -101,7 +101,7 @@ namespace lift {
 
 class WindowManager;
 class GuestMemory;
-class VirtualClock;
+class Clock;
 
 // ★ 11 个投递点的**闭集合**已搬到 `runtime/input_point.h`（W1：`PointerCore` 也要用它，
 //   而 `input_plan.h` 要 include `pointer_core.h` ⇒ 枚举住在这里会成环）。
@@ -150,11 +150,11 @@ public:
 
     // ★ **暂停补偿**（控制层 S1）：本臂的守卫钟 = 宿主单调毫秒 − 累计暂停毫秒。
     //   为什么必须有：每步的 `timeout` 用的是本文件**自己的** `steady_clock`（不是 guest 的
-    //   `VirtualClock`）⇒ 只冻结 guest 时钟时，一次 2 s 暂停会把配方里 `timeout 1000` 的窗口走掉
+    //   `Clock`）⇒ 只冻结 guest 时钟时，一次 2 s 暂停会把配方里 `timeout 1000` 的窗口走掉
     //   （裁决：`body-m0.md` 末节"冻结必须同时补偿这两把钟"）。
-    //   `clock` = 宿主那份 `VirtualClock`（`pausedTotalMs()` 是唯一读数）；nullptr = 不减（缺省档逐位不变）。
-    //   ⛔ 不在这里另存一份暂停账：暂停账的唯一来源是 `VirtualClock`。
-    void attachClock(const VirtualClock* clock);
+    //   `clock` = 宿主那份 `Clock`（`pausedTotalMs()` 是唯一读数）；nullptr = 不减（缺省档逐位不变）。
+    //   ⛔ 不在这里另存一份暂停账：暂停账的唯一来源是 `Clock`。
+    void attachClock(const Clock* clock);
 
     // ★ **窗口 profile 的标记钩子**（`profile_begin` / `profile_end` 的唯一外部消费者）。
     //   · 为什么是裸函数指针 + `void*`：缺省 nullptr ⇒ 每个读点只多一次判空（⛔ 不用
@@ -385,7 +385,7 @@ private:
     MarkerSampler marker_sampler_;
     MarkerSample identity_;             // 最近一次采样（名字按上面那条规则缓存）
     NowFn now_fn_ = nullptr;            // 测试缝（nullptr = steady_clock）
-    const VirtualClock* clock_ = nullptr;  // 暂停补偿（nullptr = 不减；见 attachClock）
+    const Clock* clock_ = nullptr;  // 暂停补偿（nullptr = 不减；见 attachClock）
     std::uint64_t next_ = 0;            // 下一个待判的指令（顺序推进，⛔ 不回跳）
     std::uint64_t applied_ = 0;         // 已消费指令数
     // ★ `fired_` / `released_` / `ui_consumed_` / `cursor_reads_done_` / `writes_this_point_` /

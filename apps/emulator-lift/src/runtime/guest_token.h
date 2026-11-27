@@ -15,7 +15,6 @@
 //   - 主线程：`Machine::run` 的**每个块边界**取一次，块结束放。
 //   - 音频 feeder：`feederEvent` 的 prologue/epilogue（读槽 / 写 CS 与在飞计数 / 建上下文）取；
 //     **整次 fill 的 guest 指令执行不取**；fill 里的每次 shim 调用由 `ShimRegistry::invoke` 取。
-//   - `pump()` 里任何会铺 guest 帧的路径也要取。
 //   - 任何**会阻塞**的宿主等待都必须 `Yield`（临时让出令牌）后再等：guest CRITICAL_SECTION、
 //     `GetMessageA` 的宿主事件泵、`WaitForSingleObject(喂料线程)`。
 //     ⛔ 持令牌阻塞 = 死锁（另一条执行流永远等不到令牌去 Leave）。

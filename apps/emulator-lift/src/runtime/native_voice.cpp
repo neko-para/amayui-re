@@ -86,11 +86,10 @@ bool nativeVoiceTick4BBAB0(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
         }
         return false;  // ⇒ dispatcher 回退解释器（原字节照跑）
     }
-    // ★ 时钟补偿（**判据**）：解释器跑完这条路径恰好 `kVoiceTickPureInsns` 条指令；dispatcher 在
-    //   override 命中后自己会 `++cpu_.insns; clock_.tick()` ⇒ 这里只补 k-1（⛔ 不补 / 补多都会改掉
-    //   下一次 `timeGetTime` 看到的 `now`）。insns 与时钟一起补，两者才与解释器一致。
+    // ★ 指令数补偿（**判据**）：解释器跑完这条路径恰好 `kVoiceTickPureInsns` 条指令；dispatcher 在
+    //   override 命中后自己会 `++cpu_.insns` ⇒ 这里只补 k-1（⛔ 不补 / 补多都会让 `insns` 与解释器
+    //   路径对不上）。⚠ 时钟是**墙钟**，不随指令数前进 ⇒ 这里没有时钟补偿。
     constexpr std::uint64_t kExtra = static_cast<std::uint64_t>(kVoiceTickPureInsns) - 1ull;
-    if (cpu.clock != nullptr) cpu.clock->tick(kExtra);
     cpu.insns += kExtra;
     if (cpu.current_override != nullptr) ++cpu.current_override->fast_hits;
     *result = 0;  // EAX = 0：没有启动任何槽（解释器同路径的返回值）

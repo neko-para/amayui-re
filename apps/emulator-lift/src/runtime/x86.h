@@ -102,19 +102,19 @@ struct GuestCallbackState {
 
 // ★ winmm 多媒体定时器的**协作式**实现（D5 单线程：没有定时器服务线程）
 //
-// 机制：`timeSetEvent` 只把定时器登记进 `ShimState::timers`（到期时刻用**虚拟时钟**算）。
+// 机制：`timeSetEvent` 只把定时器登记进 `ShimState::timers`（到期时刻用**墙钟**算）。
 // dispatcher 在**块边界**检查"有没有到期的"；到期就把 guest 栈铺成回调帧、把 eip 指向回调：
 //     [esp]     = kTimerCallbackReturnEa（回调的返回地址）
 //     [esp+4..] = uID / uMsg(0) / dwUser / dw1(0) / dw2(0)     ← 文档的 TimeProc 五个参数
 // 回调 `ret 20` 回到 `kTimerCallbackReturnEa` ⇒ dispatcher 认出它、恢复被打断的 esp/eip，
 // 周期定时器重新排队。
 // ★ 与真机的差别只有一条：**回调不会抢占一条 basic block**（真机由 winmm 的线程抢占）。
-//   在块边界触发 ⇒ 同一个虚拟时钟输入下**结果确定**（A4 的前提），且比"永不触发"诚实。
+//   在块边界触发 ⇒ 时序是"块粒度"的（⚠ 墙钟 ⇒ 不承诺跨机 / 跨次的可复现性）。
 constexpr std::uint32_t kTimerCallbackReturnEa = 0x7FFEF004u;
 
 struct GuestTimer {
     std::uint32_t id = 0;
-    std::uint64_t due_100ns = 0;     // 虚拟时钟的到期时刻
+    std::uint64_t due_100ns = 0;     // 墙钟的到期时刻
     std::uint32_t period_ms = 0;     // 0 = 一次性
     std::uint32_t callback = 0;      // guest TimeProc
     std::uint32_t user = 0;          // dwUser
@@ -128,7 +128,7 @@ struct GuestTimer {
 //   不足以让插入点继续正确执行 —— 回调（MSVC stdcall：只保 ebx/esi/edi/ebp，eax/ecx/edx 随便改）
 //   会把插入点仍然活着的值改坏。实测形态：native override 刚把 `this` 写进 ECX 就交出控制权，
 //   定时器回调把它改掉 ⇒ `sub_48AC40` 拿到错的 this。
-// ⛔ 这不是时钟语义（到期判定 / tick 仍是 `VirtualClock` 那一份），只是上下文保存。
+// ⛔ 这不是时钟语义（到期判定仍是 `Clock` 那一份墙钟），只是上下文保存。
 struct TimerSavedRegs {
     std::uint32_t eax = 0;
     std::uint32_t ebx = 0;
@@ -231,7 +231,7 @@ struct X86 {
     GuestMemory* mem = nullptr;
     GuestHeap* heap = nullptr;
     HandleTable* handles = nullptr;
-    VirtualClock* clock = nullptr;
+    Clock* clock = nullptr;
     ShimRegistry* shims = nullptr;
     Vfs* vfs = nullptr;
     BlockCache* cache = nullptr;

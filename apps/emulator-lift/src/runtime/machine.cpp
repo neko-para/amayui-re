@@ -357,8 +357,7 @@ void Machine::wire() {
     //   而那时 Machine 还活着 ⇒ 不悬垂（⛔ 不要在 `~Machine` 里补摘指针的"保险"）。
     presenter_.setInsnSource(&cpu_.insns);
     // ★ 四参 attach：feeder 的 TEB / 专用栈来自 `GuestLayout`（`image.h` 的唯一真源）。
-    //   这是**结构前提**（不是运行时选项）⇒ `audioThreadMode()` 只剩"档位 / 时钟"两个事实；
-    //   ⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"（AOT 没有 Machine）。
+    //   这是**结构前提**（不是运行时选项）；⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"。
     audio_.attach(&cpu_, &mem_, &clock_, layout_);
     cpu_.audio = &audio_;
     cpu_.cs_table = &critical_sections_;
@@ -968,7 +967,7 @@ RunResult Machine::run(const RunOptions& opts) {
     //   时它是恒等操作；换线程跑时由这一句改口径。⛔ 这不是令牌 —— 见 host_window.h 类头那一段。
     windows_.setOwnerThread(std::this_thread::get_id());
     // ★ 单令牌（guest_token.h）：本函数起的执行循环是 guest 指令的**唯一**主执行流；
-    //   音频 feeder 真线程（thread_mode_）走同一把令牌。arm 打开违规计数（未持有令牌就
+    //   音频 feeder 真线程走同一把令牌。arm 打开违规计数（未持有令牌就
     //   改 GuestHeap / HandleTable 或执行 guest 代码 ⇒ ++），`--assert-guest-token` 读它。
     // ★ Phase-0 读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：`--profile` 打开"持有占空 / 持有
     //   直方图 / 等待直方图 / per-shim max_ns"的记账（`arm()` 里再或上 `LIFT_AUDIO_TRACE`）。
@@ -1085,9 +1084,8 @@ RunResult Machine::run(const RunOptions& opts) {
         frame_trace_prev_sprite_total_ = cov.sprite_gpu_draws;
         frame_trace_prev_sprite_skipped_ = cov.sprite_skipped;
     }
-    if (opts.real_time) clock_.setRealTime(true);
     if (opts.trace_inputs) dumpTraceInputs(stdout);
-    // ★ 方案 D：打开音频设备 / dump（Off ⇒ 零成本）。begin 失败只降级，不阻止 boot。
+    // ★ 打开音频 sink（Off ⇒ 零成本）。begin 失败只降级，不阻止 boot。
     {
         std::string audio_err;
         if (!audio_.begin(&audio_err) && !audio_err.empty()) {
@@ -1098,15 +1096,15 @@ RunResult Machine::run(const RunOptions& opts) {
     //   `GuestToken` 跳过 mutex —— 只为"派发层每块交多少固定税"的 A/B 存在。
     //   这里用**默认级别**（stderr，不经 LogLevel 门）喊一声：⛔ 不许让它悄悄改掉性能读数。
     //   ⛔ 只允许单线程工况；若音频 feeder 真线程已经在跑，必须喊得更大声（那已经不是"少一把锁"，
-    //   而是"容器互斥被静默关掉"）。放在 audio_.begin() **之后** ⇒ `threadMode()` 才是真值。
+    //   而是"容器互斥被静默关掉"）。放在 audio_.begin() **之后** ⇒ `enabled()` 才是真值。
     if (guestToken().diagSkipLock()) {
         std::fprintf(stderr,
                      "[guest-token] ⚠ 诊断开关 LIFT_TOKEN_DIAG_SKIP_LOCK=1：GuestToken 跳过 mutex"
                      "（acquire/release 只做原子记账）—— 只允许 --audio off 这类**单线程**工况；"
                      "本臂是诊断读数，⛔ 不是产品行为。\n");
-        if (audio_.threadMode()) {
+        if (audio_.enabled()) {
             std::fprintf(stderr,
-                         "[guest-token] ⛔ 音频 feeder **真线程已启动**（mode=%s）⇒ 两条执行流会同时改宿主容器："
+                         "[guest-token] ⛔ 音频 feeder 真线程已启动（mode=%s）⇒ 两条执行流会同时改宿主容器："
                          "本臂读数**无效**，且可能损坏 guest 堆。先用 --audio off 重跑。\n",
                          audioModeName(audio_.mode()));
         }
@@ -1332,8 +1330,7 @@ RunResult Machine::run(const RunOptions& opts) {
                 r.detail = call_err;
                 break;
             }
-            // ★ 音频泵借用了 [esp] 作为 sub_4B6C30 的返回点；续延完成后必须还回原返回地址。
-            audio_.afterGuestCall();
+            // ★ 音频 feeder 借用过 `[esp]` 的旧痕迹已在 fill 收尾里还回（⛔ 现在没有主线程泵）。
             // ★ 续延里也可能**主动结束运行**（如 `LIFT_STOP_AFTER_MOVIE` 在 DirectShow 图的
             //   停机链里置 `cpu.running=false`）。它不在 `shims_.invoke` 那条路上 ⇒ 不会经过
             //   本循环末尾"shim 返回后"的 `!cpu_.running` 检查；而 `while (cpu_.running)` 直接
@@ -1481,7 +1478,6 @@ RunResult Machine::run(const RunOptions& opts) {
                     if (opts.trace_blocks) std::fprintf(stdout, "[native] %08X %s\n", ov->ea, ov->name.c_str());
                     cpu_.noteInsn(ov->ea, "[native]");
                     ++cpu_.insns;
-                    clock_.tick();
                     // ★ 补账：这条 `++cpu_.insns`（+ override 自己的补偿）**不在任何块里**。
                     window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
                     continue;
@@ -1514,8 +1510,7 @@ RunResult Machine::run(const RunOptions& opts) {
 
         // ★ 段级 override（**函数中段**的固定 EA）：在每个 block 入口按 EIP 查表 —— 与上面的
         //   函数级不同，这里**没有** call 帧语义：fn 自己写 EIP（段出口）/ 寄存器 / EFLAGS。
-        //   ★ insns / 虚拟时钟按 fn 报告的**被替代指令数**补账：不补的话 `timeGetTime` 会少走一截，
-        //     首帧内容可能偏离解释器路径（A4 / 首帧 hash 的硬要求）。见 README §4.3。
+        //   ★ 只补 `cpu_.insns` 的账（时钟是墙钟，不随指令数前进）。
         if (!block_overrides_.empty()) {
             if (NativeBlockOverride* bo = block_overrides_.find(cpu_.eip)) {
                 const std::uint32_t entry = cpu_.eip;
@@ -1535,7 +1530,6 @@ RunResult Machine::run(const RunOptions& opts) {
                     ++bo->hits;
                     const std::uint64_t n = replaced != 0 ? replaced : 1ull;
                     cpu_.insns += n;
-                    clock_.tick(n);
                     // ★ 补账：段级 override 替代的指令数**不在任何块里**（闭合式里单独一类）。
                     window_prof_.addOverrideInsns(n);
                     continue;
@@ -1559,25 +1553,12 @@ RunResult Machine::run(const RunOptions& opts) {
             }
         }
 
-        // ★ 方案 D：音频设备推进 + 喂料泵。`pump()` 可能铺一个 sub_4B6C30 帧（返回 Suspended）；
-        //   之后 guest 自己跑到续延点，`afterGuestCall()` 再还 [esp]。⛔ 不建线程 / 不建第二栈。
-        //   ⛔ 放在函数级/段级 override **之后**：否则会吞掉 `call_target`，让本次 native override
-        //      被跳过（性能退化，不是语义错，但没必要）。
-        if (audio_.enabled() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
-            const auto t_audio = window_prof_.active() ? std::chrono::steady_clock::now()
-                                                       : std::chrono::steady_clock::time_point{};
-            const AudioPump ap = audio_.pump();
-            if (window_prof_.active())
-                window_prof_.addHost(WindowProfiler::HostAudio,
-                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                                    std::chrono::steady_clock::now() - t_audio)
-                                                                    .count()));
-            if (ap == AudioPump::Suspended) continue;
-            if (ap == AudioPump::Error) {
-                r.reason = StopReason::Unimplemented;
-                r.detail = audio_.lastError();
-                break;
-            }
+        // ★ 音频 feeder 的**失败面**（解释器臂与 AOT 同一条）：块边界一次只读原子判据。
+        //   ⛔ 混音 / 喂料都在宿主线程，主线程不泵。
+        if (audio_.feederFailed()) {
+            r.reason = StopReason::Unimplemented;
+            r.detail = "音频 feeder 线程失败：" + audio_.feederErrorText();
+            break;
         }
 
         // ★ 调试观察口（默认关）：`LIFT_WATCH_SAMPLE=1` 时，每个 block 入口读一次
@@ -1752,7 +1733,6 @@ RunResult Machine::run(const RunOptions& opts) {
                 break;
             }
             ++cpu_.insns;
-            clock_.tick();
             if (control) {
                 next_call_target = (in.op == Op::Call) ? cpu_.eip : 0;
                 if (in.op == Op::Call) {
@@ -2338,7 +2318,6 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
         t.native_overrides += buf;
     }
     t.clock_start_100ns = clock_.epoch100ns();
-    t.real_time = clock_.realTime();
     t.skip_logo = skip_logo_;
     t.accept_recovery_dialog = accept_recovery_dialog_;
     t.close_confirm = close_confirm_;
@@ -2359,8 +2338,7 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
                  t.agerc_sha256.empty() ? "-" : t.agerc_sha256.c_str());
     std::fprintf(out, "trace-input override = %s\n",
                  t.native_overrides.empty() ? "(none)" : t.native_overrides.c_str());
-    std::fprintf(out, "trace-input clock    = %s (start=%llu x100ns)\n",
-                 t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
+    std::fprintf(out, "trace-input clock    = wall (start=%llu x100ns)\n",
                  (unsigned long long)t.clock_start_100ns);
     if (t.skip_logo) std::fprintf(out, "trace-input skip-logo= 1（写引擎 show-logo 标志；不改 root script）\n");
     if (t.accept_recovery_dialog) {
@@ -2393,8 +2371,6 @@ std::uint64_t Machine::traceInputsHash() const {
     mix(t.agerc_sha256.data(), t.agerc_sha256.size());
     mix(t.native_overrides.data(), t.native_overrides.size());
     mix(&t.clock_start_100ns, sizeof(t.clock_start_100ns));
-    const std::uint8_t real = t.real_time ? 1 : 0;
-    mix(&real, 1);
     // ★ 只有真的开了 `--skip-logo` 才混入：默认路径的 trace hash 与旧基线保持不变
     //   （开关一变就是另一条执行路径，必须能看出差异）。
     if (t.skip_logo) {
@@ -2828,8 +2804,8 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
     // =================================================================================
     // ---- ④ Verbose（`--profile` / `--report` / `--log-level info` 及以上）：旧的逐项读数
     // =================================================================================
-    std::fprintf(out, "trace-in  : exe=%s | clock=%s | hash=%016llX\n", ti.exe_path.c_str(),
-                 ti.real_time ? "REAL-TIME" : "virtual", (unsigned long long)traceInputsHash());
+    std::fprintf(out, "trace-in  : exe=%s | clock=wall | hash=%016llX\n", ti.exe_path.c_str(),
+                 (unsigned long long)traceInputsHash());
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
     std::fprintf(out, "rep-bulk  : hits=%llu declines=%llu (bulk=%s)\n",

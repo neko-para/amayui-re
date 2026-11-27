@@ -3137,36 +3137,6 @@ const MUTATIONS = [
     what:
       '32bpp 跨序（`{21,22}↔{32,33}`）不换 R/B ⇒ `load-surface+format-pairs` 的 swapRbPlan 断言红（实测 8 failures）',
   },
-  // ── S3 音频泵（`REQ-01M7JZM1QQ728KX1C0G2F232T1`；守卫 = `aot-audio-pump` / `audio-device`）──
-  //   ★ 这三条代表"泵**进来了**但**不该进来**"这一类静默失效：缺省档每块边界都抢 audio mutex、
-  //     或者把节流去掉（每次派发都过一遍的热路径）、或者账只记了一半。
-  {
-    // S3：丢掉 off 判据 ⇒ 缺省档每块边界都**真的进** `pump()`（抢 audio mutex / 推进混音 / 改设备时钟），
-    //   而 stdout 仍可能看起来没变 —— 本单最该被钉住的**静默**破法。
-    file: 'apps/emulator-lift/src/runtime/audio_pump_gate.h',
-    from: '        if (!f.enabled) return false;             // ★ off 档：一次都不进 pump（本单最硬的一条）',
-    to: '        if (false) return false;  // 变异：丢掉 off 判据（缺省档会进 pump）',
-    guard: 'ctest:aot-audio-pump',
-    ctest: 'aot-audio-pump',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-pump',
-    what:
-      'S3 泵闸门丢掉 `!f.enabled` ⇒ `--audio off`（缺省档）每块边界都进 `pump()`' +
-      ' ⇒ `aot-audio-pump` 的 `s3-pump-gate-off-never-due` 红（实测 6 failures：pumped=6212 ≠ 0）',
-  },
-  {
-    // S3：节流被去掉 ⇒ 块边界（每次派发都过一遍的热路径）每块都去抢 audio mutex。
-    file: 'apps/emulator-lift/src/runtime/audio_pump_gate.h',
-    from: '        return f.insns >= next_check_;',
-    to: '        return true;  // 变异：不节流（每块都泵）',
-    guard: 'ctest:aot-audio-pump',
-    ctest: 'aot-audio-pump',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-pump',
-    what:
-      'S3 去掉 `kCheckStride` 节流（`due()` 恒真）⇒ 10 万块边界泵 100000 次而不是 25 次' +
-      ' ⇒ `aot-audio-pump` 的 `s3-pump-gate-stride-throttles` 红（实测 4 failures：100000 ≠ 25）',
-  },
   // ── AOT 音频接线（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 6；守卫 = `aot-audio-wiring`）──
   //   ★ 代表"**接线断了**"这类**自证式断言抓不到**的静默失效：`--sound` 从 CLI→引擎的路上被摘掉，
   //     而 `kAotSoundNotice` 那句 `muted=0` 照旧打印 —— 引擎其实是静音的。

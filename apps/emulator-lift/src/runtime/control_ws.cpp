@@ -7,7 +7,7 @@
 //   · **控制线程**（一条）= 唯一碰 socket / beast 对象 / JSON 的线程。形状是"async + 10 ms 轮询"：
 //     `io_context.run_for(10ms)` 收 accept / HTTP upgrade / 帧，轮询间隔里做两件主线程交办的事
 //     （把答复序列化发出去、收口时发 `bye`）。⛔ 不在控制线程里阻塞读（那会让 `quit` 的 join 挂死）。
-//   · **主线程** = 唯一碰 guest 状态 / `VirtualClock` / `WindowManager` 的线程（`serve()` 在汇点里跑）。
+//   · **主线程** = 唯一碰 guest 状态 / `Clock` / `WindowManager` 的线程（`serve()` 在汇点里跑）。
 //   · 两边只共享一个 mutex + 两个 cv + 一个小状态块（`has_req` / `reply` / `client_connected`）。
 //
 // ★ 安全边界（design-ws §2.7）：
@@ -82,7 +82,7 @@ namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 using json = nlohmann::json;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 // 一帧 JSON 文本的上限（design-ws §2.4）。超限 ⇒ beast 自带 `message_too_big` ⇒ 关连接。
 constexpr std::size_t kReadMessageMax = 1024u * 1024u;
@@ -385,7 +385,7 @@ struct Control::Impl {
     std::atomic<bool> shutting_down{false};
     std::string run_reason = "stopped";
     std::string requested_by = "none";  // client | idle | orphan | none
-    Clock::time_point last_activity = Clock::now();
+    SteadyClock::time_point last_activity = SteadyClock::now();
     // ---- 仅主线程状态 ----
     bool paused = false;
     const char* paused_at = "";
@@ -398,7 +398,7 @@ struct Control::Impl {
         bool for_frames = false;
         std::uint64_t frame_target = 0;
         std::uint64_t guest_100ns_target = 0;
-        Clock::time_point deadline{};
+        SteadyClock::time_point deadline{};
     } watch;
     std::atomic<bool> watching_flag{false};
 
@@ -740,13 +740,13 @@ void Control::Impl::shutdownAll(const std::string& reason, const char* requested
 // =====================================================================================
 void Control::Impl::threadMain() {
     doAccept();
-    Clock::time_point bye_deadline{};
+    SteadyClock::time_point bye_deadline{};
     while (!stop_thread.load(std::memory_order_acquire)) {
         ioc.run_for(kPollInterval);
         if (session_dead) finishSession(!shutting_down.load());
         pumpReply();
         if (shutting_down.load()) {
-            if (bye_deadline == Clock::time_point{}) bye_deadline = Clock::now() + kByeBudget;
+            if (bye_deadline == SteadyClock::time_point{}) bye_deadline = SteadyClock::now() + kByeBudget;
             if (awaiting_reply) {
                 // 未决请求等不到汇点（run 已经返回）⇒ 兜底答复 `shutting_down`（⛔ 让 CLI 挂死）。
                 std::string id;
@@ -762,7 +762,7 @@ void Control::Impl::threadMain() {
                 bye_sent = true;
                 sendText(byeJson());
             }
-            if ((outq.empty() && !writing) || Clock::now() >= bye_deadline) break;
+            if ((outq.empty() && !writing) || SteadyClock::now() >= bye_deadline) break;
         }
         ioc.restart();
     }
@@ -1019,7 +1019,7 @@ void Control::Impl::handleFrame(const std::string& text) {
         req_global = cmd.global;
         reply_ready = false;
         has_req = true;
-        last_activity = Clock::now();
+        last_activity = SteadyClock::now();
     }
     pending_flag.store(true, std::memory_order_release);
     cv_req.notify_all();
@@ -1160,7 +1160,7 @@ Control::Impl::WatchPoll Control::Impl::pollWatchLocked(Context& ctx) const {
     }
     if (satisfied) return WatchPoll::Completed;
     // ③ 等不到（帧不推进的屏上 `--for frames` 必然撞这里）⇒ 放弃超时（宿主墙钟）。
-    if (Clock::now() >= watch.deadline) return WatchPoll::TimedOut;
+    if (SteadyClock::now() >= watch.deadline) return WatchPoll::TimedOut;
     return WatchPoll::KeepRunning;
 }
 
@@ -1168,14 +1168,14 @@ bool Control::Impl::waitForCommandLocked(std::unique_lock<std::mutex>& lk, std::
     const std::chrono::milliseconds idle_ms = toMs(opts.idle_timeout_s);
     const std::chrono::milliseconds orphan_ms = toMs(opts.orphan_timeout_s);
     bool orphan_armed = false;
-    Clock::time_point orphan_deadline{};
+    SteadyClock::time_point orphan_deadline{};
     for (;;) {
         if (shutting_down) {
             *cause = "shutdown";
             return false;
         }
         if (has_req) return true;
-        const Clock::time_point now = Clock::now();
+        const SteadyClock::time_point now = SteadyClock::now();
         if (!client_connected) {
             if (!orphan_armed && orphan_ms.count() > 0) {
                 orphan_armed = true;
@@ -1189,12 +1189,12 @@ bool Control::Impl::waitForCommandLocked(std::unique_lock<std::mutex>& lk, std::
             return false;
         }
         const bool idle_on = idle_ms.count() > 0;
-        const Clock::time_point idle_deadline = idle_on ? last_activity + idle_ms : Clock::time_point::max();
+        const SteadyClock::time_point idle_deadline = idle_on ? last_activity + idle_ms : SteadyClock::time_point::max();
         if (idle_on && now >= idle_deadline) {
             *cause = "idle";  // 暂停态且无未决命令
             return false;
         }
-        Clock::time_point until = idle_deadline;
+        SteadyClock::time_point until = idle_deadline;
         if (orphan_armed && orphan_deadline < until) until = orphan_deadline;
         cv_req.wait_until(lk, until);
     }
@@ -1231,7 +1231,7 @@ bool Control::Impl::serve(Context& ctx) {
                         watching_flag.store(false, std::memory_order_release);
                         Reply rep = stateReply();
                         fillClock(ctx, &rep);
-                        last_activity = Clock::now();
+                        last_activity = SteadyClock::now();
                         publishLocked(rep);
                         lk.unlock();
                         cv_req.notify_all();
@@ -1291,7 +1291,7 @@ bool Control::Impl::serve(Context& ctx) {
             req_for_frames = false;
             req_for_ms = false;
             req_path.clear();
-            last_activity = Clock::now();
+            last_activity = SteadyClock::now();
         }
 
         Reply rep;
@@ -1342,7 +1342,7 @@ bool Control::Impl::serve(Context& ctx) {
                         watch.guest_100ns_target =
                             ctx.clock->now100ns() + static_cast<std::uint64_t>(ms * 10000.0);
                     }
-                    watch.deadline = Clock::now() + toMs(opts.predicate_timeout_s);
+                    watch.deadline = SteadyClock::now() + toMs(opts.predicate_timeout_s);
                     {
                         std::lock_guard<std::mutex> lk(mu);
                         consumeLocked();

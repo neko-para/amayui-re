@@ -1,13 +1,13 @@
 // emulator-lift · 计时族（kernel32 + winmm）
 //
-// ★ 口径：**时间只来自 `cpu.clock`（VirtualClock）**。⛔ 不读宿主时钟、不 sleep、不随机 ⇒
-//   同一份 guest 输入在任意机器 / 任意时刻跑出来的 tick / FILETIME / SYSTEMTIME 逐位相同
-//   （这是判据 A4 的前提，见 clock.h）。
+// ★ 口径：**时间只来自 `cpu.clock`（唯一档 = 墙钟）**。⛔ 不读宿主 `time()` / 不随机。
+//   ⚠ 因为时钟是墙钟，同一份 guest 输入在不同机器 / 不同时刻跑出来的 tick / FILETIME / SYSTEMTIME
+//   本来就不同 —— **不承诺确定性**（虚拟时钟档已于 2026-11-27 整档移除，见 clock.h）。
 //
 // ★ 本文件用的两个读数口径（BUG-30 之后**必须分开**）：
-//   · **uptime** = `cpu.clock->now100ns()` / `nowMs()` / `qpc()`：宿主启动起算的**单调**读数
-//     （虚拟档 = 从 0 起算的虚拟时间）。它只服务 `GetTickCount*` / `timeGetTime` / QPC，
-//     ⛔ **不当 epoch 展开**（修前就是这么错的：存档显示 `1970/1/6` = 1970 + 宿主 uptime）。
+//   · **uptime** = `cpu.clock->now100ns()` / `nowMs()` / `qpc()`：宿主启动起算的**单调**读数。
+//     它只服务 `GetTickCount*` / `timeGetTime` / QPC，⛔ **不当 epoch 展开**
+//     （修前就是这么错的：存档显示 `1970/1/6` = 1970 + 宿主 uptime）。
 //   · **墙钟** = `cpu.clock->wall100ns()`：1970-01-01 00:00:00Z 起算的 100 ns（口径见 clock.h）。
 //     `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` 用它；
 //     `GetLocalTime` 再用**宿主时区**（`shims/time_zone.h`，含 DST）换算。
@@ -19,14 +19,13 @@
 //   1. `GetLocalTime` 的时区来自**宿主**（Windows `SystemTimeToTzSpecificLocalTime` /
 //      POSIX `localtime_r` 的 `tm_gmtoff`，DST 按被换算的时刻判定）。影响：guest 看到的是
 //      跑这一趟的那台机器的时区；同一份输入在不同时区的机器上会差 UTC 偏移（这是**宿主事实**，
-//      与游戏数据无关）。虚拟时钟档（非 AOT）的墙钟 base 缺省 0 ⇒ 本地时间落在 1970 附近，
-//      理论上只有测试会看到；产品臂（AOT）恒 real-time ⇒ 恒是真日期。
-//   2. **`QueryPerformanceFrequency` 是仿真值 3,579,545 Hz**（VirtualClock 的固定频率，不是
-//      宿主 TSC / 高精度计时器）。QPC 因此也是虚拟的、单调的、可复现的。
+//      与游戏数据无关）。产品臂的墙钟 = 真实日期（`Clock` 唯一档）。
+//   2. **`QueryPerformanceFrequency` 是仿真值 3,579,545 Hz**（`Clock::qpcFrequency()` 的固定
+//      频率，不是宿主 TSC / 高精度计时器）。QPC 因此单调、且与 guest uptime 同源。
 //   3. **`GetTickCount64` 走 EAX:EDX 两个寄存器返回**（`ShimCall` 只有一个 32 位 `result`）；
 //      低 32 位在 EAX、高 32 位在 EDX。这是本 shim 层约定的 64 位返回形态。
 //   4. **`timeBeginPeriod` / `timeEndPeriod` 恒返回 TIMERR_NOERROR(0)** 且什么也不改：本模拟器
-//      的定时分辨率由虚拟时钟决定，没有"系统定时器精度"这回事。影响：无（调用方只检查返回值）。
+//      的定时分辨率由**墙钟**决定，没有"系统定时器精度"这回事。影响：无（调用方只检查返回值）。
 //   5. **`timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 是**协作式**实现**（不是 stub）：
 //      定时器登记进 `cpu.shim.timers`，到期的回调由 **dispatcher 在块边界**按虚拟时钟触发
 //      （机制见 x86.h 的 GuestTimer / kTimerCallbackReturnEa）。与真机的唯一差别：回调不会抢占
@@ -56,7 +55,7 @@ void requireMem(X86& cpu, const char* api) {
 }
 
 void requireClock(X86& cpu, const char* api) {
-    if (!cpu.clock) shimAbort("kernel32", api, "cpu.clock 为空（Machine 没装配虚拟时钟）");
+    if (!cpu.clock) shimAbort("kernel32", api, "cpu.clock 为空（Machine 没装配时钟）");
 }
 
 // 把一个 64 位值写进 guest 的 8 字节槽（FILETIME / LARGE_INTEGER）
@@ -111,8 +110,8 @@ CivilTime localCivilFromWall100ns(std::uint64_t wall_100ns) {
     const std::int32_t offset_sec =
         time_zone::utcOffsetSecondsFor(wall / static_cast<std::int64_t>(kTicksPerSec));
     const std::int64_t local = wall + static_cast<std::int64_t>(offset_sec) * 10000000LL;
-    // 虚拟档 base=0（1970-01-01）+ 西半球负偏移 ⇒ 会落到 1970 之前；夹到 epoch，
-    // ⛔ 不把它按无符号回绕展开成 58xxx 年（产品臂恒 real-time ⇒ 只有测试可能碰到）。
+    // 宿主时区偏移可能是负的 ⇒ 本地时间落到 1970 之前；夹到 epoch，
+    // ⛔ 不把它按无符号回绕展开成 58xxx 年。
     return civilFrom100ns(static_cast<std::uint64_t>(local < 0 ? 0 : local));
 }
 

@@ -9,7 +9,7 @@
 // ★ 快照的**逐位稳定性**（判据 3b：同一暂停点连采两次逐位相同）：
 //   · `state_seq` 只在进入 / 离开暂停时变（⛔ 不在每次采样时自增）；
 //   · ⛔ 不放 `wall_ms` / `now` / 任何"现在几点"字段；
-//   · `clock.paused_total_ms` 用 **已结算** 口径（`VirtualClock::pausedCommittedMs()`，
+//   · `clock.paused_total_ms` 用 **已结算** 口径（`Clock::pausedCommittedMs()`，
 //     不含当前冻结区间）⇒ 暂停中隔多久采，这个数都不动（含当前区间的口径在 pause/resume 的
 //     `res` 里，S1 不变 —— 见 `control_ws.cpp` 的 `serve()`）。
 #pragma once

@@ -1,47 +1,26 @@
-// emulator-lift · AOT 音频的 **S0 定档谓词 + S1 参数面 + lead 参数 + AOT CLI 日志级别**（pure 档）
+// emulator-lift · AOT 音频的 **参数面 + lead + AOT CLI 日志级别**（pure 档）
 //
 // 判据（红了意味着什么）：
-//   ① **S0 真值表**：`audioThreadMode(mode, realTime)` —— **两个事实**（Sdl + 墙钟）才进真 feeder
-//      线程。★ 专门断言 **(Sdl, realTime=true) == true** —— 那一格就是 AOT 臂的形状
-//      （AOT 没有 Machine，但宿主有同一份 `GuestLayout`；用"有没有 Machine"当"能不能起 feeder"
-//      的替身会让 AOT 恒走主线程 D 泵、预读 600 ms ⇒ SE 延迟 ~0.6 s）。
-//      红了 ⇒ "AOT 形状不再进 thread 档"（有人把 `has_machine` 一类的门加回来了）。
-//   ①b **布局是结构前提**：`Machine` 的 `attach(..., layout_)` 之后 `feederTebForTest()` 等于
-//      `GuestLayout::feeder_teb`；**宿主给了布局但值不可用（0）⇒ `begin(Sdl, 墙钟)` 必须返回 false**
-//      （⛔ 不静默退回 D 泵）。这一条在 `openSdl` 之前判 ⇒ 不需要音频设备，pure 档可跑。
+//   ① **布局是结构前提**：`Machine` 的 `attach(..., layout_)` 之后 `feederTebForTest()` 等于
+//      `GuestLayout::feeder_teb`；**宿主给了布局但值不可用（0）⇒ `begin(Sdl)` 必须返回 false**
+//      （⛔ 不静默退化）。这一条在 `openSdl` 之前判 ⇒ 不需要音频设备，pure 档可跑。
 //   ② **S1 值域**：`parseAudioMode` 只认 `off` / `sdl`（大小写敏感、不许前后缀 / 空串），
 //      非法值返回 `!ok` + **非空** error，且错误文案**点名** `off / sdl`。
-//      ★ `virtual` 已于 2026-11-22 整档移除 ⇒ 它现在是**非法值**（旧档没有 feeder 线程、
-//        会被误读成产品态音频）。
-//      红了 ⇒ 非法 `--audio` 被当成 off 静默接受（"以为有声"），或合法值被拒（"无法指定"）
-//      —— 两种都比红难发现。
-//   ②b **lead 参数面**：`leadBytesFor(thread_mode)` = 19200 / 115200（100 ms / 600 ms @ 48k/16/2ch）。
-//      红了 ⇒ thread 档仍用 600 ms 的预读（= 本单要消灭的那 0.6 s 延迟），或两点常量漂了。
+//      ★ `virtual` 已于 2026-11-22 整档移除 ⇒ 它现在是**非法值**。
+//      红了 ⇒ 非法 `--audio` 被当成 off 静默接受（"以为有声"），或合法值被拒（"无法指定"）。
+//   ②b **lead 参数面**：`kThreadLeadBytes` = 19200（100 ms @ 48k/16/2ch，唯一档 = feeder 线程）。
+//      红了 ⇒ 有人把 600 ms 的旧 D 档 lead 加回来，或常量与音频格式漂了。
 //   ③ **S1 静音门**：`AudioEngine` 的 `muted()` 与 `sound` **反相**（缺省 `--sound` 关 ⇒ muted）。
-//      红了 ⇒ `--sound` 没接进 `mute_`（AOT 曾经的形状：`aot_host.cpp` 硬写 `sound=false`）⇒
-//      就算设备 / 混音都跑通，交付缓冲仍被交付点 memset 成 0。
-//   ④ **S1 dump 不是档位**：`configure(Off, <非空路径>, …)` ⇒ `configuredMode()` 仍是 `Off`
-//      （⛔ 不再"提升"成某个档），但 `deviceFreeMix()` 为真（设备无关的 dump 路径）。
-//      红了 ⇒ `--audio-dump` 给了却没有虚拟设备时钟 ⇒ 那 44 字节 WAV 永远只有头（S2 的
-//      "有输出"判据消失）；或 dump 又把一个假档位装回参数面。
-//   ④b **`--audio sdl` 打不开设备 = 没有输出**：用 SDL 自己的驱动选择（`SDL_AUDIODRIVER`
-//      指向一个不存在的驱动）造一次必败的 `openSdl()` ⇒ `begin()` 仍返回 true，但
-//      `mode()==Off`、`enabled()==false`（不跑混音）、`snapshot().device=="none"`、
-//      `snapshot().muted==true`、`fills==0`。红了 ⇒ 设备失败被静默当成"有音频"或被当成
-//      "没要音频"（前者假产品态，后者让摘要里连 `device=none` 都看不到）。
-//      ★ 判据是**引擎状态**；不需要这台机器有/没有声卡（注入的是"驱动名不存在"）。
-//   ⑤ **S2 缺省档**：`configure(Off, "", false)` + `begin()` + `end()` 之后 `enabled()` 仍 false、
-//      `mode()` 仍 `Off`、`threadMode()` 仍 false。红了 ⇒ **默认档**（不带任何新 flag）会开设备 /
-//      起泵 / 打音频读数 ⇒ 默认档输出不再逐字不变（本单最硬的一条）。
-//   ⑤b **AOT CLI 日志级别**：`LogConfig` 缺省 = `warn`（默认档输出逐字不变的判据面）；
-//      `logSetLevel` 只认闭集、非法值返回 false 且**不改**当前级别。
-//      红了 ⇒ `--log-level` 的接线/缺省漂了（`[audio] mode=…` / `play state=` 的可见性随之漂）。
+//   ④ **dump 不是档位**：`configure(Off, <非空路径>, …)` ⇒ `configuredMode()` 仍是 `Off`，
+//      但 `deviceFreeMix()` 为真（设备无关的 dump 路径）。
+//   ④b **`--audio sdl` 打不开设备 = 没有输出**：注入一个不存在的 `SDL_AUDIODRIVER` ⇒ `begin()`
+//      仍返回 true，但 `mode()==Off`、`enabled()==false`、`snapshot().device=="none"`、`muted==true`。
+//   ⑤ **缺省档**：`configure(Off, "", false)` + `begin()` + `end()` 之后 `enabled()` 仍 false。
+//   ⑤b **AOT CLI 日志级别**：`LogConfig` 缺省 = `warn`；`logSetLevel` 只认闭集。
 //
 // ★ 为什么是 pure 档：`add_test` 在 CMakeLists 的最外层（§12.4 判据 = 注册位置）⇒ 默认 `ctest` 就跑；
-//   本文件不碰**真**音频设备（`AudioMode::Sdl` 只作为**谓词输入** / 在 `openSdl` 之前就被拒的路径 /
+//   本文件不碰**真**音频设备（`AudioMode::Sdl` 只作为在 `openSdl` 之前就被拒的路径 /
 //   显式注入"驱动名不存在"的失败面出现）、不读 LFS / 安装树。
-// ★ 为什么把判据抽成纯函数（而不是"begin 之后看 threadMode()"）：后者在本机没有音频设备时会因
-//   `openSdl` 失败而落回 off（`audio.cpp` 的 `begin()`）⇒ 假绿。
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -76,34 +55,8 @@ void setSdlAudioDriver(const char* value) {
 int main() {
     using namespace lift_test;
 
-    // ---- ① S0 定档谓词：2 个输入的真值表（4 格全覆盖）----
-    g_current_case = "s0-thread-mode-truth-table";
-    {
-        struct Row {
-            lift::AudioMode mode;
-            bool real_time;
-            bool want;
-        };
-        const Row kRows[] = {
-            // mode      realTime  want（thread 档）
-            {lift::AudioMode::Off, false, false},
-            {lift::AudioMode::Off, true, false},
-            {lift::AudioMode::Sdl, false, false},   // 虚拟时钟 ⇒ D 泵
-            // ★ 这一格 = **AOT 臂**（`--audio sdl` + 墙钟 + 宿主给了 GuestLayout）⇒ 必须 thread。
-            //   AOT 没有 Machine，但 `AotHost::layout_` 与 `Machine::layout()` 是同一份 GuestLayout。
-            {lift::AudioMode::Sdl, true, true},
-        };
-        for (const Row& r : kRows) {
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::audioThreadMode(r.mode, r.real_time)),
-                              static_cast<std::uint32_t>(r.want ? 1u : 0u));
-        }
-        // 用**一句话**再钉一次（读代码的人先看到它，再看上面那张表）：
-        //   `Sdl + 墙钟 ⇒ thread`（这就是用户裁决的机械表达）。
-        LIFT_CHECK(lift::audioThreadMode(lift::AudioMode::Sdl, true));
-    }
-
-    // ---- ①b 布局是结构前提：有布局 ⇒ TEB 来自布局；布局不可用 ⇒ begin 响亮失败 ----
-    g_current_case = "s0-feeder-layout-is-structural";
+    // ---- ① 布局是结构前提：有布局 ⇒ TEB 来自布局；布局不可用 ⇒ begin 响亮失败 ----
+    g_current_case = "feeder-layout-is-structural";
     {
         std::string err;
         lift::Machine m;
@@ -116,19 +69,16 @@ int main() {
         LIFT_CHECK_EQ_U32(m.audio().feederTebForTest(), 0x7FFD6000u);
         LIFT_CHECK(m.audio().feederLayoutGivenForTest());
 
-        // 宿主给了布局但值不可用（0）⇒ `begin(Sdl, 墙钟)` **必须**返回 false，且**在 openSdl 之前**
-        // 就返回（pure 档不能碰设备）。这是"⛔ 不静默退回 D 泵"的判据。
+        // 宿主给了布局但值不可用（0）⇒ `begin(Sdl)` **必须**返回 false，且**在 openSdl 之前**
+        // 就返回（pure 档不能碰设备）。这是"⛔ 不静默退化"的判据。
         lift::GuestLayout bad{};
         bad.feeder_teb = 0;  // 唯一的坏值
         lift::AudioEngine a;
         a.attach(&m.cpu(), &m.mem(), &m.clock(), bad);
-        m.clock().setRealTime(true);  // 墙钟：thread 档的第二个事实（void，见 clock.h）
-        LIFT_CHECK(m.clock().realTime());
         LIFT_CHECK(a.configure(lift::AudioMode::Sdl, std::string(), /*sound=*/false, &err));
         std::string begin_err;
         LIFT_CHECK(!a.begin(&begin_err));
         LIFT_CHECK(!begin_err.empty());
-        LIFT_CHECK(!a.threadMode());
         // 同一台独立引擎：三参 attach（没有布局）⇒ `feederLayoutGivenForTest()` 为假（过渡重载）。
         lift::AudioEngine legacy;
         legacy.attach(&m.cpu(), &m.mem(), &m.clock());
@@ -169,16 +119,11 @@ int main() {
         }
     }
 
-    // ---- ②b lead 参数面：thread 档 = 100 ms（19200 B），泵档 = 600 ms（115200 B）----
-    g_current_case = "s0-lead-bytes-by-thread-mode";
+    // ---- ②b lead：唯一档 = feeder 线程 ⇒ 100 ms（19200 B）----
+    g_current_case = "lead-bytes";
     {
         // 48k / 16 bit / 2 ch ⇒ 192000 B/s。
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::kThreadLeadBytes), 19200);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::kLeadBytes), 115200);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::leadBytesFor(true)), 19200);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::leadBytesFor(false)), 115200);
-        // 量级判据：thread 档的预读必须比泵档小一个量级（这正是本单要消灭的 0.6 s 延迟）。
-        LIFT_CHECK(lift::leadBytesFor(true) * 4u < lift::leadBytesFor(false));
     }
 
     // ---- ③④ S1：`configure` 的静音门与 dump 提升（真源在 `AudioEngine::configure`）----
@@ -206,7 +151,7 @@ int main() {
                           static_cast<std::uint32_t>(lift::AudioMode::Off));
 
         // `--audio-dump <非空>` + `--audio off` ⇒ 档位**不提升**（dump 不是档位）：`configuredMode()`
-        // 仍是 Off，只是这一跑多一条"设备无关的 dump 路径"（虚拟时钟 + 交付点写 WAV）。
+        // 仍是 Off，只是这一跑多一条"设备无关的 dump 路径"（墙钟游标 + 交付点写 WAV）。
         // ⛔ `--audio` 的参数面只有 off / sdl（`virtual` 已于 2026-11-22 移除）。
         LIFT_CHECK(m.configureAudio(lift::AudioMode::Off, "lift-aot-audio-flags-not-written.wav",
                                     /*sound=*/false, &err));
@@ -237,13 +182,11 @@ int main() {
         LIFT_CHECK(a.begin(&err));
         LIFT_CHECK(!a.enabled());
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mode()), static_cast<std::uint32_t>(lift::AudioMode::Off));
-        LIFT_CHECK(!a.threadMode());
         LIFT_CHECK(a.muted());
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(a.stats().fills), 0);
         a.end();
         // end 之后仍是 off：⛔ 不许"收口时补开设备 / 补打一行看起来有音频的读数"。
         LIFT_CHECK(!a.enabled());
-        LIFT_CHECK(!a.threadMode());
     }
 
     // ---- ④b `--audio sdl` 打不开设备 ⇒ **没有音频输出**（不跑混音；摘要 device=none / muted=1）----
@@ -268,7 +211,6 @@ int main() {
                           static_cast<std::uint32_t>(lift::AudioMode::Off));
         LIFT_CHECK(!a.enabled());        // 没有输出 ⇒ 不跑混音 / 不注册 buffer
         LIFT_CHECK(a.audioRequested());  // 但这一跑**要过**音频 ⇒ 摘要仍要如实写
-        LIFT_CHECK(!a.threadMode());
         const lift::AudioEngine::Snapshot snap = a.snapshot();
         LIFT_CHECK(std::strcmp(snap.device, "none") == 0);  // ⛔ 不是 fallback
         LIFT_CHECK(snap.muted);                             // 没有可听 / 可写出的 sink ⇒ muted=1

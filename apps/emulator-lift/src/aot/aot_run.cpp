@@ -6,7 +6,7 @@
 //   ② 三个合成 EA（`0x7FFEF008` 续延 / `0x7FFEF004` 定时器返回 / SEH 派发）+ 块边界定时器触发；
 //   ③ 按**与解释器同一张表**（T2 §2.2）归类停因；
 //   ④ `insns` 由 `lift_tick` 记账（`X86::insns`，与解释器同一份语义；D2）；
-//   ⑤ 时钟 = **wall clock**（D2b：`clock_.setRealTime(true)`；⛔ 不引入虚拟时钟档）。
+//   ⑤ 时钟 = **墙钟**（`Clock` 唯一档；⛔ 没有虚拟时钟 / `--real-time` 开关）。
 //   ★ 另有两条**默认档就改写 guest 状态**的 EA 钩子（T2 §1.2 #14）：`0x4BA718` 把 EAX 置 0
 //     （`--accept-recovery-dialog` 的默认"绕过"）—— 不实现它 boot 会弹 MessageBoxA 并挂住。
 //
@@ -48,14 +48,8 @@ namespace {
 //   ★ 常量在 `aot/aot_hook_ea.h`（**唯一一份**：S7 之后生成器也读它，保证这个 EA 留在派发边界上）。
 //   ★ 这个常量**只对 D1 pin 住的那一份 exe** 成立 —— 换 exe 会在 `loadImage` 就被 pin 拦下。
 
-// 每 4096 条查一次墙钟（与解释器 `machine.cpp:1148-1157` 同粒度）。
+// 每 4096 条查一次墙钟（与解释器 `machine.cpp` 同粒度）。
 constexpr std::uint64_t kCheckStride = 4096u;
-
-// ★ S3：音频泵的节流粒度**必须**与块边界的 `kCheckStride` 同一份（`AudioPumpGate::kStride`）。
-//   两处各写各的 = 迟早漂，而漂了**没有任何症状**（只是 fill 变稀 / 变密）。这条 `static_assert`
-//   是唯一会响的地方 ⇒ ⛔ 不要删它去"绕过"编译错，改其中一处即可。
-static_assert(kCheckStride == AudioPumpGate::kStride,
-              "音频泵的节流粒度（AudioPumpGate::kStride）必须 == 块边界的 kCheckStride");
 
 // ★ S7（D53）：生成代码的 `lift_dyn` 用的派发表查找 —— 与 trampoline 走的是**同一张表**
 //   （同一个 `aot_dispatch.cpp` 的哈希槽数组，⛔ 不另建第二份），但**不记 trampoline 的派发账**：
@@ -156,9 +150,7 @@ AotHost::Pump AotHost::pumpSyntheticEas(AotRunResult& r) {
             r.detail = call_err.empty() ? std::string("guest 回调续延失败") : call_err;
             return Pump::Stop;
         }
-        // 音频泵借用 `[esp]` 作为 `sub_4B6C30` 的返回点；续延完成后必须还回原返回地址。
-        // `--audio off` 下恒等，但顺序与解释器一致（`machine.cpp:1309`）。
-        audio_.afterGuestCall();
+        // 音频 feeder 借用过 `[esp]` 的旧痕迹已在 fill 收尾里还回（⛔ 现在没有主线程泵）。
         // 续延里也可能**主动结束运行**（例如影片停机链）：那时 `while (running)` 会直接退出，
         // 不给原因就成了静默缝 ⇒ 这里补 StopReason::Stopped（与解释器同口径）。
         if (!cpu_.running) {
@@ -388,7 +380,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     cpu_.stop_kind = HostStopKind::None;  // ★ 按轮重置（machine.cpp:1094）
     control_stop_ = false;               // 控制层的置停标志也是**按轮**的事实（不跨 run）
     cpu_.shim.max_frames = opts.max_frames;
-    if (!clock_.realTime()) clock_.setRealTime(true);  // D2b：wall clock（⛔ 没有 --clock= 开关）
+    // ★ 时钟 = 墙钟（`Clock` 只有这一个档；⛔ 没有 `--clock=` 开关）。
     resetDispatchStats();
     // ★ 构建期库内建（v1：`_memcpy`）的运行期闸门开关：**只改闸门的答案**（缺省开）。
     //   IR 形状是构建期决定的；`--no-intrinsics` 让闸门返回 false ⇒ 回退原 lifted 函数体。
@@ -597,9 +589,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //     `time_limit_sec / until_ea / max_insns / stop_requested` 对整轮 run 是常量
     //     ⇒ 每派发省 4-6 次 load（旧形状每次都读）。
     //   · `audio_.enabled()` == `mode_ != AudioMode::Off`，而 `mode_` **只**在 `begin()`（在循环之前）
-    //     与 `end()`（在循环之后）里被写（`audio.cpp:186` 的 Sdl⇒Virtual 回退也在 `begin()` 内）
-    //     ⇒ 对整轮 run 是常量。⛔ 注意：外提的只是这一个 bool；`facts` 的计算仍在 if **里面**
-    //     （off 档的罚金必须仍是"零"级，见下面的长注释）。
+    //     与 `end()`（在循环之后）里被写（`audio.cpp` 的 Sdl⇒Off 回退也在 `begin()` 内）
+    //     ⇒ 对整轮 run 是常量。
     //   · 两个**一次性 latch**（④ recovery / ④' skip-logo）合成一个 bool：两者都是"命中一次就
     //     再也不看"的判据，中间没有能改它们的语句 ⇒ 一次 load 代替三次。
     const bool has_time_limit = opts.time_limit_sec > 0.0;
@@ -859,75 +850,14 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             }
         }
 
-        // ---- ⑤' S3 音频泵（**块边界**；按 `kCheckStride` 节流，⛔ 不是每块）----
-        //   ★ 为什么是**块边界**、而且正好在**这一格**（`aot_run.cpp:AotHost::run` 的 for 循环，
-        //     ⑤ 定时器之后、⑥ 分派之前）：
-        //     ① `pump()` 会**铺一个 guest 帧**（`sub_4B6C30`）⇒ 它只能在"宿主与 guest 之间"的
-        //        边界上做。`cpu_` 就是 lifted 侧现场（A′：`%st` 别名）⇒ 此刻
-        //        `pump()` 里的 `capture()`（`audio.cpp`）拿到的是一份**自洽**的 guest 现场；
-        //        若在派发中途做，`capture()` 会存下"半个块"的寄存器。
-        //     ② 在 ⓪/①/②/⑤ 之后：那些步骤会 `continue`（续延点 / 定时器铺帧 / 控制层置停）⇒
-        //        先让它们把 `cpu_.eip` 定下来，才不会在一个"其实是合成返回点"的边界上白泵一次。
-        //     ③ 在 ⑥ 分派之前：解释器里同一件事也在分派之前（`machine.cpp:1528-1547`）——
-        //        两条臂的"泵相对分派的时机"必须是同一个，否则 `fills` 的先后序列不可对齐。
-        //   ★ 与 S2 的 `begin()/end()`：`begin()` 在 `run()` 入口、`end()` 在收口（单出口）；
-        //     本节只在两者之间 ⇒ 泵永远不会碰已关闭的设备 / 已回填的 WAV（`enabled()` 在 `end()`
-        //     之后仍为真，但循环已经退出了 ⇒ 结构上不可能）。
-        //   ★ 与 Present 闸门 / 控制层暂停：它们都在**别的**位置、且各自 `continue`/`break`
-        //     （Present 闸门在 `present.cpp` 的回调里、控制层闸门在 ⓪− 且 `serve()` 会阻塞）
-        //     ⇒ 暂停期间根本走不到本节（⛔ 不泵 ⇒ 不推进设备时钟）；本节也**不写**任何控制层 /
-        //     presenter 状态（只写 guest 音频对象 + `stats_`）⇒ 两个方向都不会互相踩。
-        //   ★ 记账：`audio_pump_.noteCalled()` 紧跟 `pump()` 之后 ⇒ `calls()` == **真调**的次数
-        //     （off 档恒 0 —— 本单最容易悄悄破的一条，读 `LIFT_AOT_AUDIO_TRACE`）。
-        //   ★ **off 档的代价** = 最外层那一次 `enabled()` 读 + 一次分支（下面这行 ↓）。⛔ 不要把
-        //     `facts` 的计算提到这层 if **外面**：那是每块边界都要付的（300 帧 ≈ 5.4e7 次），
-        //     而 `--audio off` 是**缺省档** ⇒ 它的 penalty 必须是"零"级，不是"几纳秒"。
-        //   ★ **off 档的代价** = 循环外读到的那一个 bool + 一次分支（下面这行 ↓，lift-opt #5 外提）。
-        //     ⛔ 不要把 `facts` 的计算提到这层 if **外面**：那是每块边界都要付的（300 帧 ≈ 5.4e7 次），
-        //     而 `--audio off` 是**缺省档** ⇒ 它的 penalty 必须是"零"级，不是"几纳秒"。
-        if (audio_enabled) {
-            // ★ thread 档的**失败面**：`AudioPumpGate::due()` 在 thread 档恒假 ⇒ 下面那条
-            //   `audio_.pump()` 永远不会被调 ⇒ `pump()` 里的 `feeder_error_` 早退在 AOT **不可达**。
-            //   ⇒ 这里补一条只读判据（原子读，只在音频开启时付）：feeder 挂了必须**停**并点名，
-            //   ⛔ 不许变成"继续跑但没声"。解释器臂仍走 `pump() == Error`，两条臂的失败面同一条。
-            if (audio_.threadMode() && audio_.feederFailed()) {
-                r.reason = AotStop::Unimplemented;
-                r.detail = "音频 feeder 线程失败：" + audio_.feederErrorText();
-                break;
-            }
-            AudioPumpFacts pf;
-            pf.enabled = audio_.enabled();
-            pf.thread_mode = audio_.threadMode();
-            // 与解释器同一个谓词（`machine.cpp:1532` 的三个 negated 条件）；AOT 的嵌套 guest
-            // 回调都经 `GuestCallStack`（`cpu_.calls == &calls_`，`aot_host.cpp` 的 prepare）⇒ 一个就够。
-            pf.nested_guest_active = calls_.active() || cpu_.shim.timer_firing || seh_.busy();
-            pf.insns = cpu_.insns;
-            if (audio_pump_.due(pf)) {
-                // ★★★ **AOT 臂上 `AudioEngine::pump()` 的唯一调用点** ★★★
-                //   它被 `due()` 挡在前面：off 档 / thread 档 / 嵌套 guest 中一律进不来。
-                const AudioPump ap = audio_.pump();
-                audio_pump_.noteCalled(cpu_.insns);
-                if (ap == AudioPump::Suspended) {
-                    // ★ 与解释器**同一个形状**：`pump()` 只改 `cpu_`（`capture` / `restore` 都在
-                    //   `cpu_` 上）。A′ 之后 lifted 代码的真源**就是** `cpu_`（`%st` 别名）⇒
-                    //   不需要任何回读，只要把 `ea` 指到 `sub_4B6C30`。
-                    //   （A′ 之前这里要 `syncRegsFromCpu()` 把新 eip / 借走的 esp / 新 fs 现场
-                    //    抄回 `regs_`，否则生成代码从旧现场继续、借用的 `[esp]` / 续延点全丢。）
-                    ea = cpu_.eip;
-                    continue;
-                }
-                if (ap == AudioPump::Error) {
-                    // ★ 与解释器同一条（`machine.cpp:1542-1545`）：铺帧 / 参数失败 ⇒
-                    //   `Unimplemented` 停机并带上 `lastError()`。⛔ 不许静默继续跑（那会把
-                    //   "喂料彻底没在跑"变成"游戏卡在没声音"）。
-                    r.reason = AotStop::Unimplemented;
-                    r.detail = audio_.lastError().empty()
-                                   ? std::string("音频泵失败（lastError 为空）")
-                                   : ("音频泵：" + audio_.lastError());
-                    break;
-                }
-                // `Idle`：没有待办 / 混音已推进 / feeder 还没注册 ⇒ 下一个边界再来。
-            }
+        // ---- ⑤' 音频 feeder 的**失败面**（块边界；只在音频开启时付一次原子读）----
+        //   ★ 混音 / 喂料都在宿主线程（mixer + feeder），主线程**不再泵**：块边界只剩这条只读判据。
+        //     feeder 挂了必须**停**并点名，⛔ 不许变成"继续跑但没声"。
+        //   ★ `--audio off` 是**缺省档** ⇒ 它的代价必须是循环外那一个 bool + 一次分支（零级）。
+        if (audio_enabled && audio_.feederFailed()) {
+            r.reason = AotStop::Unimplemented;
+            r.detail = "音频 feeder 线程失败：" + audio_.feederErrorText();
+            break;
         }
 
         // ---- ⑥ 分派：shim 桩 EA → `lift_shim`；否则派发表 → `lift_cc_<根>`；都不是 ⇒ 响亮停 ----
@@ -1181,23 +1111,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //   "生成物在场"之后的路径只有这一个出口（`audio_.end()` 也只有这一处）。
     //   ⛔ 缺省档同样调用（`disarm()` 只关一个 bool，无输出、不改任何读数）。
     guestToken().disarm();
-    // ---- S3 泵的**收口读数**（opt-in 一行到 stderr；⛔ 缺省档**零输出**）----
-    //   ★ 为什么必须留这个口：本单最硬的一条是"**off 档一次都不进 pump**"，而 off 档按定义
-    //     **不许有 stdout 输出**（默认档逐字不变）⇒ 那条判据在正式摘要面上**没有**观察点。
-    //     这个 env 开关就是它的观察点：`LIFT_AOT_AUDIO_TRACE=1` + **默认 argv** ⇒ `calls=0`
-    //     （`calls` = 真调 `AudioEngine::pump()` 的次数，`AudioPumpGate::noteCalled` 唯一记账）。
-    //   ★ 为什么是 stderr 而不是 stdout：stdout 的逐字不变是**判据面**，一个 opt-in 读数也不许
-    //     混进去（否则"默认档 stdout 与改动前逐字相同"就只能靠"记得别开这个 env"来保证）。
-    //   ★ 一次性输出（不是周期性）⇒ 不违反 `AGENTS.md` §12.8 第 3 条；缺省 env 不设 ⇒ 一条都不打。
-    if (std::getenv("LIFT_AOT_AUDIO_TRACE") != nullptr) {
-        const AudioEngine::Snapshot a = audio_.snapshot();
-        std::fprintf(stderr, "[audio-pump] mode=%s calls=%llu fills=%llu fill_bytes=%llu pushed=%llu\n",
-                     a.mode, static_cast<unsigned long long>(audio_pump_.calls()),
-                     static_cast<unsigned long long>(a.fills),
-                     static_cast<unsigned long long>(a.fill_bytes),
-                     static_cast<unsigned long long>(a.pushed_bytes));
-    }
-    // ★ **收口补算最后帧 hash**（`[present-readback]` Phase A；1 次/run，⛔ 不是周期性输出）：
+    // ★ 收口补算最后帧 hash（`[present-readback]` Phase A；1 次/run，⛔ 不是周期性输出）：
     //   惰性化之后 `lastHash` 可能还没算（上一帧按 needs 谓词跳过了回读）⇒ 在摘要打印前补一次，
     //   让 `present : … lastHash=` 仍然是"这一帧"，⛔ 不是 0x0 的假读数。
     //   失败（target-base 不匹配 / 回读失败）只在 presenter 里 warn 一次 ⇒ 摘要打 `lastHash=0x0`
