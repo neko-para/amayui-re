@@ -3,16 +3,18 @@
 > 这个文件记 **"怎么量才算数"**。每条 = 能比什么 / 不能比什么 + 一条能重跑的命令。
 > ⛔ 仪器化读数不是性能成绩；⛔ 跨口径的读数不许放进同一张表；⛔ 读数过期不删（见 `observations.md` 的编号规则）。
 > 编号 `M-NN`。口径的**判据**是"两个人各自按这条跑，读数能对齐"。
+>
+> ★ **时钟只有一档：墙钟**（2026-11-27 起；`--real-time` / 虚拟时钟整档移除，见 `runtime/clock.h`）。
+> ⇒ 同一条命令跑两次的 `insns` / trace / 状态 hash **不承诺相同**；要跨次可比的判据只用
+> **输入清单**与**计数器**，⛔ 不用"逐字节相同"。
 
 ---
 
 ### M-01 · 墙钟只能在**同口径**内比较
-**能比**：同一构建 / 同一 `--present` 档 / 同一时钟档 / 同一输入脚本 / 同样开没开 profiler 的两次运行。
-**不能比**：换构建、换 `--present window` ↔ `headless`、换 `--real-time` ↔ 虚拟时钟、换有无 `--profile`。
+**能比**：同一构建 / 同一 `--present` 档 / 同一输入脚本 / 同样开没开 profiler 的两次运行。
+**不能比**：换构建、换 `--present window` ↔ `headless`、换有无 `--profile`。
 - **反例（实测）**：同一条 151M 条的 TITLE 重载帧，`.tmp/exitstall` 留档读 `55.3–57.7 ms/M`，
   `.tmp/clickfix` 留档读 `48.1–49.3 ms/M`（`observations.md` OBS-04）⇒ 差 14%，纯口径差异。
-- **另一个反例**：窗口模式会**自动**开 real-time（启动行 `⚠ 窗口模式（自动 real-time）`），
-  于是 `--present window` 的读数天然带宿主时钟；`--present headless` 不带 ⇒ 两者不可混。
 - **怎么量**：口径四件事写进日志第一屏 —— 构建（`cmake --preset`）/ `present :` 那一行 / `raster :` 那一行 /
   **运行摘要的 `instr :` 行**（三个仪器位 + `expect=`，见 M-02）。这些行 `apps/emulator-lift` 都会打出来，
   **抄它，不要凭记忆**。
@@ -42,7 +44,7 @@
 
 - **口径标签（唯一写法；一行、字段顺序固定、可 grep）**：
   ```
-  build=<preset>/<RelWithDebInfo|Debug> · git=<sha> · present=<headless|window> · raster=<cpu|gpu> · clock=<virtual|REAL-TIME> · instr=<运行摘要 instr: 行逐字>
+  build=<preset>/<RelWithDebInfo|Debug> · git=<sha> · present=<headless|window> · raster=<cpu|gpu> · clock=wall · instr=<运行摘要 instr: 行逐字>
   ```
   `instr :` 行由**运行摘要无条件打印**（`profile=… frame-trace=… window-prof=… expect=…`），
   读的是**本轮真实 armed 位**（`window-prof` = `WindowProfiler::armed()`，⛔ 不是"脚本里写了 `profile_begin`"）。
@@ -173,15 +175,13 @@
   `token : violations=… max-concurrent=…`。★ `arena` 的 `largest-free` 是**最大连续**空闲块：
   `in_use` 没满但 `largest-free` 很小 = **碎片化**，不是"总量用完"（BUG-01 的判别就靠这一格）。
 
-### M-10 · "两次动作的 `guest_ms` 差 = 宿主墙钟"这条口径怎么核
-- **为什么能用**：窗口模式 = real-time 时钟 ⇒ 宿主 `steady_clock` 直接进 guest 时钟，`guest_ms` 就是宿主毫秒。
+### M-10 · "两次动作的 `guest_ms` 差 = 宿主墙钟"
+- **为什么能用**：时钟唯一档 = **墙钟** ⇒ 宿主 `steady_clock` 直接进 guest 时钟，`guest_ms` 就是宿主毫秒。
 - **怎么核（做过一次，误差 ≤1 ms）**：把 profile 窗口的 `wall=` 与同一对锚点的 `guest_ms` 差逐字对照 ——
   `enter-prof2` 的 `8085.1 ms` 对 `guest_ms` 差 `8085`；`exit-prof2b` 的 `9180.4 ms` 对 `9181`
   （`.tmp/roomopt/run.ps1` 文件头记着这次核对）。
-- **代价**：这条只在 real-time 档成立；`--present headless` / `--audio off` **不成立**（虚拟时钟）。
-  ⇒ 用 `guest_ms` 当墙钟前，先确认启动行有 `⚠ 窗口模式（自动 real-time）`。
-  （原句写的是 `--audio virtual` —— 该档已于 2026-11-22 移除；"虚拟时钟"这个事实不变，只是现在
-  由 `--audio off` / headless 表达。）
+- **代价**：无（墙钟是唯一档；headless 与 window 同一条时钟）。
+  （原句写的 `--real-time` / "虚拟时钟"已于 2026-11-27 整档移除。）
 - **怎么量**：`pwsh .tmp/roomopt/run.ps1 -Mode enter -Label <名字> -Runs 3`（脚本里没有任何 `profile_*`，
   从 `[input-script]` 行取 `guest_ms` 采样）；两次动作之间取差，就是那段的宿主墙钟。
 
@@ -198,10 +198,11 @@
 - **代价**：默认（无 `--profile` / `LIFT_AUDIO_TRACE`）零额外时钟、零原子写，摘要逐字节不变；
   **打开时 ≈ +45–50 ns/块 ⇒ ≈ +5–6% 墙钟** ⇒ ⛔ **`--bench --profile` 的 MIPS 不能当性能基准**。
 - **怎么量**：`--profile` 或 `LIFT_AUDIO_TRACE=1` 后读摘要这四行，与 `tokenwait`（M-04）**并列看**，⛔ 不要相加。
-- **A/B 的判据（⛔ 别拿"第 N 帧的 insns"）**：窗口交互 = 实时时钟（`--present window` 自动开 real-time，见 M-10）
-  ⇒ 两臂的 guest 时钟**各自**跟宿主墙钟走，**帧号 / 逐帧 `insns` 不可比**（两臂跑到同一帧号时并不是同一 guest 状态；
+- **A/B 的判据（⛔ 别拿"第 N 帧的 insns"）**：guest 时钟 = 墙钟（F 唯一档）⇒ 两臂的 guest 时钟**各自**跟宿主墙钟走，
+  **帧号 / 逐帧 `insns` 不可比**（两臂跑到同一帧号时并不是同一 guest 状态；
   实测两臂只到 1542 / 1463 帧，且同一帧号的 `insns` 早期吻合、后段分叉）。A/B 只能用：
-  ① `insns_unattributed == 0`（native override 补账与块级闭合的机械判据）② **确定性口径**下的逐帧比较 ③ assets 档的 `cpu.insns` 精确相等。
+  ① `insns_unattributed == 0`（native override 补账与块级闭合的机械判据）② **计数器**（`insns` / `fills` / 命中数）
+  ③ assets 档的 `cpu.insns` 精确相等。
 
 ### M-12 · AOT 窗口 profile（`profile_begin/end` 之间的分桶账）：闭合靠**包络**，份额靠**采样**
 
@@ -265,3 +266,40 @@
   （`--appdata` 用**副本**，⛔ 不写用户原件）。守卫：CTest `aot-frame-bucket`（pure：名字合并 + 有界 top-N + 阈值门 + 关档）
   与 `cli-aot-flags` 的 `profile-slow-frames-*`（纯 CLI 面）。读数见 `wipe-profile.md` 的
   `## 按帧 shim 分桶`（2026-11-18）。
+
+### M-14 · AOT 的两个诊断环境变量（`--help` 指向这里）
+
+两个都**只在启动期解析一次**（早于 `AotHost::init` / 音频线程），未设 / 空 ⇒ 零新增输出。
+**超限 / 语法错 ⇒ `exit 2`**（⛔ 不静默截断、⛔ 不静默当成普通段）。
+
+**`LIFT_FAULT_DUMP=<spec>`** —— guest fault 时按 spec dump 内存（缺省不设 = fault 文本一条 dump 行都不多）。
+
+- 每段三种写法，逗号分隔：
+  - `EA:LEN` —— EA 纯 hex（`0x` 可省）；LEN 十进制，`0x` 前缀 = hex；
+  - `EA:*LEN` —— 先读 EA 处 4 字节当 guest 指针，再 dump 该指针起 LEN 字节（`EA:4*LEN` 同义）；
+  - `EA:*<delta>:LEN` —— 跟随指针并加有符号 delta（`|delta| ≤ 1 MiB`），例如 `*-8:16` = 从 `P-8` 起 dump。
+- 上限：**8 段 / 每段 1..256 B / 总 ≤ 1024 B / spec ≤ 1024 字符**。
+- 例：`LIFT_FAULT_DUMP=0x1005AB58:64,0x10050000:*32,0x1005AB58:*-8:16`
+
+**`LIFT_WATCH=<spec>`** —— 观察 guest 侧写入（`lift_note_write`）与 shim 侧写入（`writeBytes` / `fillBytes` /
+`wr8..wr64`）（缺省不设 = 一条 watch 行都不打）。
+
+- 每段：`EA:LEN`（EA 纯 hex；LEN 十进制 1..16）或 `EA:LEN>follow`（仅 LEN=4：命中后把**下一次写**开头读到的
+  指针 `P` 的 `[P-8, P+8)` 加进观察集 —— 用来点名"谁在 `P-8` 写了那 16 字节"），逗号分隔。
+- 上限：**8 段 / spec ≤ 1024 字符**。
+- 命中打一行：`watch      : WRITE 0x<EA> n=<N> block=lift_cc_<EA>`（guest）或 `… shim=<名字>`（shim 侧；
+  名字由 shim 调用点设，未设 ⇒ `?`）。
+- 例：`LIFT_WATCH=0x1005AB58:4>follow`
+
+### M-15 · AOT `--profile` 的采样率与 `--profile-slow-frames` 的字段
+
+- **`--profile` 是采样档**（不是逐次计时）：三个 stride 是常量，真源在 `src/aot/aot_host.h` 的 `AotProfile`：
+  - 派发归因 `dispatch`：**1/4096**（`kDispatchStride`；`ms` 列是"派发份额"的估计，⛔ 不是该 EA 的实测成本）；
+  - `lift_one` 单次耗时：**1/1024**（`kLiftOneStride`；逐次计时与被测对象同量级 ⇒ 压到 ~0.1%）；
+  - shim 归因：**1/64**（`kShimStride`，按**每个 shim 自己**的调用序号 —— 全体 1/1024 会让只调几百次的
+    `D3D9::Present` 拿到 0–1 个样本）。
+  - 三个 stride 也在 `window-dispatch-top` 的头部行按 `stride 1/N` 打出（⛔ 不手抄数字）。
+- **`--profile-slow-frames <ms>`**（必须与 `--profile` 同时给；值 0 = 关；缺省 0 ⇒ 一行不多打）：
+  run 结束打**一张**表 `slow-frames: frames / slow / listed / dropped`，每帧一行
+  `slow-frame: n / wall_ms / insns / shim_ms / shim_calls / presents`，紧跟该帧 **top-8 shim**
+  （`module!name · ms · calls`）。口径与有界规则见 M-13。

@@ -119,12 +119,12 @@ scripts/clean-appdata.sh "$APP"
 - ⇒ **窗口归属只能用"带窗口跑 vs 同前缀不切换的对照跑"做差**（§3.3）。这条差法用 `timeGetTime` 桩的样品数**独立核对**过（701×4096 = 2.87 M vs 2.844 M 次调用，**1% 内**）—— 两个独立来源对得上，差法才可信。整跑表可先看形状
   （`log-b3w.txt:614-616`：`0x4BBB55` 7.1% / `0x4E7530` 5.3% / `0x4E7617` 4.9%），但⛔ 别拿整跑份额回答"切换帧里谁贵"：做差后 `_memcpy` / 逐像素掉到 2–3%，`0x4BBB55` 反而升到 15.3%。
 
-### 4.2 `--frame-log` 会强制 readback；`clock=real-time` 是这条臂的**前提**
+### 4.2 `--frame-log` 会强制 readback；**墙钟（唯一档）**是这条臂的前提
 
 - `--frame-log` ⇒ `needsGuestPixels()` 为真 ⇒ 每帧强制整幅回读（口径见 `present-readback.md`）⇒ A 档的 1.0 s 是**仪器档**读数；但卡顿由 guest 计算主导（`lift+boundary` 56–61%），关档只会更
   短、份额方向不变。⛔ A 档墙钟不与关档 run 混表。
-- ⚠ **前提写出来**：AOT 臂把 guest 时钟**强制成真墙钟**（运行 readout `services … clock=real-time`；源码 `aot_run.cpp` 里 `setRealTime(true)`，没有 `--clock=` 开关）。而
-  `src/runtime/clock.h` 的**默认是虚拟时钟**（每指令 +100 ns）⇒ "`insns` 恒定而 wall 变 ⇒ 不是时间门"这条推理**只在真墙钟下成立**；虚拟时钟档下时间门也会给出恒定 `insns`，这条推理不成立。
+- ⚠ **前提写出来**：guest 时钟 = **宿主墙钟**（`src/runtime/clock.h` 只有这一档；运行 readout `services … clock=wall`，⛔ 没有 `--clock=` 开关）。
+  ⇒ "`insns` 恒定而 wall 变 ⇒ 不是时间门"这条推理成立（没有第二个时钟档可躲）。
 - 真墙钟下的正面证据（同方向 3 次切换）：`insns` 437.0 / 436.6 / 436.6 M，`wall` 1103 / 1176 / 1194 ms（wall 差 8%、insns 差 0.09%）；两方向差 3.7 M ⇒ 指令数由**切到谁**决定。反证：若存在 1 s 超
   时门，wall 986→1194 ms 之间 insns 必须跟着变 ~20%，实测 0.02%；且主循环里唯一的 `now − t0` 比较是 **60000 ms** 看门狗（`0x41241F`），不是 1 s。
 

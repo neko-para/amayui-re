@@ -1399,7 +1399,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 ### 4.11 确定性
 
 - `AfterDelay` 用**宿主墙钟**（AOT 强制 `setRealTime(true)`）：**NON-DIFFABLE**，不作为判据；
-  ⛔ 不声称 guest 虚拟时钟可复现。
+  ⛔ 不声称 guest 时钟可复现（唯一档 = 墙钟）。
 - JS 回调本身若无 `Date`/`Math.random`/外部 IO，则确定；QJS 沙箱已无这些（`overlay-quickjs.md:45-93`）。
 - ★ **`ctx.appdata.stat` 是外部 IO**（文件系统状态）；**`ctx.config` 会跨 Run 持久化**
   （`plugin-config.json`，且以后可能被别的进程改）⇒ 带它们的 Run 是 **NON-DIFFABLE**：
@@ -1795,7 +1795,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 
 - **推荐**：**宿主墙钟**（AOT 强制 `setRealTime(true)`，`aot_run.cpp:391`）；`afterDelay`/`timeout` 都是
   **NON-DIFFABLE**，不进确定性判据；`pause` 不冻结墙钟，恢复后按下一个读点检查。
-  ⛔ 不声称 guest `VirtualClock` 可复现；若将来要虚拟时钟档，必须另立 D2b/判据。
+  ⛔ 不声称 guest `Clock`（墙钟）可复现。
 - **影响面**：`afterDelay` 在暂停/阻塞时的行为；C3 `wait` 同口径；trace 标 `NON-DIFFABLE`。
 - **若答“显式冻结 clock”**：需新增 clock 档 + 全局冻结语义，成本高；本轮不做。
 

@@ -717,10 +717,14 @@
 
 ### BUG-29 · AOT 臂把「要不要真 feeder 线程」判成 `has_machine` ⇒ 恒主线程 D 泵、预读 600 ms ⇒ 所有音效延迟 ~0.6 s
 
+> ★ **2026-11-27 更新**：主线程泵 / `audioThreadMode` / 600 ms 的 D 档 lead 都已整档删除（用户裁决：音频只留 feeder 线程）。
+> 本条的**根因与修法**保留为历史；今天 `--audio` 只决定输出位置，§修法里的 `audioThreadMode()` 已不存在。
+
 - **现象**（用户 2026-11-17 实测）：TITLE 上把鼠标**移进/移出按钮**触发的 SE，从"触发"到真正听见有明显可见间隔。
 - **根因**（父级静态核实）：`runtime/audio_policy.h` 的 `audioThreadMode(mode, real_time_clock, has_machine)` 要求三者全真才走
   "host-thread（方案 C）"；调用点 `runtime/audio.cpp:203-208` 传 `has_machine = cpu_ && cpu_->machine`，而 **AOT 臂有意
   `cpu_.machine == nullptr`** ⇒ 谓词恒 false ⇒ AOT 从第一刻起就是"主线程泵（方案 D）"，并不是"起线程失败再回退"。
+  （D 泵已于 2026-11-27 整档删除，下文的修法路径保留为历史。）
   D 泵的预读 lead 是 `audio.cpp:47` 的 `kLeadBytes = 600 ms`（同一处注释就写着"代价是 SE 也有 ~600ms 延迟"）；
   真线程档的 lead 是 `audio.cpp:50` 的 `kThreadLeadBytes = 100 ms`。
 - **★ 用户裁决**：**D 泵从来不是被决策过的方案**，AOT 侧按 `has_machine` 判成恒 D 是**绝对的错误**。
@@ -743,7 +747,7 @@
 - **根因**：`runtime/clock.h` 的 `rawNow100ns()` 取 `steady_clock`（零点 = 宿主开机），`now100ns()` 没有 epoch 项
   （`epoch_100ns_` 只进 `machine.cpp` 的 trace、从未被 set）；`shims/kernel32_time.cpp` 的 `GetLocalTime` / `GetSystemTime`
   直接把它按"1970-01-01 起"展开 ⇒ 引擎拿到的本地时间 = `1970-01-01` + 宿主 uptime。
-  AOT 臂 `aot_run.cpp` / `aot_host.cpp` **强制** real-time ⇒ 产品臂没有虚拟档可躲。
+  AOT 臂的时钟一直是墙钟（今天更是**唯一档**）⇒ 产品臂没有虚拟档可躲。
 - **写侧 / 读侧均无错**：写侧 `0x4377B6 GetLocalTime` → 0x124 B header `+0x108`（16 B `SYSTEMTIME`），`0x437869 WriteFile`；
   读侧 `0x438120` 原样搬 header、`0x42D700` 原样交给脚本，`SAVE.BIN` 用字面量 `/` `:` 画数字（所以不补零）。
 - **读数（2026-11-18 / win32）**：宿主 boot `2026-11-12 04:35:16`（WMI，1 s 粒度），SAVE03.DAT `+0x108` =

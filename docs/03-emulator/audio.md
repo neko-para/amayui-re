@@ -1,19 +1,30 @@
-# 音频（AOT 臂）：泵 / 真 feeder 线程 / 延迟 / 暂停口径
+# 音频（AOT 臂）：feeder 线程 / 延迟 / 暂停口径
 
 > 只写**口径与实测**；缺陷史在 `defects.md`（BUG-22 共用 TEB、BUG-29 AOT 恒 D 泵），
 > 需求判据在 `REQ-01M7MHEZRQJSMAAWPESVW44DSK`。
 
-## 1. 两条喂料路线（唯一判据：`runtime/audio_policy.h` 的 `audioThreadMode()`）
+## 1. 唯一喂料路线 = feeder 线程
 
-| | host-thread（方案 C） | 主线程泵（方案 D） |
-|---|---|---|
-| 谁填 guest 环 | feeder 线程（guest 的 `0x004B5AA0` 线程体） | 主线程在块边界调 `AudioEngine::pump()` |
-| 预读 lead | `kThreadLeadBytes` = **100 ms**（19200 B） | `kLeadBytes` = **600 ms**（115200 B） |
-| 延迟量级 | ~100 ms | **~600 ms**（D 在一次 fill 期间暂停混音 ⇒ lead 必须撑过整刀 fill；`audio.cpp:42-47` 注释自述） |
-| AOT 现状（2026-11-17 起） | **可达**（`--audio sdl`；`feeder=host-thread`） | 仅 `--audio sdl` 无墙钟（headless）；设备打不开 ⇒ **没有输出、不跑混音** |
-| AOT 现状（2026-11-17 之前） | 不可达（`has_machine` 门；BUG-29） | 恒 |
+| | 口径 |
+|---|---|
+| 谁填 guest 环 | **feeder 线程**（guest 的 `0x004B5AA0` 线程体；`ResumeThread` 起真宿主线程） |
+| 预读 lead | `kThreadLeadBytes` = **100 ms**（19200 B @ 48k/16/2ch；唯一一份在 `runtime/audio_policy.h`） |
+| 谁混音 / 推设备 | 独立 **mixer 线程**（`AudioEngine::mixLoop`，5 ms 周期） |
+| 主线程做什么 | 只执行 guest；块边界只看 `feederFailed()`（**没有主线程泵**） |
 
 ★ `lead` 是**预读字节数**，不是设备缓冲：它决定"这一刀 fill 之前先垫多少声音"，也就直接决定音效从 `Play` 到听见的间隔。
+
+★ `--audio` **只决定输出位置**：
+
+| `--audio` | 有没有输出 | 谁起 feeder | 摘要里的 `device=` |
+|---|---|---|---|
+| `off`（缺省） | 没有 | 不起（guest 的 DS 调用照跑，但没有 sink） | 不打 `audio` 行 |
+| `sdl` | SDL3 真设备 | 起（guest `CreateThread` + `ResumeThread` 触发） | `ok`；设备打不开 ⇒ `none`（没有输出、不跑混音） |
+| `--audio-dump <path>` | **设备无关的 WAV**（不是档位：`--audio` 仍是 off/sdl） | 起（同上） | `none`（dump 走文件 sink） |
+
+⛔ **没有第二条喂料路线**：`virtual` 档 / 主线程 D 泵 / 600 ms 的 D 档 lead 已于 2026-11-27 整档删除
+（用户裁决：「移除虚拟时钟，这个功能一直在和各个业务和测试打架」「无论是否 sdl，都需要 feeder 线程，
+只是产出的音频是否有输出位置」）。⇒ 无论 headless 还是窗口，音频喂料走同一条 feeder 线程。
 
 ## 2. 暂停与音频（★ 用户裁决 2026-11-17）
 
@@ -21,28 +32,24 @@
 ⇒ ⛔ 不要给 mixer / feeder 加"跟随 guest 暂停"的钩子，⛔ 不要把"暂停期间还在响"记成缺陷。
 判据只在"不暂停时"取：延迟、underrun、`fills` / `fill_bytes` 的读数。
 
-## 2.1 现状（2026-11-17 起）
+## 2.1 现状
 
-AOT 臂 `--audio sdl` = **真 feeder 线程**（`feeder=host-thread`，lead 19200 B）；没有墙钟的 sdl
-（headless）仍 D 泵（lead 115200 B）。★ `virtual` 档**已于 2026-11-22 整档移除**（用户口径：
-"从来就没法有效使用过，保留还会影响判断" —— 它没有 feeder 线程，走主线程 D 泵，看起来像产品态
-音频，会让人按它读读数）。判据的唯一一份在 `runtime/audio_policy.h`（`audioThreadMode()` 两个事实 +
-`leadBytesFor()`），"能起 feeder"由 `attach(..., const GuestLayout&)` 的引用入参在编译期钉死
-（⛔ 不是运行时能力位）。
+AOT 臂 `--audio sdl` 与 `--audio-dump` 都是**真 feeder 线程**（启动 readout / 摘要写 `feeder=host-thread`，
+lead 19200 B）。"能起 feeder"由 `attach(..., const GuestLayout&)` 的引用入参在编译期钉死
+（⛔ 不是运行时能力位）；布局不可用 ⇒ `begin()` **响亮失败**、运行期起不来 ⇒ `feederFailed()` 让执行循环停下并点名。
 
 | 量 | 改前（AOT 恒 D 泵） | 改后（feeder 线程） |
 |---|---|---|
 | `pushed - played` | 115200 B = **600.0 ms** | **19200 B = 100.0 ms**（4/4 次精确同值） |
-| `calls=`（主线程泵次数） | 12 万级 | **0**（thread 档主线程一次都不泵） |
-| underruns / `fill_slow` | 0 / 0 | 0 / 0（4/4） |
-| `dev_frames`（设备缓冲，另一笔账） | 未取 | 1024 帧 = 21.3 ms @48k |
 | 一刀 fill 墙钟 | 13.87 / 13.95 ms | 11.86 / 12.32 ms（启动段抖动时 96–109 ms，仍 < 500 的 quarter） |
 
 ## 3. 怎么量（读数口径）
 
-- `--audio sdl` 会在启动 readout 打 `mode=… feeder=host-thread|主线程泵（方案 D） … lead=… B` 一行（`audio.cpp:214-222`）。
-- `LIFT_AUDIO_TRACE=1`：`play state=… bytes=… loop=…`（起播）+ 每个 buffer 的状态行（`audio.cpp:381-390`）。
-- `--audio-dump <path>`：这一跑**真交付**的 PCM（44 B 头 + 交付字节；`data=0` 就是没交付）。
+- `--audio sdl` 在 `--log-level info` 打启动行 `[audio] mode=… feeder=host-thread … lead=… B`。
+- `LIFT_AUDIO_TRACE=1`：`play state=… bytes=… loop=…`（起播）+ 每个 buffer 的状态行 + 每刀 fill 的墙钟分解。
+- `--audio-dump <path>`：这一跑**真交付**的 PCM = **44 字节 WAV 头 + 真交付字节**；`data=0` 就是没交付。
+  ⚠ **abort / 异常退出后文件头不回填**（`AudioEngine::end()` 没跑到）：那次 WAV 的 `RIFF`/`data` 长度是
+  占位值 ⇒ **不可信**，⛔ 不要拿它当 PCM 判据。
 - 设备侧队列：`SDL_OpenAudioDeviceStream` 的 `spec.samples` 未设置 ⇒ 设备缓冲由 SDL 缺省决定；改它属于**设备延迟**，与 lead 是两笔账，别混。
 
 ### 3.1 一次可复制的 run（mac arm64 / RelWithDebInfo；父级 2026-11-17 复跑同值）
@@ -54,19 +61,18 @@ LIFT_AOT_AUDIO_TRACE=1 ./out/emulator-lift-aot --exe ../../corpus/assets/age/AGE
   --skip-logo --max-frames 12 --audio sdl --sound --time-limit 120 --log-level info
 ```
 
-要看的三行（`--log-level info` 才有前两行；⛔ 缺省 `warn` 档一行都不打）：
+要看的行（`--log-level info` 才有；⛔ 缺省 `warn` 档一行都不打）：
 
 ```
-[audio] mode=sdl 48000 Hz / 16 bit / 2 ch（lead=19200 B）；游标=SDL 设备已消费字节；feeder=host-thread（方案 C）；muted=0（--sound）；PCM 由 guest 解码器产生，宿主只做混音与输出
+[audio] mode=sdl 48000 Hz / 16 bit / 2 ch（lead=19200 B）；游标=SDL 设备已消费字节；feeder=host-thread；muted=0（--sound）；PCM 由 guest 解码器产生，宿主只做混音与输出
 [audio] 统计：played=409600 mixed=428800 pushed=428800 notify=3 fills=3 …
-audio-pump: calls=0 fills=3 fill_bytes=288000 pushed=428800 feeder=host-thread lead=19200 dev_frames=1024
+audio     : mode=sdl device=ok muted=0 fills=3 fill_bytes=288000 pushed=428800 played=409600 …
 ```
 
 ★ 判据 = `pushed - played`（稳态等于预读 lead）⇒ 上例 `428800 - 409600 = 19200 B = 100.0 ms`。
-★ `calls=0` 是 **thread 档的正常读数**（主线程一次都不泵），⛔ 不要拿它当"没跑音频"。
-★ `dev_frames` 是 SDL 设备缓冲，与 lead **两笔账**（提前垫多少 / 设备一次取走多少），⛔ 不要相加成"总延迟"。
+★ 不再有 `audio-pump:` / `calls=` 行（主线程泵已删除）。
 ◆ 设备打不开 ⇒ **没有音频输出**：不跑混音，摘要写 `mode=off device=none muted=1`（`--audio-dump`
-另给时 dump 这一路继续，仍报 `device=none`）。那时只记"真设备档未测"，⛔ 不要放宽谓词，
+另给时 dump 这一路继续，仍报 `device=none`）。⛔ 不要放宽谓词，
 ⛔ 也不要再找一个"设备无关的档位"来顶替（原 `virtual` 档已于 2026-11-22 移除）。
 
 ## 4. 吞吐读数（2026-11-17 / mac arm64 M3 / 转场 90 s / `--audio sdl --sound`）
@@ -117,8 +123,7 @@ Remove-Item Env:LIFT_AUDIO_TRACE
 
 - 3 跑全部：`input-plan: steps=12 fired=4 pending=0` + `stop: time-limit @ eip=004904E0（正常结局）`
   ⇒ 配方走完、到得了 `SC0000`。
-- 3 跑全部：`audio-pump: calls=0 fills=… feeder=host-thread lead=19200 dev_frames=480`
-  （`calls=0` 是 thread 档的正常读数，见 §3.1）。
+- 3 跑全部：`audio     : mode=sdl device=ok … fills=…`（§5.2 的表就是它的字段；`calls=` 那一行已随主线程泵删除）。
 
 ### 5.2 摘要（3 跑，`--time-limit 240`）
 

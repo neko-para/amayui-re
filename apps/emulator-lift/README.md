@@ -27,7 +27,7 @@
 | Win32 语义 | 自己实现（在宿主的原生执行之上） | **自写**，只做 `SCOPE.md` 允许的子集 |
 | **指令执行** | **宿主直接执行 guest 的原机器码**；ISA 不同就外包 | **必须在自己手里**（Wine 没有翻译层，本线有；执行源 = 拆壳件字节，见 §2.1） |
 | 图形 / 音频 | wined3d / vkd3d → Vulkan → MoltenVK | SDL3 + 自写 DDraw / GDI 形状；D3D9 按 `platform-effort.md` §3.7 外包**或停手** |
-| 目标函数 | **兼容性面**（尽可能多的程序能跑） | **可观测 / 可复现**：虚拟时钟、确定性 trace、EA 级诊断、覆盖清单 |
+| 目标函数 | **兼容性面**（尽可能多的程序能跑） | **可观测**：确定性 trace（输入清单 + 计数器）、EA 级诊断、覆盖清单 |
 | 出界行为 | 尽量兜住 | **响亮失败**（⛔ 不静默 no-op，见 `SCOPE.md` §3） |
 
 ★ 一句话：本线 ≈ **Wine 的平台层语义 + 一个 box86/FEX 那样的执行层**，两边都只覆盖"这一个 EXE
@@ -130,9 +130,8 @@
     映射到宿主 per-EA 递归锁（`CriticalSectionTable`）。feeder 到点会等这个槽：实现是
     `tryEnter` + **放开令牌** 1 ms 重试（⛔ 不是持令牌阻塞）；主线程的 `Enter` 若撞上 feeder
     持有的槽，也先 `Yield` 令牌再等宿主锁。
-  - `--audio=sdl` 且宿主时钟（窗口模式/`--real-time`）⇒ 方案 C；否则（没有 `--real-time` 的 sdl、
-    `--audio-dump` 的设备无关路径、纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
-    ★ 原第三档 `--audio=virtual` 已于 2026-11-22 **整档移除**（它没有 feeder 线程，会被误读成产品态）。
+  - 音频喂料**只有 feeder 线程一条路**（`--audio` 只决定输出位置：sdl 设备 / off 无输出 /
+    `--audio-dump` 的 WAV）；⛔ 没有"主线程泵"回退档。原 `--audio=virtual` 已于 2026-11-22 移除。
 - 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
   **不执行 start routine**；`ResumeThread` / `SetThreadPriority` / 亲和性只返回形态值。
   ★ 例外：**纹理影片**（DirectShow 模式）的渲染器服务线程等待由**宿主合成**——它等的是
@@ -191,7 +190,7 @@ apps/emulator-lift/
                                         --present headless|window|auto --control-root/--control-port/…
   （已删）src/main.cpp                 ← 解释器 CLI：**2026-11-16 随解释器退役**，下面这些开关今天不再存在：
                                         --exe --lst --report --bench --smoke --profile-top --native-overrides
-                                        --overlay --present-screenshot --trace-shims --trace-blocks --real-time
+                                        --overlay --present-screenshot --trace-shims --trace-blocks
                                         --accept-recovery-dialog --close-confirm ask|exit|title|cancel
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
@@ -223,7 +222,7 @@ apps/emulator-lift/
   src/runtime/exec.cpp                ← 语义分发 + 标志位公共部分 + 响亮失败
   src/runtime/exec_{integer,control,string,fpu}.cpp  ← 按族分文件的语义（S3 / S4）
   src/runtime/fpu_bridge.{h,cpp}      ← x87 ↔ vendor SoftFloat（extF80）
-  src/runtime/{heap.cpp,handles.cpp,shims.cpp,clock.h}  ← guest 堆 / 句柄表 / shim ABI / 虚拟时钟
+  src/runtime/{heap.cpp,handles.cpp,shims.cpp,clock.h}  ← guest 堆 / 句柄表 / shim ABI / 墙钟
   src/corpus/lst_index.{h,cpp}        ← `.lst` 只读索引（EA→文本 + **下一行 EA**，A3 的边界来源）
   src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
   tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
@@ -302,8 +301,8 @@ Remove-Item Env:LIFT_STRESS            # 想回到默认门禁：取消变量后
 $env:LIFT_STOP_AFTER_MOVIE = "1"
 ```
 
-- ★ `boot-trace` 是**确定性读数**（同一条命令跑两次，停因 / eip / 指令数 / 状态摘要哈希逐字节
-  相同；`--trace-shims` 的 trace 字节也相同），不是"能到 L2 就算业务做对了"。
+- ⚠ `boot-trace` 只判"到达 L2 + 输入清单相同"（时钟 = 墙钟 ⇒ 停因 / 指令数 / 哈希**不承诺**逐字节
+  相同；`--trace-shims` 的 trace 字节也不承诺相同），不是"能到 L2 就算业务做对了"。
 - `LIFT_STOP_AFTER_MOVIE=1` 仍是**模拟器级**开关：DirectShow 图的停机链看到"影片已放完"（`completed_`）
   就结束本次运行，不再空转到 `--time-limit`（`--time-limit` 仍保留作**兜底**）；**缺省关** ⇒ 行为与
   不设它时一致；手工玩时 export 了它，会在第一个影片放完后退出。⚠ 断言它的那条用例
@@ -380,7 +379,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 （见 §4.2b 的"直出"）：
 
 ```bash
-# 看得见的窗口（真 SDL 窗口；自动 real-time）
+# 看得见的窗口（真 SDL 窗口）
 ./out/emulator-lift-aot ... --max-frames 300 --present window
 # 无人值守 / CTest：隐藏窗口 + 宿主回读截图
 ./out/emulator-lift-aot ... --max-frames 1 --present window --present-hidden \
@@ -434,7 +433,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   （引擎本身就有"每帧钉光标"的用法），这是这个开关的定义，不是缺陷。调试：`LIFT_TRACE_INPUT=1`
   打印每个 SDL 鼠标 motion 的窗口坐标与换算后的 guest 坐标。
   关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
-  headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
+  headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--present window` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 - `--present-screenshot-frame N`：只回读第 N 个 Present（0/缺省 = 每帧都写）。配合 `--max-frames N`
   就是"定帧截图"（只产出一张，不写 N 份 BMP）：`./out/emulator-lift-aot --game-dir <安装> --skip-logo
@@ -500,7 +499,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   [--max-frames 8000] [--time-limit 900]
 ```
 
-⚠ **这些配方是 real-time 档**（`wait <ms>` = 宿主墙钟；headless 下 guest 推进与墙钟不成比例 ⇒
+⚠ **这些配方读宿主墙钟**（`wait <ms>` = 宿主墙钟；guest 推进与墙钟不成比例 ⇒
 先撞门的 `timeout` 或跑完 `pending != 0`）。只验"能不能解析"用 `--max-frames 1`。
 
 ```text
@@ -816,7 +815,7 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
   `mdct_backward`；**本线第一项「数值容忍档」**，不是真字节等价，见下一段），以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；
   不是整函数）。每一项都能用 `all,-<名字>` 单独排除。
   ★ GPU 逐像素黄金图守卫（`golden-image` / `golden-image-compare`）已按用户裁决**移除**：
-  该判据依赖虚拟时钟相位与 GPU 驱动，**不能稳定复现**。画面回归改由各 override 自己的
+  该判据依赖时钟相位与 GPU 驱动，**不能稳定复现**。画面回归改由各 override 自己的
   函数级两臂差分 + 既有 GPU 用例承担。
 - **「数值容忍档」**（`sub_4E0B40` 起）：判据不是"逐字节等价"，而是**两臂（解释器臂当 oracle）逐值比
   `max|Δ| ≤ 1e-6 × peak`**，实测偏差与全部已知边界登记在实现处（`native_mdct.h` +
@@ -828,7 +827,7 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
   已知偏差登记且可隔离）见 `src/runtime/native_overrides.h` 的契约段。
 - `sub_48B090` 的 8/24/32bpp 与 alpha 路径已按 `.lst` 核；4/1bpp 源、16bpp 目标与色键≠0
   仍**显式回退解释器**。锁走 `d3d9::lockRect`/`unlockRect`，失败不留半状态。
-  **虚拟时钟相位**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，
+  **指令数补账**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，
   可随时用 `all,-sub_48B090` 做隔离 A/B。⛔ 不要把它当作 A4 逐字节基线。
 - `sub_429020`（`__thiscall retn 8`）：表指针在 `[this+0x18]`、容量 `[this+8]`、槽 28 B 的
   MSVC `std::string`（`len@+0x10` / `cap@+0x14`，cap<16 用槽内 SSO）；空槽 ⇒ `-1`；
@@ -851,7 +850,7 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
   - 入口判据 `EAX==0`（`0x41537E xor eax,eax` 之后；回边进来时 EAX≥1）⇒ 一次调用只拦一次；
   - 前置条件（目标/范围/计数/提交状态）不匹配 ⇒ `Declined`，**本次运行永久停用**该项并回退解释器
     （段级项的前提是静态的，继续每迭代重试只会把成本加回热路径）；
-  - `insns` 与虚拟时钟按**被替代的 guest 指令数**（`8*count`）补账 —— 不补的话 `timeGetTime`
+  - `insns` 按**被替代的 guest 指令数**（`8*count`）补账 —— 不补的话 `insns` 的闭合式会少一截，
     会少走一截虚拟时间，首帧可能与解释器路径不同；
   - 启用前用 `.lst` 校验锚（entry 必须属于 `sub_414AC0`、且首指令逐字匹配）⇒ 换镜像/改 EA 会当场拒绝。
 - `_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节，返回约定未核）⇒ 暂不覆盖。
@@ -900,10 +899,10 @@ id 只查 `scripts/plugins/` 的**根**（`<exeDir>/scripts/plugins/<id>.js` 与
 `--profile` 回答两类热点：**guest**（块级 + 按 `.lst` 函数入口聚合）与**宿主 shim 实现自身**的墙钟
 （`=== profile: shims`）。shim 表只包 `ShimRegistry::invoke` 里的 `fn`，**不含** dispatcher 弹参 /
 native override / 事件泵；它与 guest 块表**不可相加**（两表各自的口径见下）。要看"这一帧为什么慢"，
-用逐帧墙钟拆分（默认关；开窗时必须加 `--real-time`，否则虚拟时钟会先卡住）：
+用逐帧墙钟拆分（默认关；`--present window` 自动走宿主墙钟）：
 
 ```bash
-LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
+LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 \
   --present window --native-overrides all --profile
 ```
 
@@ -1056,8 +1055,8 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   `HandleTable` / `ComRegistry` / `Vfs`。可观测检查点覆盖 `GuestHeap::alloc/free/realloc`、
   `HandleTable::add`、`machine.block`、`shim.invoke`（未持令牌 ⇒ 违规计数，`--assert-guest-token`
   判红）；`Vfs` / `ComRegistry` 没有单独计数点，靠"访问都在 shim 里"这条结构约束。
-- **时钟档**：`sdl` + 宿主时钟（窗口模式/`--real-time`）= **方案 C 真线程**；没有 `--real-time` 的
-  sdl / `--audio-dump` 的设备无关路径 = **方案 D 主线程泵**（确定性回退，CTest 用）。窗口模式会强制 `--real-time`。
+- **时钟**：唯一档 = **墙钟**（`--real-time` / 虚拟时钟已整档移除）。音频喂料 = **feeder 线程**（`sdl` 与
+  `--audio-dump` 都起）；主线程不泵（块边界只看 `feederFailed()`）。
 - **输出格式固定 48k / 16 bit / 2 ch**；每条缓冲按自己的 `WAVEFORMATEX` 做采样率/声道转换
   （实测引擎会建 44.1k mono SE、48k stereo BGM、44.1k stereo 静音垫）。
 - **静音开关**：缺省 `muted=1`（`--sound` 才出声）。它与 `--audio`（后端选择）**正交**：
@@ -1123,9 +1122,8 @@ native-override 的**真异常**条目（`fallbacks!=0` / `declines!=0`；`hits=
 - `present-tail: last_frame=<N> insns_at_last_present=<N> tail_insns=<N> tail_wall_ms=<ms>`：口径 =
   **最后一次 Present 调用 → 本次 run 停**的 guest 指令数（= 上面 `insns :` − `insns_at_last_present`，
   同源 `cpu_.insns`）。★ 是"**调用**"不是"成功"：sink / dump 失败的那次**也算**（与 `frameCount` 同一契约）。
-  ★ **可复现档（`--present headless` + 虚拟时钟）下 `tail_insns` 确定**；real-time 档（`--present window` /
-  `--real-time` / `--audio sdl`）下 `last_frame` / `insns_at_last_present` / `tail_insns` **都只能当单样本**
-  （同命令两轮读数就会不同），`tail_wall_ms` 在任何档位都只是宿主墙钟单样本。**本轮 0 次 Present ⇒ 不打这行**
+  ★ 时钟唯一档 = 墙钟 ⇒ `last_frame` / `insns_at_last_present` / `tail_insns` **都只能当单样本**
+  （同命令两轮读数就会不同），`tail_wall_ms` 也只是宿主墙钟单样本。**本轮 0 次 Present ⇒ 不打这行**
   （⛔ 别读成"尾段为 0"）；`--max-frames` 下恒为 0（停点在 Present 内部；实测、无用例钉）、`--bench` 下停在
   bench 上限而非进程退出。
 - `input-script: unfinished pending=<n> releases=<m> first="<原动作行>"`（BUG-20）：**只有**在脚本还有

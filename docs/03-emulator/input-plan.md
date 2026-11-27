@@ -120,8 +120,8 @@ rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/sr
 
 - 门（`await script`）只读**引擎脚本身份**（`MarkerSampler` 纯读 guest 内存；`base==0` / `valid=false`
   ⇒ 门不成立、继续等，⛔ 不报错）。
-- ★ **`wait <ms>` 例外且显式**：它用**宿主单调时钟**（`std::chrono::steady_clock`；⛔ 不是 `clock.h`
-  的 `VirtualClock` = guest 虚拟时钟）。**非阻塞**：只记 deadline，到期由**下一个读点**消费
+- ★ **`wait <ms>` 例外且显式**：它用**宿主单调时钟**（`std::chrono::steady_clock`；⛔ 不是
+  `Clock` = guest 墙钟的读数口径）。**非阻塞**：只记 deadline，到期由**下一个读点**消费
   （`atPoint` 在 shim 栈里 ⇒ ⛔ 不许 sleep）。
 - ⇒ **带 `wait` 的配方不可复现、不可跨臂比、不作语义指纹**：墙钟就是那一步生效时刻的一部分，
   这正是本设计**接受**的代价（用户要的是"到 TITLE 后等半秒再点"这种**粗糙**推进）。
@@ -133,7 +133,7 @@ rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/sr
   ⇒ ⛔ **时间门不能当判据**、`wait` 只作尽力而为的粗推进；**`region` 级正例只能等位置谓词**
   —— `TITLE.BIN:[0x039C,0x0460)`（另一单）。
 - 没有 `wait` 的配方仍然只受 guest 可见状态驱动 ⇒ 与旧的"墙钟只当看门狗"结论不冲突。
-  AOT 的 real-time 时钟档只在**有 `wait`** 的配方上改变语义指纹。
+  时钟唯一档 = 墙钟 ⇒ `wait` 是配方里唯一读时间的面（其余门都只读 guest 状态）。
 - ★ **`await position` 是纯 guest 门**：`pos = header_len + (frame[cur].+0x04 − frame[cur].+0x00)`
   （`+0x00`/`+0x04` = 脚本体基址 / PC；EA `0x40EE57` / `0x412825` / `0x413487`）。读不到
   （`base==0` / `pc < base` / `pc` 未提交 / `pc−base` 越语料上界）⇒ 门**不成立、继续等**，只记内部计数
