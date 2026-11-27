@@ -3263,6 +3263,33 @@ if(LIFT_BUILD_TESTS)
 endif()
 
 # =====================================================================================
+# Q · quickts E1（TypeScript 纯类型擦除）的引擎级判据
+# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 16 个发行 `.js`（module）在 flags 0 与
+#   `JS_EVAL_FLAG_TYPESCRIPT` 下 `JS_WriteObject(BYTECODE|STRIP_SOURCE)` **逐字节相同**；
+#   ② 一组内联 GLOBAL 脚本同上（含 `a < b` / `b > c`、计算字段、static block、模板串）；
+#   ③ examples 9/9 用 `MODULE|COMPILE_ONLY|TYPESCRIPT` 编过 + `JS_ResolveModule` 成功
+#   （证明 `import type` 整条擦掉、零 module request）+ 不带 flag 时 9/9 报错；
+#   ④ 一个 `.ts` module 求值并调导出函数；⑤ class 夹具实跑 R1（index signature vs 计算字段）
+#   与 R2（static block）；⑥ enum / 参数属性 / 含值 namespace 必须报错（E2 边界）。
+# ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4：判据 = 注册位置；`cmakeTestTier()` 把外层
+#   `if(LIFT_BUILD_TESTS)` 当透明）。零资产：只读 `scripts/**` 文本，零窗口 / 字体 / 安装树 / LFS。
+# ★ 直接链 `lift-qjs`（⛔ 不链 `emulator-lift-runtime`）：这是**引擎内部**判据，只 include
+#   `quickjs.h`；宿主 TU（`src/ui/script_quickjs.cpp`）仍是唯一的**产品** QJS 边界。
+# ★ 目录宏：测试自己遍历清单（`scripts/**` 的 16 个 `.js` + `plugins/examples/*.ts` 的 9 个）。
+# ★ 变异：`tools/mutate-check.mjs` 的 `quickts-flag-not-read` 把
+#   `quickjs.c` 的 `s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;` 改成 `s->ts = false;`
+#   ⇒ ③ 的 `TYPESCRIPT 下编译失败` 与本文件 ④⑤ 当场红（`buildTarget` = `lift-quickts`）。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-quickts tests/quickts.cpp)
+    target_link_libraries(lift-quickts PRIVATE lift-qjs)
+    target_compile_definitions(lift-quickts PRIVATE
+        LIFT_SCRIPTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts"
+        LIFT_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/examples")
+    add_test(NAME quickts COMMAND lift-quickts)
+endif()
+
+# =====================================================================================
 # 把 `lift_enable_warnings` 施加到本目录里**所有可执行文件**（产品 + 测试；唯一施加点）
 # ★ 为什么在文件末尾统一扫一遍：target 分散在本文件多处（测试还有末尾多个独立
 #   `if(LIFT_BUILD_TESTS)` 块）⇒ 逐处手写调用一定会漏；`BUILDSYSTEM_TARGETS` 只列**本目录**

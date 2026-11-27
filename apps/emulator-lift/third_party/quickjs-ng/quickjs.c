@@ -22445,6 +22445,13 @@ typedef struct JSParseState {
     JSFunctionDef *cur_func;
     bool is_module; /* parsing a module */
     bool allow_html_comments;
+    /* quickts E1: erase TypeScript type syntax (JS_EVAL_FLAG_TYPESCRIPT).
+       Zeroed by js_parse_init()'s memset; set in __JS_EvalInternal(). */
+    bool ts;
+    int ts_quiet;          /* >0 while a speculative parse must not raise */
+    bool ts_member_erase;  /* class member had abstract/declare */
+    bool ts_cond_true;     /* next assign expr is the `?` branch */
+    bool ts_arrow_in_cond; /* arrow lookahead is inside a `?` branch */
 } JSParseState;
 
 typedef struct JSOpCode {
@@ -22608,6 +22615,9 @@ int JS_PRINTF_FORMAT_ATTR(2, 3) js_parse_error(JSParseState *s, JS_PRINTF_FORMAT
 #ifndef QJS_DISABLE_PARSER
 
 static __exception int next_token(JSParseState *s);
+/* quickts E1: defined in quickts_e1.h, included after js_parse_seek_token();
+   js_parse_property_name() below already needs the declaration. */
+static __exception int ts_type_params(JSParseState *s);
 
 static int js_parse_expect(JSParseState *s, int tok)
 {
@@ -24975,8 +24985,11 @@ static int __exception js_parse_property_name(JSParseState *s,
     ident_found:
         if (is_non_reserved_ident &&
             prop_type == PROP_TYPE_IDENT && allow_var) {
+            /* quickts E1: `{ f<T>() {} }` -- '<' after the name is a method's
+               type parameter list, not a shorthand-property terminator. */
             if (!(s->token.val == ':' ||
-                  (s->token.val == '(' && allow_method))) {
+                  ((s->token.val == '(' || (s->ts && s->token.val == '<')) &&
+                   allow_method))) {
                 prop_type = PROP_TYPE_VAR;
             }
         }
@@ -25009,6 +25022,12 @@ static int __exception js_parse_property_name(JSParseState *s,
         is_private = PROP_TYPE_PRIVATE;
     } else {
         goto invalid_prop;
+    }
+    /* quickts E1: generic method name `m<T>()`: consume the type parameters so
+       the validity check below sees '('. */
+    if (s->ts && s->token.val == '<' && ts_type_params(s)) {
+        JS_FreeAtom(s->ctx, name);
+        goto fail;
     }
     if (prop_type != PROP_TYPE_IDENT && prop_type != PROP_TYPE_VAR &&
         s->token.val != '(') {
@@ -25065,6 +25084,12 @@ static __exception int js_parse_seek_token(JSParseState *s, const JSParsePos *sp
     s->got_lf = sp->got_lf;
     return next_token(s);
 }
+
+/* quickts E1: TypeScript erasure helpers (needs the tokenizer, position
+   save/restore, free_token(), peek_token(), token_is_ident() and
+   js_parse_template_part() above; it forward-declares the one function it
+   needs from below, js_parse_skip_parens_token). */
+#include "quickts_e1.h"
 
 /* return true if a regexp literal is allowed after this token */
 static bool is_regexp_allowed(int tok)
@@ -25203,6 +25228,9 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
                 tok = TOK_OF;
             if (no_line_terminator && s->last_line_num != s->token.line_num)
                 tok = '\n';
+            /* quickts E1: an arrow function's return type hides its '=>'. */
+            if (s->ts && tok == ':')
+                tok = ts_scan_past_annotation(s);
             break;
         }
     }
@@ -25611,6 +25639,11 @@ static __exception int js_parse_class(JSParseState *s, bool is_class_expr,
         class_var_name = JS_DupAtom(ctx, class_var_name);
     }
 
+    /* quickts E1: `class C<T>` type parameters (consumed before push_scope so
+       they cannot leak into any scope). */
+    if (ts_type_params(s))
+        goto fail;
+
     push_scope(s);
 
     if (s->token.val == TOK_EXTENDS) {
@@ -25619,9 +25652,16 @@ static __exception int js_parse_class(JSParseState *s, bool is_class_expr,
             goto fail;
         if (js_parse_left_hand_side_expr(s))
             goto fail;
+        /* quickts E1: `class C extends B<T>` type arguments. */
+        if (s->ts && s->token.val == '<' && ts_skip_bracketed(s))
+            goto fail;
     } else {
         emit_op(s, OP_undefined);
     }
+
+    /* quickts E1: `implements I, J<K>` is erased before define_var. */
+    if (ts_implements_clause(s))
+        goto fail;
 
     /* add a 'const' definition for the class name */
     if (class_name != JS_ATOM_NULL) {
@@ -25669,6 +25709,13 @@ static __exception int js_parse_class(JSParseState *s, bool is_class_expr,
                 goto fail;
             continue;
         }
+        /* quickts E1: modifiers before `static` (public/private/protected/
+           readonly/override/abstract/declare), then a lone `;`/`}` member. */
+        s->ts_member_erase = false;
+        if (ts_member_modifiers(s))
+            goto fail;
+        if (s->ts && (s->token.val == '}' || s->token.val == ';'))
+            continue;
         is_static = false;
         if (s->token.val == TOK_STATIC) {
             int next = peek_token(s, true);
@@ -25726,6 +25773,25 @@ static __exception int js_parse_class(JSParseState *s, bool is_class_expr,
                 prop_type = PROP_TYPE_IDENT;
             }
         }
+        /* quickts E1: modifiers after `static` (`static readonly x`), index
+           signatures, and bodiless members. MUST run before emit_op(OP_swap):
+           an erased member continues without emitting, and a swap first would
+           leave the class object in the wrong stack slot. */
+        if (s->ts && prop_type < 0) {
+            int r;
+            if (ts_member_modifiers(s))
+                goto fail;
+            r = ts_try_index_signature(s);
+            if (r < 0)
+                goto fail;
+            if (r > 0)
+                continue;
+            r = ts_try_skip_member_signature(s);
+            if (r < 0)
+                goto fail;
+            if (r > 0)
+                continue;
+        }
         if (is_static)
             emit_op(s, OP_swap);
         start_ptr = s->token.ptr;
@@ -25736,6 +25802,19 @@ static __exception int js_parse_class(JSParseState *s, bool is_class_expr,
         }
         is_private = prop_type & PROP_TYPE_PRIVATE;
         prop_type &= ~PROP_TYPE_PRIVATE;
+
+        /* quickts E1: `x?: T` / `x!: T`, method type parameters `<T>`, and the
+           member's `: T` annotation. */
+        if (s->ts) {
+            if (prop_type == PROP_TYPE_IDENT && ts_opt_marker(s))
+                goto fail;
+            if (s->token.val == '<') {
+                if (ts_skip_bracketed(s))   /* method type parameters */
+                    goto fail;
+            } else if (prop_type == PROP_TYPE_IDENT && ts_annotation(s)) {
+                goto fail;
+            }
+        }
 
         if ((name == JS_ATOM_constructor && !is_static &&
              prop_type != PROP_TYPE_IDENT) ||
@@ -27028,6 +27107,10 @@ static int js_parse_destructuring_element(JSParseState *s, int tok,
     } else {
         return js_parse_error(s, "invalid assignment syntax");
     }
+    /* quickts E1: `({ a }: T = {})` -- annotation after the whole pattern.
+       Unconditional call: ts_annotation() early-returns unless s->ts. */
+    if (ts_annotation(s))
+        return -1;
     if (s->token.val == '=' && allow_initializer) {
         label_done = emit_goto(s, OP_goto, -1);
         if (next_token(s))
@@ -27387,6 +27470,25 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
     for(;;) {
         JSFunctionDef *fd = s->cur_func;
         bool has_optional_chain = false;
+
+        /* quickts E1: `x!` (non-null assertion) and `f<T>(x)` (call type
+           arguments). Must run before the optional-chain branch: `a!.b` has
+           to consume '!' first. ts_try_call_type_args() only consumes when
+           the token after the type arguments makes '<' unambiguous, so
+           `f < a > (b)` still parses as comparisons when flags are off. */
+        if (s->ts) {
+            int r;
+            if (s->token.val == '!' && !s->got_lf) {
+                if (next_token(s))
+                    return -1;
+                continue;
+            }
+            r = ts_try_call_type_args(s);
+            if (r < 0)
+                return -1;
+            if (r > 0)
+                continue;
+        }
 
         if (s->token.val == TOK_QUESTION_MARK_DOT) {
             /* optional chaining */
@@ -28005,6 +28107,15 @@ static __exception int js_parse_expr_binary(JSParseState *s, int level,
             return -1;
     }
     for(;;) {
+        /* quickts E1: `x as T` / `x satisfies T` at relational precedence.
+           The value stays on the stack, so this emits no bytecode. */
+        if (level == 4 && ts_is_assertion_op(s)) {
+            if (next_token(s))
+                return -1;
+            if (ts_skip_type(s))
+                return -1;
+            continue;
+        }
         op = s->token.val;
         switch(level) {
         case 1:
@@ -28216,6 +28327,9 @@ static __exception int js_parse_cond_expr(JSParseState *s, int parse_flags)
             return -1;
         label1 = emit_goto(s, OP_if_false, -1);
 
+        /* quickts E1: the next assign expression is the `?` branch; consumed
+           (and cleared) by js_parse_assign_expr2(). */
+        s->ts_cond_true = true;
         if (js_parse_assign_expr(s))
             return -1;
         if (js_parse_expect(s, ':'))
@@ -28239,6 +28353,10 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
     int opcode, op, scope;
     JSAtom name0 = JS_ATOM_NULL;
     JSAtom name;
+    /* quickts E1: was this expression the `?` branch of a conditional? Take
+       the flag and clear it so nested expressions start clean. */
+    bool ts_in_cond_true = s->ts_cond_true;
+    s->ts_cond_true = false;
 
     if (s->token.val == TOK_YIELD) {
         bool is_star = false, is_async;
@@ -28378,7 +28496,13 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         }
         return 0;
     } else if (s->token.val == '(' &&
-               js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) {
+               ts_skip_parens_arrow(s, ts_in_cond_true) == TOK_ARROW) {
+        return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
+                                      JS_FUNC_NORMAL, JS_ATOM_NULL,
+                                      s->token.ptr, s->token.line_num,
+                                      s->token.col_num);
+    } else if (s->ts && s->token.val == '<' && ts_try_generic_arrow(s) > 0) {
+        /* quickts E1: `<T>(x: T) => x`; the type parameters were consumed. */
         return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                       JS_FUNC_NORMAL, JS_ATOM_NULL,
                                       s->token.ptr, s->token.line_num,
@@ -28400,9 +28524,10 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         if (next_token(s))
             return -1;
         if ((s->token.val == '(' &&
-             js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) ||
+             ts_skip_parens_arrow(s, ts_in_cond_true) == TOK_ARROW) ||
             (s->token.val == TOK_IDENT && !s->token.u.ident.is_reserved &&
-             peek_token(s, true) == TOK_ARROW)) {
+             peek_token(s, true) == TOK_ARROW) ||
+            (s->ts && s->token.val == '<' && ts_try_generic_arrow(s) > 0)) {
             return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                           JS_FUNC_ASYNC, JS_ATOM_NULL,
                                           source_ptr, source_line_num,
@@ -28860,6 +28985,11 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                     goto var_error;
             }
 
+            /* quickts E1: `let x: T`, `let x!: T` (ts_opt_marker and
+               ts_annotation both no-op unless s->ts). */
+            if (ts_opt_marker(s) || ts_annotation(s))
+                goto var_error;
+
             if (s->token.val == '=') {
                 if (next_token(s))
                     goto var_error;
@@ -29134,7 +29264,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
                 JS_FreeAtom(s->ctx, var_name);
                 return js_parse_error(s, "'let' is not a valid lexical identifier");
             }
-            if (next_token(s)) {
+            if (next_token(s) || ts_annotation(s)) {
                 JS_FreeAtom(s->ctx, var_name);
                 return -1;
             }
@@ -29380,6 +29510,19 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     JSContext *ctx = s->ctx;
     JSAtom label_name;
     int tok;
+
+    /* quickts E1: `interface` / `type` / `declare` / `namespace` (types only),
+       and `abstract class`. Erased whole; returns 0 for the statement, or
+       falls through with `abstract` consumed for a class. */
+    if (s->ts) {
+        int r = ts_try_type_decl(s);
+        if (r < 0)
+            return -1;
+        if (r > 0)
+            return 0;
+        if (ts_try_abstract_class(s) < 0)
+            return -1;
+    }
 
     /* specific label handling */
     /* XXX: support multiple labels on loop statements */
@@ -30049,6 +30192,9 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                         emit_op(s, OP_scope_put_var);
                         emit_u32(s, name);
                         emit_u16(s, s->cur_func->scope_level);
+                        /* quickts E1: `catch (e: T)`. */
+                        if (ts_annotation(s))
+                            goto fail;
                     }
                     if (js_parse_expect(s, ')'))
                         goto fail;
@@ -32644,6 +32790,23 @@ static __exception int js_parse_export(JSParseState *s)
     if (next_token(s))
         return -1;
 
+    /* quickts E1: `export interface/type/declare`, `export abstract class`,
+       and `export type { A }` (type-only clause). */
+    if (s->ts) {
+        int r = ts_try_type_decl(s);
+        if (r < 0)
+            return -1;
+        if (r > 0)
+            return 0;
+        if (ts_try_abstract_class(s) < 0)
+            return -1;
+        r = ts_try_type_only_clause(s);
+        if (r < 0)
+            return -1;
+        if (r > 0)
+            return 0;
+    }
+
     tok = s->token.val;
     if (tok == TOK_CLASS) {
         return js_parse_class(s, false, JS_PARSE_EXPORT_NAMED);
@@ -32666,6 +32829,19 @@ static __exception int js_parse_export(JSParseState *s)
         first_export = m->export_entries_count;
         bool has_string_binding = false;
         while (s->token.val != '}') {
+            /* quickts E1: inline `export { type A, B as C }` specifier. */
+            {
+                int r = ts_try_type_specifier(s);
+                if (r < 0)
+                    return -1;
+                if (r > 0) {
+                    if (s->token.val != ',')
+                        break;
+                    if (next_token(s))
+                        return -1;
+                    continue;
+                }
+            }
             if (token_is_ident(s->token.val)) {
                 local_name = JS_DupAtom(ctx, s->token.u.ident.atom);
             } else if (s->token.val == TOK_STRING) {
@@ -32770,6 +32946,9 @@ static __exception int js_parse_export(JSParseState *s)
         }
         break;
     case TOK_DEFAULT:
+        /* quickts E1: `export default abstract class` (consume `abstract`). */
+        if (ts_try_abstract_class(s) < 0)
+            return -1;
         if (s->token.val == TOK_CLASS) {
             return js_parse_class(s, false, JS_PARSE_EXPORT_DEFAULT);
         } else if (s->token.val == TOK_FUNCTION ||
@@ -32866,6 +33045,16 @@ static __exception int js_parse_import(JSParseState *s)
     if (next_token(s))
         return -1;
 
+    /* quickts E1: `import type ...` -- the whole statement is erased, so it
+       creates no module request at all. */
+    if (s->ts) {
+        int r = ts_try_type_only_clause(s);
+        if (r < 0)
+            return -1;
+        if (r > 0)
+            return 0;
+    }
+
     first_import = m->import_entries_count;
     if (s->token.val == TOK_STRING) {
         JSValue attributes;
@@ -32931,6 +33120,19 @@ static __exception int js_parse_import(JSParseState *s)
                 return -1;
 
             while (s->token.val != '}') {
+                /* quickts E1: inline `import { type A, B as C }` specifier. */
+                {
+                    int r = ts_try_type_specifier(s);
+                    if (r < 0)
+                        return -1;
+                    if (r > 0) {
+                        if (s->token.val != ',')
+                            break;
+                        if (next_token(s))
+                            return -1;
+                        continue;
+                    }
+                }
                 if (token_is_ident(s->token.val)) {
                     import_name = JS_DupAtom(ctx, s->token.u.ident.atom);
                 } else if (s->token.val == TOK_STRING) {
@@ -37462,6 +37664,17 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     is_expr = (func_type != JS_PARSE_FUNC_STATEMENT &&
                func_type != JS_PARSE_FUNC_VAR);
 
+    /* quickts E1: `function f(a: T): U;` is an overload signature: erase the
+       whole thing and build nothing. Runs before the statement branch consumes
+       `function`/`async`, because the speculative scan starts there. */
+    if (!is_expr) {
+        int r = ts_try_skip_function_signature(s);
+        if (r < 0)
+            return -1;
+        if (r > 0)
+            return 0;
+    }
+
     if (func_type == JS_PARSE_FUNC_STATEMENT ||
         func_type == JS_PARSE_FUNC_VAR ||
         func_type == JS_PARSE_FUNC_EXPR) {
@@ -37634,6 +37847,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             goto fail;
         fd->defined_arg_count = 1;
     } else if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT) {
+        /* quickts E1: `function f<T>(...)` / method type parameters. */
+        if (ts_type_params(s))
+            goto fail;
         if (s->token.val == '(') {
             int skip_bits;
             /* if there is an '=' inside the parameter list, we
@@ -37658,6 +37874,20 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             JSAtom name;
             bool rest = false;
             int idx, has_initializer;
+
+            /* quickts E1: TypeScript `this` parameter: type-only, not an
+               argument. Must run before add_arg(). */
+            if (s->ts && s->token.val == TOK_THIS) {
+                if (next_token(s))
+                    goto fail;
+                if (ts_annotation(s))
+                    goto fail;
+                if (s->token.val == ')')
+                    break;
+                if (js_parse_expect(s, ','))
+                    goto fail;
+                continue;
+            }
 
             if (s->token.val == TOK_ELLIPSIS) {
                 fd->has_simple_parameter_list = false;
@@ -37704,6 +37934,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 if (idx < 0)
                     goto fail;
                 if (next_token(s))
+                    goto fail;
+                /* quickts E1: `x?: T` / `x: T` on a parameter. */
+                if (ts_opt_marker(s) || ts_annotation(s))
                     goto fail;
                 if (rest) {
                     emit_op(s, OP_rest);
@@ -37814,6 +38047,10 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     }
 
     if (next_token(s))
+        goto fail;
+
+    /* quickts E1: return type annotation: `): T {` / `): T =>`. */
+    if (ts_annotation(s))
         goto fail;
 
     /* generator function: yield after the parameters are evaluated */
@@ -38227,6 +38464,9 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     bool is_strict_mode;
 
     js_parse_init(ctx, s, input, input_len, filename, line);
+    /* quickts E1: js_parse_init() just memset() the state, so ts stays false
+       unless the caller asked for it. All TS hooks are gated on s->ts. */
+    s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;
     skip_shebang(&s->buf_ptr, s->buf_end);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;

@@ -4511,6 +4511,25 @@ const MUTATIONS = [
       '`instr-hook/patch-restore-cas` 的地址值 / `restore_conflicts` / `restores` 三项红',
   },
 
+  // ── S1a（quickts E1）：`JS_EVAL_FLAG_TYPESCRIPT` 真的被读 ──────────────────────────────
+  //   ★ 代表这一类错：flag 加了但没人读（`s->ts = false`）⇒ 所有 `.ts` 仍在第一个类型注解处报错。
+  //     这是**静默无效**型失败：`lift-qjs` 照常编过、`.js` 行为一字不变，只有 `.ts` 全炸。
+  //   ★ 红点：`quickts/ts-hello` 求值失败 + `quickts/ts-examples-compile` 的 9/9 全红
+  //     （`js-bytecode-identical` 仍绿 —— 那正是"只改 flags off"的对照面）。
+  //   ★ 只为 `lift-quickts` 一个 target 重建；⚠ CTest 名 `quickts` ≠ target 名 `lift-quickts`。
+  {
+    file: 'apps/emulator-lift/third_party/quickjs-ng/quickjs.c',
+    from: '    s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;\n',
+    to: '    s->ts = false;  // 变异：flag 加了但没人读（.ts 静默按 JS 解析）\n',
+    guard: 'ctest:quickts',
+    ctest: 'quickts',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-quickts',
+    what:
+      '`__JS_EvalInternal` 不读 `JS_EVAL_FLAG_TYPESCRIPT`（把 `s->ts` 钉成 false）⇒ `.ts` 全部在第一个' +
+      '类型注解处报错；`quickts` 的 `ts-hello` / `ts-examples-compile` 当场红',
+  },
+
 ];
 
 let mutationRunSeq = 0;
