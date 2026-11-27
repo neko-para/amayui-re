@@ -55,3 +55,12 @@
 - 现有 9 个 examples 全绿；`tsc --noEmit --erasableSyntaxOnly` 绿。
 - 1 条 hook ≤1.5%（20 轮 CI 上界）；cheap key 档 ≤ 今天读点 poll；JS 回调有每帧上限。
 - 不要求给每个 API 配测试；只保留字节码恒等 + `.ts` smoke 两条关键守卫。
+
+## 核实（2026-11-27，报告 `.tmp/plugin-v2/v2-typescript.md`）
+
+- 需求宣称的产物（`quickts_e1.h` 1,092 行 / 33 hunk / 字节码 16/16 / examples 9/9）在**仓内、git 历史、`.tmp`、dev 树都不存在**（`rg` + 文件搜索均为空）⇒ "已验证"**不可复现**。
+- 上游 = `https://github.com/FrameOS/quickts`（MIT；Bellard QuickJS 2026-06-04 + 少量 commit；HEAD `66e2847`，VERSION `2026-06-04-quickts.2`；`quickjs.c` diff **45 hunk / +272 / −6** 与需求数字逐字对得上）。
+- 直接 `git apply` 到 quickjs-ng v0.18.0：**18 贴上 / 27 reject**；贴上的也编译不过（引用被拒的 `s->ts` 字段）⇒ 必须手工重写。E1 约 10 处重写 + 8 处机械改 + 9 处丢弃；`BOOL/TRUE/FALSE`（48+33 处）→ `bool/true/false`。
+- 需求的**两处落点写错**：`locateSpecifier`（`script_quickjs.cpp:1299`）只用于错误文本、不参与装载；`JS_DetectModule`（`quickjs.h:1042`）**没有 flags 参数** ⇒ `.ts` 不能靠它带 flag 探测（按扩展名强制 module 或新增 API）。
+- 门禁现状：tsc 5.9.3；examples 的 `--noEmit` 与 `--erasableSyntaxOnly` 都 exit 0；但 `examples/tsconfig.json` 与根 `typecheck` 都**没开**该选项 ⇒ 目前不是常设门禁。
+- 路径：P0 外部 tsc 预编译（2–4 h）· P0.5 `.ts` 候选 + flag 管线（2–4 h）· P1 E1-mini（1–2 人日）· P2 完整 E1（2–4 人日）。

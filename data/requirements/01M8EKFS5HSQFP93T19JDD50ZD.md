@@ -65,3 +65,13 @@
 ## 待定
 
 - timeout 检测点（系统定时器/present/读点）；input token 是否做；`Tick` 越界访问抛错还是 undefined；是否保留全局 `ctx` 便利。
+
+## 核实（2026-11-27，报告 `.tmp/plugin-v2/v3-api-design.md`）
+
+- **drain 现成但没接线**：`drainPendingJobs` 只在模块装载（`script_quickjs.cpp:1624`）与析构（`:236-239`）调用；插件回调 `call()` 与 `render()` 跑完不 drain ⇒ `await Promise.resolve()` 的"当前入口跑完"今天**不成立**。且 CPU deadline 在 `JS_Call` 返回即清零（`:4760-4774`）⇒ drain 必须纳入同一预算窗，否则忙等 await 循环永久卡住且无症状。
+- **指令点 → JS 无反向通道**：`instr_hook.cpp` 零 JS；`quickjs.h` 只许在 `ui/quickjs_value.h` ⇒ 必须新造不含 JS 类型的 sink，且 `extern "C"` 入口里不能抛。
+- **`at` 链撞两条旧不变量**：`(script,pos)` 去重（`instr_hook.cpp:235-237`）与 `Pending` 单槽（`:72-77`、`break` `:398`）⇒ 同点多 handler 各自 patch 会互踩。
+- **Run 互斥不是"已实现"**：`rg RunControl src` 零代码命中；无 dispatch / endpoint；`ctx.run` 恒 undefined（单插件 + 单 TriggerRunner）。
+- **输入触发点**：`node tools/opcodes.mjs --handlers` 可机械点名 114 `wait-for-input` / 205 / 257 `poll-input` / 540 `wait`（handler EA 有），但"哪条 = 输入到达"仍**待核**。
+- **timeout 没有独立泵**：只能挂读点（`plugin_host.cpp:231-259`）与 render 帧（`present_sdl.cpp:722-729`）两个既有泵；`aot_run.cpp`/`machine.cpp` 不许出现 pump 词（守卫 `input-plan-shape.test.mjs:96`）。
+- **建议顺序**：指令点 sink（只读命中）→ drain + 预算窗 → `once`/timeout → `at` 链 → `Tick` 分层。
