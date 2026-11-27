@@ -4,7 +4,6 @@
 - type: req
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
-- verify: apps/emulator-lift/CMakeLists.txt#input-plan-read-points
 - done_reason: 配方完成度成判据落地：pending != 0 或某步 timeout 到期 ⇒ exit 5 + 点名（FAIL incomplete / FAIL timeout + step 名与行号）；顺带把两臂能力面收成一份（RecipeFeatures/kPlanFeatures/kGraphFeatures 整块删除，'这个入口不认'的解析期硬错删净）。读数：反例 await position TITLE 0x388C 0x38A4 + click ⇒ 改前 exit 0/pending 缺 ⇒ 改后 exit 5 + pending=2 + 点名 step1（父级复跑确认）；正例 [0x0460,0x0520) ⇒ exit 0 + fired=1 + pending=0 + region 117490928/25/6821；超时例 ⇒ exit 5 + '守卫 2000 ms…已等 2001 ms ⇒ 到期'；--input-plan 现在能直接吃 graphs/sn0000.graph（含 timeout/profile_*）；ctest 102/102、pnpm test 552、verify 501、validate 6/6；变异 1/1 红。三处取舍见正文（quit 靠 postQuit+stop_requested、timeout 缺省按入口、profile_* 落成墙钟区间）。
 - tags: [emulator-lift, input, recipe, exit-code]
 

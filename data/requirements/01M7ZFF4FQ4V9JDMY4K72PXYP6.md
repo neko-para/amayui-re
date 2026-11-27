@@ -4,8 +4,8 @@
 - type: bug
 - status: done
 - parent: REQ-01M7JHSDWT13XEZJHEET2BDH1C
-- verify: apps/emulator-lift/tests/input_inject_visible.cpp#inject/click-crosses-callback
-- repro: apps/emulator-lift/tests/input_inject_visible.cpp#inject/click-crosses-callback
+- verify: apps/emulator-lift/tests/input_inject_visible.cpp#inject/executor-click-crosses-callback
+- repro: apps/emulator-lift/tests/input_inject_visible.cpp#inject/executor-click-crosses-callback
 - severity: S2
 - done_reason: 判据 = CTest input-inject-visible 的用例 inject/click-crosses-callback（同一个回调里把墙钟推过兜底 + 灌 12 个位置读点都不许抬起；下一个完整回调必须仍读到按下；两个完整回调之后才抬）+ tools/mutate-check.mjs 对应条（callback_ok 恒 true ⇒ 12 failures、CTest 退出码 8）；读数 4/5 → 14/14、每条 frames = press_frames + 2。「未做」三条见正文（插件 IntentExecutor 的注入 click 无帧线 / 键盘 key_down/up 无回调边界 / kPressFallbackMs=250 墙钟兜底仍可绕过结构条件）。
 - tags: [emulator-lift, input, click, recipe]

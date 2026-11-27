@@ -4,7 +4,6 @@
 - type: req
 - status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
-- verify: apps/emulator-lift/tests/input_plan.cpp#input-plan/click-consumed-by-ui
 - done_reason: 用户裁决 2026-11-19（Q1/Q2/Q3/Q6/Q8 按推荐）；S1–S9 全部落地（S1–S3 逐字节不变、S4 单一租约 + Driver::Guest + 转移投影（含 Script up 不先移动的 follow-up）、S5 overlay hover 读设备、S6 配方 mouse_move/down/up、S7 一读点一条写动作 + 连点串行化、S8 文档、S9 注入 click 过 UiClickRouter + --ui-input=consume|pass）。判据：全量 ctest 128/128（4 skip）；input-injection 441 checks / input-plan-read-points 743 / control-endpoint 530，0 failures；语义片各有新子用例。残留（文档已写清）：mouse_move/down/up 原语不过 router；控制层 consumed_by_ui 字段；window.key/mouse/cursor 站点名无断言；--ui-watch/--ui-strict 未实现。
 - tags: [emulator-lift, input]
 

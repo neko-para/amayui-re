@@ -4,7 +4,6 @@
 - type: req
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
-- verify: apps/emulator-lift/CMakeLists.txt#input-plan-read-points
 - done_reason: 三条指令落地：await script（电平门，大小写不敏感、两侧剥 .bin）/ wait <ms>（steady_clock 非阻塞 deadline + 测试注入缝）/ click（1280×720 参考系，经 cursor_map 新增的唯一纯函数 referenceToClientPixel 缩放到 guest 客户区，move/down/up 共用同一映射）。presents/always/key/图语法 = 解析期硬错；key 死码已删。门禁：build exit 0；ctest 102 项 100% passed（6 skip 结构性）；pnpm test 552/552；pnpm verify 500/500；变异自检 2/2 红。★ 判据 2 经父级实测重写：只有 2a 负对照（NOSUCHSCRIPT ⇒ fired=0 + 基线 region）是确定性凭据；带 wait 的 region 级正例 12 跑 4 成 ⇒ 时间门不作判据，region 级正例等位置谓词 REQ-01M7HC1Z1RD4DNH25BN5ZE1HQK。★ 存疑：cli-aot-flags 整段在 _WIN32 内且 mac SKIP ⇒ 那块本机未编译未运行（CLI 硬错用真二进制手工补证）。
 - tags: [emulator-lift, input, dsl, aot]
 

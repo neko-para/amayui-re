@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M7HC1WJ9X0QCQ51Q9F01988W
-- verify: apps/emulator-lift/tests/control_endpoint.cpp#click-enqueue-at-read-point
+- done_reason: M1 动态投递落地（见正文）。2026-11-27 用户裁决：plan 驱动测试退役；click-enqueue-at-read-point 用 InputPlan 当宿主、已删，控制层这条不再单设守卫。
 - tags: [emulator-lift, control-plane]
 
 ## 一句话

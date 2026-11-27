@@ -19,8 +19,13 @@
 //   ⑥ **文件命名与 gc 范围**：端点文件名 = `ctl.<pid>.<nonce8>.json`；正常退出**只删自己那一个**
 //      （同目录手放的 `keep.txt` 与别的实例的文件都不许被碰 —— 判据 9b 的机制面）。
 //   ⑦ **暂停对 guest 不可见（判据 6）**：`pause` → 真等 2.1 s → `resume` ⇒ `guest_ms` 差 < 5 ms、
-//      `paused_total_ms` 增 ≈ 2000；并且**配方的每步守卫钟同冻**（`InputPlan` 的 `timeout` 用自己
-//      的 steady_clock ⇒ 不补偿就会被暂停吃掉窗口）。
+//      `paused_total_ms` 增 ≈ 2000。
+//      ★ 2026-11-27（用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`）：旧 ⑦ 的第二半（"配方的每步守卫钟
+//        同冻"）与 ⑫ 的"配方 click vs 立即队列 click 逐位相同"都是 `InputPlan` 面 ⇒ 随 `--input-plan`
+//        退役**已删**（子用例 `click-enqueue-at-read-point` / `click-coordinate-map` 整条删，
+//        `clock-freeze+plan-guard` 只留 guest 时钟那一半 = `clock-freeze`）。控制层立即队列本身
+//        住在 `InputPlan` 里，产品侧本批**不动** ⇒ 那三条判据等下一批把它挪到 `IntentQueue` /
+//        `WindowManager` 时再重建。
 //   ⑫ **M1 动态投递 `click`**：未暂停 ⇒ `not_paused`（且**不入队**）；坐标非法 ⇒ `bad_request`；
 //      队列**有界**（第 `kImmediateClickCapacity+1` 条 `bad_request`，前 N 条不丢）；
 //      **判据 2**：入队 + 到达下一个读点 ⇒ click **生效**（fired +1 / `WM_LBUTTONDOWN` / 光标）
@@ -38,7 +43,6 @@
 // ★ 跨平台：socket 的 POSIX / Winsock 两支都**实现**（⛔ 不用 `#if defined(_WIN32)` 跳过用例）。
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -67,11 +71,8 @@
 #include "runtime/clock.h"
 #include "runtime/control.h"
 #include "runtime/control_snapshot.h"
-#include "runtime/cursor_map.h"  // referenceToClientPixel（判据 4 的**唯一**公式）
 #include "runtime/engine_marker.h"
 #include "runtime/host_window.h"
-#include "runtime/input.h"  // `input::kWm*`（click 消息的**唯一**常量来源；⛔ 测试里不抄一份）
-#include "runtime/input_plan.h"
 #include "runtime/memory.h"
 #include "runtime/vfs.h"
 
@@ -364,13 +365,11 @@ std::string readWholeFile(const std::string& path) {
 // 注入时钟（判据 6 的确定性读数：暂停 2 s 不需要真睡）
 // =====================================================================================
 std::uint64_t g_raw_100ns = 0;   // `Clock` 的原始墙钟读数
-std::uint64_t g_plan_ms = 0;     // `InputPlan` 的宿主单调毫秒
 std::uint64_t fakeRawNow() { return g_raw_100ns; }
-std::uint64_t fakePlanNow() { return g_plan_ms; }
 
-// 判据 6：guest 时钟冻结 + 配方守卫钟同冻（两件事必须一起成立）。
-void caseClockFreezeAndPlanGuard() {
-    ::lift_test::g_current_case = "clock-freeze+plan-guard";
+// 判据 6：guest 时钟冻结（暂停区间对 guest 不可见）。
+void caseClockFreeze() {
+    ::lift_test::g_current_case = "clock-freeze";
 
     // ---- ① guest 时钟：冻结区间对 guest 不可见 ----
     lift::Clock clk;
@@ -402,51 +401,6 @@ void caseClockFreezeAndPlanGuard() {
     LIFT_CHECK(paused_ms_during >= 2000 && paused_ms_during <= 2001);
     LIFT_CHECK(paused_ms_after >= 2000 && paused_ms_after <= 2001);
     LIFT_CHECK(after_ms >= before_ms + 5 && after_ms <= before_ms + 6);  // 解冻后照常前进
-
-    // ---- ② 配方的每步守卫钟同冻（`InputPlan` 用自己的 steady_clock ⇒ 必须补偿）----
-    lift::InputPlan plan;
-    std::string err;
-    const bool loaded = plan.loadText("await script NOSUCHSCRIPT timeout 100\n", "fake", &err);
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "loadText err: %s\n", err.c_str());
-        return;
-    }
-    lift::WindowManager wm;  // 门不成立时 atPoint 不碰它（只走时间账）
-    plan.setClockForTest(&fakePlanNow);
-    plan.attachClock(&clk);
-
-    g_raw_100ns = 0;
-    clk.setRawNowForTest(&fakeRawNow);  // 归零暂停账
-    g_plan_ms = 0;
-    const std::uint32_t plan_guest0 = clk.nowMs();
-    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 第一次读点：守卫起算
-    LIFT_CHECK(!plan.failed());
-
-    g_plan_ms = 90;
-    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 90 < 100 ⇒ 守卫还在
-    LIFT_CHECK(!plan.failed());
-
-    // 暂停 2 s：guest 时钟冻 + 宿主墙钟照走 2 s
-    clk.freeze();
-    g_raw_100ns += 20'000'000;
-    g_plan_ms += 2000;
-    clk.unfreeze();
-    plan.atPoint(wm, lift::InputPoint::CursorPos);
-    const std::uint64_t effective = g_plan_ms - clk.pausedTotalMs();
-    const std::uint32_t plan_guest1 = clk.nowMs();
-    std::printf("[judge6] plan guard: guest_ms %u → %u (delta=%lld) paused_total_ms=%llu effective_ms=%llu\n",
-                plan_guest0, plan_guest1,
-                static_cast<long long>(plan_guest1) - static_cast<long long>(plan_guest0),
-                static_cast<unsigned long long>(clk.pausedTotalMs()),
-                static_cast<unsigned long long>(effective));
-    LIFT_CHECK(plan_guest1 == plan_guest0);  // 暂停区间同样对 guest 不可见
-    LIFT_CHECK(!plan.failed());  // ★ 补偿缺失 ⇒ 这里 elapsed=2090 ⇒ 立刻 TimedOut ⇒ 红
-
-    g_plan_ms = 3000;  // 再走 910 ms 真时间（不暂停）⇒ 守卫该到期了
-    plan.atPoint(wm, lift::InputPoint::CursorPos);
-    LIFT_CHECK(plan.failed());
-    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::TimedOut);
 }
 
 // =====================================================================================
@@ -663,8 +617,9 @@ void caseEndpointSurface() {
         return true;
     };
     {
-        // `key` 是 M1 裁决**不做**的（用户口径："click 够用即可"）⇒ 必须 `unknown_op`（不静默）；
-        // `click` 从 M1 起真的实现了（见 `caseClickDelivery` / `caseClickCoordinateMap`），不再用它测。
+        // `key` 是 M1 裁决**不做**的（用户口径："click 够用即可"）⇒ 必须 `unknown_op`（不静默）。
+        // ★ 2026-11-27：`click` 的落地面（立即队列 / 坐标映射）住在 `InputPlan` 里，那两条子用例随
+        //   `--input-plan` 退役已删 ⇒ 这里只钉"未知 op 不静默"，⛔ 不再用它冒充 click 的判据。
         Res r;
         LIFT_CHECK(roundTrip("{\"id\":7,\"op\":\"key\",\"vk\":65}", &r));
         std::printf("[endpoint] unknown-op res=%s\n", r.text.c_str());
@@ -1074,527 +1029,6 @@ void caseScreenshotSemantics() {
 }
 
 // =====================================================================================
-// M1 · 动态投递 `click`（判据 1/2/3/4/5 的 pure 面）
-//
-// ★ 判据 2 的**形状**（这条钉的正是"插在 `next_` 会跳过门"的错法）：
-//   · 假 host 上放一个**未满足的门**（`await script NOSUCHSCRIPT`；没有 guest 内存 ⇒ 门恒不成立）
-//     + 一个步进指针（`stepsApplied()` / `pending()` / `currentStep()`）；
-//   · 暂停态入队一条 `click`（控制层 ⇒ 同一个 `InputPlan` 的立即队列）；
-//   · "下一个 guest 读点"= 本用例显式调 `atPoint`（与 guest 侧**同一条**入口）⇒ click **落地**；
-//     ★ 2026-11-19 起落地是**两段**（臂上 move → 跨一个完成的位置读点 → down）⇒ 读点是一串（3 个）。
-//   · 同时步进指针**一位不动** ⇒ 门还在等。⛔ 两件事必须**同时**成立。
-//
-// ★ 判据 5：暂停态连投 ⇒ 第 `kImmediateClickCapacity + 1` 条 `bad_request`；前 N 条**不丢**
-//   （一个读点上全部生效）。
-// ★ 判据 3：未暂停态 `click` ⇒ `not_paused`，且**没有**入队（不是"静默丢"、也不是"先收下再说"）。
-// ★ 判据 4：坐标不合法（负 / 越界 / 非整数 / 未知按钮）⇒ `bad_request`（⛔ 不 clamp、⛔ 不猜）。
-// ★ 真机器上的读数（真 guest 读点 + 真帧）由报告里的 e2e 承担；本用例只碰控制层状态机 +
-//   真的 `InputPlan` / `WindowManager`（无需 GPU / 安装树）。
-// =====================================================================================
-void caseClickDelivery() {
-    ::lift_test::g_current_case = "click-enqueue-at-read-point";
-    namespace fs = std::filesystem;
-    const fs::path root = fs::path("control-endpoint-work") / "ctl-click";
-    std::error_code ec;
-    fs::remove_all(root, ec);
-    fs::create_directories(root, ec);
-
-    lift::Control c;
-    lift::Control::Options opts;
-    opts.root = root.string();
-    opts.port = 0;
-    opts.idle_timeout_s = 300.0;
-    opts.orphan_timeout_s = 10.0;
-    opts.predicate_timeout_s = 2.0;
-    opts.session = "sess-click";
-    opts.exe_sha256 = "click";
-    opts.shape = "test-shape";
-    std::string err;
-    LIFT_CHECK(c.start(opts, &err));
-    if (!c.started()) {
-        std::fprintf(stderr, "start err: %s\n", err.c_str());
-        return;
-    }
-    const std::string token = jsonString(readWholeFile(c.controlFilePath()), "token");
-
-    // ---- 主线程（= 汇点线程）独占 `WindowManager` / `InputPlan`（与控制层只是非拥有指针）----
-    struct Reading {
-        std::uint64_t fired = 0;
-        std::uint64_t applied = 0;
-        std::uint64_t pending = 0;
-        std::uint64_t pending_releases = 0;
-        std::uint64_t queued = 0;
-        std::uint64_t released = 0;
-        std::size_t move_msgs = 0;
-        std::size_t down_msgs = 0;
-        std::size_t up_msgs = 0;
-        std::uint32_t move_lparam = 0;
-        std::uint32_t down_lparam = 0;
-        int cursor_x = -1;
-        int cursor_y = -1;
-        bool left_down = false;
-        bool failed = false;
-        bool gate_is_first = false;
-        int gate_line = -1;
-        bool recipe_done = false;
-    } reading;
-    std::atomic<bool> gate_quit{false};
-    std::atomic<bool> gate_done{false};
-    std::atomic<unsigned long long> read_gen{0};  // 每次"guest 读点"完成 +1（测试等它推进）
-    // ★ S7：一次读点只落**一条**写动作 ⇒ 一批 click 必须跨**很多**读点才能逐条投完。
-    //   `burst_points` = 一次 `resume` 之后跑几个读点；`burst_mixed` = 交替 CursorPos / KeyLevel
-    //   （抬起闸门要 2 个 KeyLevel 读点 ⇒ 只有交替才驱动得出 down/up 对）。
-    std::atomic<unsigned long long> burst_points{3};
-    std::atomic<bool> burst_mixed{false};
-    bool stop_flag = false;
-
-    std::thread gate([&] {
-        lift::WindowManager wm;
-        lift::InputPlan plan;
-        lift::Clock clk;
-        std::string lerr;
-        // 未满足的门：没有 guest 内存 ⇒ 恒不成立（`pending` 恒 1、`next_` 恒 0）。
-        const bool loaded = plan.loadText("await script NOSUCHSCRIPT timeout 35000\n", "fake-plan", &lerr);
-        LIFT_CHECK(loaded);
-        if (!loaded) std::fprintf(stderr, "plan load err: %s\n", lerr.c_str());
-        wm.setInputPlan(&plan);
-        // 客户区 = 1280×720（无标题栏样式 ⇒ 外层就是客户区）⇒ 参考坐标**恒等**映射。
-        wm.createWindow("ClickTest", 0u, 0u, 0, 0, 1280, 720, 0u);
-        plan.setClockForTest(&fakePlanNow);
-        plan.attachClock(&clk);  // 与 aot_main 的装配同形（守卫钟 = 宿主毫秒 − 暂停）
-        lift::Control::Context ctx;
-        ctx.clock = &clk;
-        ctx.windows = &wm;
-        ctx.stop_requested = &stop_flag;
-        ctx.paused_at = "block";
-        // ★ "guest 读点"（与 guest 侧**同一条**入口 `InputPlan::atPoint`）+ 一份读数。
-        //   ★ 只在 `serve()` **放行**（resume 返回 false）之后才发生 —— 暂停态 guest 不跑，
-        //     所以**暂停期间没有读点**（这正是"入队 → resume → 下一个读点才施加"的时态）。
-        auto doReadPoint = [&](lift::InputPoint point) {
-            plan.atPoint(wm, point);
-            Reading r;
-            r.fired = plan.fired();
-            r.applied = plan.stepsApplied();
-            r.pending = plan.pending();
-            r.pending_releases = plan.pendingReleases();
-            r.queued = plan.queuedClicks();
-            r.released = plan.releases();
-            r.failed = plan.failed();
-            const lift::Step* cur = plan.currentStep();
-            r.gate_is_first = cur != nullptr && cur->kind == lift::StepKind::AwaitScript;
-            r.gate_line = cur != nullptr ? cur->line : -1;
-            r.recipe_done = plan.outcome() == lift::RecipeOutcome::Done;
-            lift::WinMessage m;
-            for (std::size_t i = 0; i < wm.queueSize(); ++i) {
-                if (!wm.peekAt(i, &m)) continue;
-                if (m.message == lift::input::kWmMouseMove) {
-                    ++r.move_msgs;
-                    r.move_lparam = m.lparam;
-                } else if (m.message == lift::input::kWmLButtonDown) {
-                    ++r.down_msgs;
-                    r.down_lparam = m.lparam;
-                } else if (m.message == lift::input::kWmLButtonUp) {
-                    ++r.up_msgs;
-                }
-            }
-            wm.cursorClientPos(wm.primaryWindow(), &r.cursor_x, &r.cursor_y);
-            r.left_down = (wm.mouseButtons() & lift::input::kMkLButton) != 0;
-            reading = r;
-            // ★ 不在这里 +1：一次 `resume` 之后的**一串**读点必须被当成一个整体（见下面的 `read_gen`）。
-        };
-        while (!gate_quit.load()) {
-            if (c.pending() || c.watching()) {
-                // ★ `serve()` 在暂停态**阻塞**（它在等后续命令）—— 那正是"暂停"。只有 `resume`
-                //   （或 quit/idle）让它返回；返回 false 之后 guest 才继续跑 ⇒ 才可能有读点。
-                if (c.serve(ctx)) {
-                    gate_quit.store(true);
-                    break;
-                }
-                if (c.watching()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                // ★ 2026-11-19：`resume` 之后不是"一个读点"，而是**一串**读点（真 guest 放行后
-                //   会连续跑）—— 而注入的 click 现在是**两段**：臂上（只 move）跨一个读点之后才按下。
-                //   ⇒ 缺省连投 3 个读点，覆盖"臂上 + 按下 + 再一拍"。
-                //   ★ S7：一次读点最多一条写动作 ⇒ 一批 N 条 click 要 N 个 down/up 周期；调用方
-                //     用 `burst_points` / `burst_mixed` 指定这一批的读点形状（见 cap 段）。
-                //   ★ 这一串**整体**算一次读数：`read_gen` 在整串跑完之后才 +1（否则客户端会读到
-                //     "臂上"那一拍就断言，把多条 click 全投完的结果看成 0 条）。
-                const unsigned long long n = burst_points.load();
-                const bool mixed = burst_mixed.load();
-                for (unsigned long long k = 0; k < n; ++k) {
-                    doReadPoint(mixed && (k % 2 == 1) ? lift::InputPoint::KeyLevel : lift::InputPoint::CursorPos);
-                }
-                read_gen.fetch_add(1, std::memory_order_release);
-                continue;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-        plan.releaseAll(wm);
-        gate_done.store(true);
-    });
-
-    WsClient ws;
-    LIFT_CHECK(ws.connectTo(c.localPort()));
-    LIFT_CHECK(ws.handshake(token, false));
-    std::string hello;
-    LIFT_CHECK(ws.readText(&hello));
-    LIFT_CHECK(hello.find("\"click\"") != std::string::npos);  // capabilities 里真的有它
-
-    struct Res {
-        std::string text;
-        bool ok = false;
-        std::string code;
-    };
-    auto roundTrip = [&](const std::string& req, Res* out) -> bool {
-        if (!ws.writeFrame(1, req)) return false;
-        if (!ws.readText(&out->text)) return false;
-        out->ok = out->text.find("\"ok\":true") != std::string::npos;
-        out->code = jsonString(out->text, "code");
-        return true;
-    };
-    // "等 guest 走到下一个读点"（`resume` 之后由 gate 线程调 `atPoint`）。
-    unsigned long long read_mark = 0;
-    auto waitReadPoint = [&]() -> bool {
-        for (int i = 0; i < 1500; ++i) {
-            if (read_gen.load(std::memory_order_acquire) > read_mark) {
-                read_mark = read_gen.load(std::memory_order_acquire);
-                return true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-        return false;
-    };
-
-    // ---- 判据 3：未暂停时 `click` ⇒ `not_paused`（⛔ 静默丢）。
-    //    "没入队"由下一条读点的 `fired == 1`（不是 2）证明：被拒的那条没有偷偷排队。----
-    {
-        Res r;
-        LIFT_CHECK(roundTrip("{\"id\":1,\"op\":\"click\",\"x\":1070,\"y\":480}", &r));
-        std::printf("[judge3-click-not-paused] res=%s\n", r.text.c_str());
-        LIFT_CHECK(!r.ok);
-        LIFT_CHECK(r.code == "not_paused");
-    }
-
-    // ---- 判据 4：坐标不合法 ⇒ `bad_request`（解析期就拒；和"是否暂停"无关）----
-    {
-        struct BadReq {
-            const char* req;
-            const char* why;
-        };
-        const BadReq bads[] = {
-            {"{\"id\":2,\"op\":\"click\",\"x\":-1,\"y\":480}", "负 x"},
-            {"{\"id\":3,\"op\":\"click\",\"x\":1280,\"y\":480}", "x 越界（上界 = 1280，半开）"},
-            {"{\"id\":4,\"op\":\"click\",\"x\":1070,\"y\":720}", "y 越界（上界 = 720，半开）"},
-            {"{\"id\":5,\"op\":\"click\",\"x\":1070.5,\"y\":480}", "非整数"},
-            {"{\"id\":6,\"op\":\"click\",\"y\":480}", "缺 x"},
-            {"{\"id\":7,\"op\":\"click\",\"x\":1070,\"y\":480,\"button\":\"middle\"}", "未知按钮"},
-        };
-        for (const BadReq& b : bads) {
-            Res r;
-            LIFT_CHECK(roundTrip(b.req, &r));
-            std::printf("[judge4-click-bad-coord] %s ⇒ %s\n", b.why, r.text.c_str());
-            LIFT_CHECK(!r.ok);
-            LIFT_CHECK(r.code == "bad_request");
-        }
-    }
-
-    Res rp;
-    LIFT_CHECK(roundTrip("{\"id\":8,\"op\":\"pause\"}", &rp));
-    LIFT_CHECK(rp.ok);
-
-    // ---- 判据 2：入队（暂停态）→ resume → **下一个读点**施加；配方步进一位不动 ----
-    {
-        Res rc;
-        LIFT_CHECK(roundTrip("{\"id\":9,\"op\":\"click\",\"x\":1070,\"y\":480}", &rc));
-        std::printf("[judge2-click-enqueue] res=%s\n", rc.text.c_str());
-        LIFT_CHECK(rc.ok);
-        const std::string click_obj = jsonObject(rc.text, "click");
-        LIFT_CHECK(!click_obj.empty());
-        LIFT_CHECK(jsonUint(click_obj, "queued") == 1);  // 入队**还没施加**（读点还没来）
-        LIFT_CHECK(jsonUint(click_obj, "x") == 1070 && jsonUint(click_obj, "y") == 480);
-        LIFT_CHECK(jsonString(click_obj, "button") == "left");  // 缺省左键
-
-        Res rr;
-        LIFT_CHECK(roundTrip("{\"id\":10,\"op\":\"resume\"}", &rr));
-        LIFT_CHECK(rr.ok);
-        LIFT_CHECK(waitReadPoint());
-        std::printf(
-            "[judge2-click-applied] fired=%llu applied=%llu pending=%llu queued=%llu down=%zu move=%zu "
-            "cursor=(%d,%d) lparam=0x%08X left_down=%d | gate=%d line=%d failed=%d done=%d\n",
-            static_cast<unsigned long long>(reading.fired),
-            static_cast<unsigned long long>(reading.applied),
-            static_cast<unsigned long long>(reading.pending),
-            static_cast<unsigned long long>(reading.queued), reading.down_msgs, reading.move_msgs,
-            reading.cursor_x, reading.cursor_y, reading.down_lparam, reading.left_down ? 1 : 0,
-            reading.gate_is_first ? 1 : 0, reading.gate_line, reading.failed ? 1 : 0,
-            reading.recipe_done ? 1 : 0);
-        // ★ ① click **真的生效**（同一段 apply：光标 + WM_MOUSEMOVE + WM_LBUTTONDOWN + fired）
-        //    ★ `fired == 1`（不是 2）同时证明判据 3 那条被拒的 click **没有**偷偷入队。
-        LIFT_CHECK(reading.fired == 1);
-        LIFT_CHECK(reading.move_msgs == 1);
-        LIFT_CHECK(reading.down_msgs == 1);
-        LIFT_CHECK(reading.cursor_x == 1070 && reading.cursor_y == 480);  // 1280×720 ⇒ 恒等
-        LIFT_CHECK(reading.down_lparam == ((480u << 16) | 1070u));
-        LIFT_CHECK(reading.left_down);
-        LIFT_CHECK(reading.queued == 0);  // 立即队列已消费
-        // ★ ② 配方步进**一位不动**（`next_` / `pending` / 当前门都不变）
-        LIFT_CHECK(reading.applied == 0);
-        LIFT_CHECK(reading.pending == 1);
-        LIFT_CHECK(reading.gate_is_first);
-        LIFT_CHECK(reading.gate_line == 1);
-        LIFT_CHECK(!reading.failed);
-        LIFT_CHECK(!reading.recipe_done);
-    }
-
-    // ---- ★ 2026-11-19 `move`（**纯 move**，⛔ 不按键）：暂停态入队 → 下一个读点只发 WM_MOUSEMOVE ----
-    {
-        Res rp3;
-        LIFT_CHECK(roundTrip("{\"id\":21,\"op\":\"pause\"}", &rp3));
-        LIFT_CHECK(rp3.ok);
-        // `move` 带 button ⇒ 错帧（⛔ 静默忽略一个用户以为生效的字段）
-        Res bad;
-        LIFT_CHECK(roundTrip("{\"id\":22,\"op\":\"move\",\"x\":10,\"y\":20,\"button\":\"left\"}", &bad));
-        std::printf("[judge-move-button] res=%s\n", bad.text.c_str());
-        LIFT_CHECK(!bad.ok);
-        LIFT_CHECK(bad.code == "bad_request");
-        Res rm;
-        LIFT_CHECK(roundTrip("{\"id\":23,\"op\":\"move\",\"x\":640,\"y\":360}", &rm));
-        std::printf("[judge-move-enqueue] res=%s\n", rm.text.c_str());
-        LIFT_CHECK(rm.ok);
-        const std::string mv = jsonObject(rm.text, "move");
-        LIFT_CHECK(!mv.empty());
-        LIFT_CHECK(jsonUint(mv, "queued") == 1);  // 入队 ≠ 已落地
-        LIFT_CHECK(jsonUint(mv, "x") == 640 && jsonUint(mv, "y") == 360);
-        const std::uint64_t fired_before = reading.fired;
-        const std::uint64_t down_before = reading.down_msgs;
-        const bool left_down_before = reading.left_down;
-        Res rr3;
-        LIFT_CHECK(roundTrip("{\"id\":24,\"op\":\"resume\"}", &rr3));
-        LIFT_CHECK(rr3.ok);
-        LIFT_CHECK(waitReadPoint());
-        std::printf(
-            "[judge-move-landed] fired=%llu(+%llu) down=%zu(+%llu) cursor=(%d,%d) left_down=%d queued=%llu\n",
-            static_cast<unsigned long long>(reading.fired),
-            static_cast<unsigned long long>(fired_before), reading.down_msgs,
-            static_cast<unsigned long long>(down_before), reading.cursor_x, reading.cursor_y,
-            reading.left_down ? 1 : 0, static_cast<unsigned long long>(reading.queued));
-        LIFT_CHECK(reading.fired == fired_before);     // move 不是"动作"（⛔ 不冒充一次点击）
-        LIFT_CHECK(reading.down_msgs == down_before);  // ⛔ 没有 WM_LBUTTONDOWN
-        LIFT_CHECK(reading.cursor_x == 640 && reading.cursor_y == 360);  // 光标真的到位
-        // ⛔ move 不改按钮电平（上一段 click 还按着是它自己的事，不在这一条判据里）
-        LIFT_CHECK(reading.left_down == left_down_before);
-        LIFT_CHECK(reading.queued == 0);
-    }
-
-    // ---- 判据 5：队列有界（第 N+1 条 `bad_request`；前 N 条一条都不丢）----
-    {
-        // 上一段 `resume` 之后 guest 在跑 ⇒ 先 pause 才能入队。
-        Res rp2;
-        LIFT_CHECK(roundTrip("{\"id\":11,\"op\":\"pause\"}", &rp2));
-        LIFT_CHECK(rp2.ok);
-        const std::size_t cap = lift::InputPlan::kImmediateClickCapacity;
-        std::printf("[judge5-click-cap] 立即队列上界 = %zu 条（InputPlan::kImmediateClickCapacity）\n",
-                    cap);
-        LIFT_CHECK(cap == 64);
-        for (std::size_t i = 1; i <= cap; ++i) {
-            Res r;
-            const std::string req =
-                "{\"id\":" + std::to_string(100 + i) + ",\"op\":\"click\",\"x\":640,\"y\":360}";
-            LIFT_CHECK(roundTrip(req, &r));
-            const std::uint64_t queued = jsonUint(jsonObject(r.text, "click"), "queued");
-            if (!r.ok || queued != i) {
-                std::printf("[judge5-click-cap] 第 %zu 条 ⇒ ok=%d queued=%llu res=%s\n", i, r.ok ? 1 : 0,
-                            static_cast<unsigned long long>(queued), r.text.c_str());
-            }
-            LIFT_CHECK(r.ok);
-            LIFT_CHECK(queued == i);  // 深度严格递增 ⇒ 一条都没被丢
-        }
-        Res over;
-        LIFT_CHECK(roundTrip("{\"id\":999,\"op\":\"click\",\"x\":640,\"y\":360}", &over));
-        std::printf("[judge5-click-full] 第 %zu 条 ⇒ res=%s\n", cap + 1, over.text.c_str());
-        LIFT_CHECK(!over.ok);
-        LIFT_CHECK(over.code == "bad_request");
-        LIFT_CHECK(jsonString(over.text, "message").find("已满") != std::string::npos);
-
-        // ★ S7：前 cap 条**一条都不丢**，但也不再"同一个读点全生效"—— 一次读点最多一条写动作，
-        //   而且同一按钮还按着时下一条 click **不消费**（Q8-A 连点串行化）。⇒ 客户端必须驱动
-        //   **足够多的读点**，让 64 条各自走完 arm → press → up。
-        //   读点形状：CursorPos / KeyLevel 交替 —— arm（CursorPos）→ press（下一个读点，位置已读）
-        //   → 2 个 KeyLevel ⇒ up → 下一个 CursorPos 再 arm 下一条。
-        //   ⇒ 每条 click 用 6 个读点；第 1 条之前还要先把 judge2 那条（还按着）抬起来（4 个读点）。
-        //   预算：4 + 6 × cap = 388（这里给 400）。
-        const std::size_t down_before_cap = reading.down_msgs;
-        const std::size_t up_before_cap = reading.up_msgs;
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(down_before_cap), 1);  // judge2 的那一条
-        burst_points.store(4 + 6 * static_cast<unsigned long long>(cap) + 12);
-        burst_mixed.store(true);
-        Res rr2;
-        LIFT_CHECK(roundTrip("{\"id\":12,\"op\":\"resume\"}", &rr2));
-        LIFT_CHECK(rr2.ok);
-        LIFT_CHECK(waitReadPoint());
-        std::printf(
-            "[judge5-click-drain] fired=%llu down=%zu up=%zu queued=%llu applied=%llu pending=%llu "
-            "pending_releases=%llu left_down=%d\n",
-            static_cast<unsigned long long>(reading.fired), reading.down_msgs, reading.up_msgs,
-            static_cast<unsigned long long>(reading.queued),
-            static_cast<unsigned long long>(reading.applied), static_cast<unsigned long long>(reading.pending),
-            static_cast<unsigned long long>(reading.pending_releases), reading.left_down ? 1 : 0);
-        // ---- 一条都没丢：每条 click 各得一对 down/up（fired = 1（judge2）+ cap）----
-        LIFT_CHECK(reading.fired == 1 + cap);
-        LIFT_CHECK(reading.down_msgs == reading.fired);  // down = 1 + cap（不再只是 ≤ +1）
-        LIFT_CHECK(reading.up_msgs == reading.fired);    // 每条都在这一批里被抬起（含 judge2 那条）
-        LIFT_CHECK(reading.down_msgs == down_before_cap + cap);
-        LIFT_CHECK(reading.up_msgs == up_before_cap + cap + 1);  // +1 = judge2 那条的 up 也落在这一批
-        LIFT_CHECK(reading.queued == 0);
-        LIFT_CHECK(reading.pending_releases == 0);  // 没有留下"按着没抬"的按钮
-        LIFT_CHECK(!reading.left_down);
-        // ★ 配方**一位都没动**：门仍然在等（`pending` 是**配方**的待消费数 ⇒ 1；`applied` = 0）。
-        //   ⛔ 不要把它写成 0：`await script NOSUCHSCRIPT` 永远不成立，配方本来就走不完 ——
-        //   "立即队列不推进配方"正是本用例的判据 2。
-        LIFT_CHECK(reading.applied == 0);
-        LIFT_CHECK(reading.pending == 1);
-    }
-
-    Res rq;
-    LIFT_CHECK(roundTrip("{\"id\":1000,\"op\":\"quit\"}", &rq));
-    LIFT_CHECK(rq.ok);
-    for (int i = 0; i < 200 && !gate_done.load(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    LIFT_CHECK(gate_done.load());
-    LIFT_CHECK(stop_flag);
-    if (gate.joinable()) gate.join();
-    c.shutdown("stopped");
-    std::string bye;
-    LIFT_CHECK(ws.readText(&bye));
-    ws.close();
-    fs::remove_all(root, ec);
-}
-
-// =====================================================================================
-// M1 · click 的坐标映射（判据 1 的"同一 apply 通道" + 判据 4 的"唯一除法点"）
-//
-// ① **两种生产者、同一个结果**：`click 1070 480` 写成配方一条 vs 走控制层立即队列
-//    ⇒ 投给 `WindowManager` 的 `WM_MOUSEMOVE` / `WM_LBUTTONDOWN` 的 lParam 与光标客户区坐标
-//    **逐位相同**，`fired()` 相同。⛔ 任何"第二套坐标映射"都会让这一条红。
-// ② **抬起用按下那一对**（不是二次换算）：推进 guest 采样计数后，`WM_LBUTTONUP` 的 lParam == 按下。
-// ③ **唯一除法点**：同一参考坐标在 1280×720（恒等）与 1920×1080（缩放）下都得到
-//    `cursor_map.h::referenceToClientPixel` 的结果；把缩放后的客户区坐标按同一比例回推
-//    参考系 ⇒ **同一个点**（判据 4 的"同一个"）。
-//    ⚠ 判据 4 的字面（"两种尺寸下得到同一个客户区坐标"）在数学上不成立（1024×720 与 1920×1080
-//      的客户区坐标本就不该相同）；这里钉的是"同一个**参考系**位置 + 只有一个公式"。
-// =====================================================================================
-struct ClickObservation {
-    int cursor_x = -1;
-    int cursor_y = -1;
-    std::uint32_t move_lparam = 0;
-    std::uint32_t down_lparam = 0;
-    std::uint32_t up_lparam = 0;
-    std::size_t move = 0;
-    std::size_t down = 0;
-    std::size_t up = 0;
-};
-
-ClickObservation observeClick(lift::WindowManager& wm) {
-    ClickObservation o;
-    lift::WinMessage m;
-    for (std::size_t i = 0; i < wm.queueSize(); ++i) {
-        if (!wm.peekAt(i, &m)) continue;
-        if (m.message == lift::input::kWmMouseMove) {
-            ++o.move;
-            o.move_lparam = m.lparam;
-        } else if (m.message == lift::input::kWmLButtonDown) {
-            ++o.down;
-            o.down_lparam = m.lparam;
-        } else if (m.message == lift::input::kWmLButtonUp) {
-            ++o.up;
-            o.up_lparam = m.lparam;
-        }
-    }
-    wm.cursorClientPos(wm.primaryWindow(), &o.cursor_x, &o.cursor_y);
-    return o;
-}
-
-void caseClickCoordinateMap() {
-    ::lift_test::g_current_case = "click-coordinate-map";
-
-    // ---- ① 配方 click（1280×720 客户区 ⇒ 恒等）----
-    lift::WindowManager wm_a;
-    wm_a.createWindow("ClickMap", 0u, 0u, 0, 0, 1280, 720, 0u);
-    lift::InputPlan plan_a;
-    std::string err;
-    LIFT_CHECK(plan_a.loadText("click 1070 480 left\n", "recipe-click", &err));
-    plan_a.atPoint(wm_a, lift::InputPoint::CursorPos);  // 阶段 ①：臂上（只 move）
-    plan_a.atPoint(wm_a, lift::InputPoint::PeekMsg);    // 阶段 ②：按下
-    const ClickObservation a = observeClick(wm_a);
-    std::printf("[judge1-recipe-click] cursor=(%d,%d) move=0x%08X down=0x%08X fired=%llu\n", a.cursor_x,
-                a.cursor_y, a.move_lparam, a.down_lparam,
-                static_cast<unsigned long long>(plan_a.fired()));
-    LIFT_CHECK(a.move == 1);
-    LIFT_CHECK(a.down == 1);
-    LIFT_CHECK(a.cursor_x == 1070 && a.cursor_y == 480);
-    LIFT_CHECK(a.down_lparam == a.move_lparam);
-
-    // ---- ① 控制层立即队列（同一参考坐标；没有配方）----
-    lift::WindowManager wm_b;
-    wm_b.createWindow("ClickMap", 0u, 0u, 0, 0, 1280, 720, 0u);
-    lift::InputPlan plan_b;
-    LIFT_CHECK(plan_b.enqueueClick(1070, 480, lift::MouseButton::Left));
-    plan_b.atPoint(wm_b, lift::InputPoint::CursorPos);  // 阶段 ①：臂上（只 move）
-    plan_b.atPoint(wm_b, lift::InputPoint::PeekMsg);    // 阶段 ②：按下
-    const ClickObservation b = observeClick(wm_b);
-    std::printf("[judge1-control-click] cursor=(%d,%d) move=0x%08X down=0x%08X fired=%llu\n", b.cursor_x,
-                b.cursor_y, b.move_lparam, b.down_lparam,
-                static_cast<unsigned long long>(plan_b.fired()));
-    LIFT_CHECK(b.move == 1);
-    LIFT_CHECK(b.down == 1);
-    // ★ 判据 1：两种生产者投出**逐位相同**的输入（同一段 apply）
-    LIFT_CHECK(b.cursor_x == a.cursor_x && b.cursor_y == a.cursor_y);
-    LIFT_CHECK(b.move_lparam == a.move_lparam);
-    LIFT_CHECK(b.down_lparam == a.down_lparam);
-    LIFT_CHECK(plan_a.fired() == plan_b.fired());
-    LIFT_CHECK(plan_a.stepsApplied() == 1 && plan_b.stepsApplied() == 0);  // 生产者不同，口径同一个 fired
-
-    // ---- ② 抬起复用按下那一对（"按下被**按键电平读点**读过"之后才抬；⛔ 不是第二次映射）----
-    //   ★ 2026-11-19：闸门 = 按下之后至少 N 个 `GetAsyncKeyState` 读点（`kKeyLevelReadsBeforeRelease`），
-    //     位置读点 / 总采样数**不再**能抬起（那是旧实现的失效根因）。
-    for (std::uint64_t i = 0; i < lift::InputPlan::kKeyLevelReadsBeforeRelease; ++i) {
-        plan_b.atPoint(wm_b, lift::InputPoint::KeyLevel);
-    }
-    const ClickObservation b2 = observeClick(wm_b);
-    std::printf("[judge1-release] up=%zu up_lparam=0x%08X down_lparam=0x%08X released=%llu\n", b2.up,
-                b2.up_lparam, b2.down_lparam, static_cast<unsigned long long>(plan_b.releases()));
-    LIFT_CHECK(b2.up == 1);
-    LIFT_CHECK(b2.up_lparam == b.down_lparam);
-    LIFT_CHECK(plan_b.releases() == 1);
-
-    // ---- ③ 缩放后的客户区（1920×1080）：结果 == 唯一公式；回推参考系是同一点 ----
-    lift::WindowManager wm_c;
-    wm_c.createWindow("ClickMap", 0u, 0u, 0, 0, 1920, 1080, 0u);
-    lift::InputPlan plan_c;
-    LIFT_CHECK(plan_c.enqueueClick(1070, 480, lift::MouseButton::Left));
-    plan_c.atPoint(wm_c, lift::InputPoint::CursorPos);  // 阶段 ①：臂上（只 move）
-    plan_c.atPoint(wm_c, lift::InputPoint::PeekMsg);    // 阶段 ②：按下
-    const ClickObservation cobs = observeClick(wm_c);
-    int expect_x = 0;
-    int expect_y = 0;
-    LIFT_CHECK(lift::referenceToClientPixel(1920, 1080, 1070, 480, &expect_x, &expect_y));
-    const int back_x = static_cast<int>(std::lround(static_cast<double>(cobs.cursor_x) * 1280.0 / 1920.0));
-    const int back_y = static_cast<int>(std::lround(static_cast<double>(cobs.cursor_y) * 720.0 / 1080.0));
-    std::printf(
-        "[judge4-scaled] client=1920x1080 ref=(1070,480) ⇒ cursor=(%d,%d) (公式 %d,%d) "
-        "lparam=0x%08X 回推参考系=(%d,%d)\n",
-        cobs.cursor_x, cobs.cursor_y, expect_x, expect_y, cobs.down_lparam, back_x, back_y);
-    LIFT_CHECK(cobs.cursor_x == expect_x && cobs.cursor_y == expect_y);
-    LIFT_CHECK((cobs.down_lparam & 0xFFFFu) == (static_cast<std::uint32_t>(expect_x) & 0xFFFFu));
-    LIFT_CHECK((cobs.down_lparam >> 16) == (static_cast<std::uint32_t>(expect_y) & 0xFFFFu));
-    LIFT_CHECK(expect_x == 1605 && expect_y == 720);        // 1070×1.5 / 480×1.5（四舍五入）
-    LIFT_CHECK(back_x == 1070 && back_y == 480);            // 同一个参考位置
-    LIFT_CHECK(plan_c.fired() == 1);
-    // ⛔ 不是"所有尺寸都恒等"的假实现：缩放后的客户区坐标必须与 1280×720 那一对不同
-    LIFT_CHECK(a.cursor_x != cobs.cursor_x);
-}
-
-// =====================================================================================
 // ★ `resume` 必须真的**通知宿主**（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`，🐞S2）
 //
 // 洞：`ControlHostSide::controlOnResume()` 声明了、`AotHost` 也实现了（→ presenter → sink 记"恢复时刻"），
@@ -1869,11 +1303,9 @@ void caseTimeouts() {
 }  // namespace
 
 int main() {
-    caseClockFreezeAndPlanGuard();
+    caseClockFreeze();
     caseEndpointSurface();
     caseScreenshotSemantics();
-    caseClickDelivery();
-    caseClickCoordinateMap();
     caseResumeArmsHostHook();
     caseTimeouts();
     return lift_test::finish("lift-control-endpoint");

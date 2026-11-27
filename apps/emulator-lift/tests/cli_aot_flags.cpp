@@ -45,10 +45,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -136,13 +133,6 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("--audio off|sdl") != std::string::npos);
         LIFT_CHECK(r.out.find("--audio off|virtual|sdl") == std::string::npos);
         LIFT_CHECK(r.out.find("--audio-dump") != std::string::npos);
-        // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
-        //   ★ 2026-11-27：配方语法（`mouse_move` / `mouse_down` / `mouse_up` …）搬进
-        //     `docs/03-emulator/input-plan.md`（help 只留参数名 / 值 / 缺省）⇒ 这里只判**入口在**。
-        LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
-        // ★ 诊断档 `--input-plan-trace` 也必须在 help 里（否则"配方 click 不被消费"只能靠猜；
-        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。
-        LIFT_CHECK(r.out.find("--input-plan-trace") != std::string::npos);
         // ★ S9：`--ui-input` 的**两个合法值**与"两种写法都收"必须写在 help 里（D2；否则用户
         //   不知道"注入点击可以被叠层吞 / 怎么关掉"）。值域本身的机械判据另在
         //   `overlay/ui-input-parse`（pure），⛔ 不靠这一条当唯一判据。
@@ -184,7 +174,6 @@ int main(int argc, char** argv) {
             const char* also;
         };
         const Case cases[] = {
-            {"plugin+input-plan", {"--plugin", "a.js", "--input-plan", "b.plan"}, "--plugin", "--input-plan"},
             {"plugin+control-root", {"--plugin", "a.js", "--control-root", "ctl"}, "--plugin", "--control-root"},
             {"plugin-param-duplicate", {"--plugin", "a.js", "--plugin-param", "k=1", "--plugin-param", "k=2"},
              "--plugin-param", "k"},
@@ -331,140 +320,6 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(sep.exit_code, 2u);
         LIFT_CHECK(sep.err.find("headless 不接受窗口参数") != std::string::npos);
         LIFT_CHECK(sep.err.find("值非法") == std::string::npos);
-    }
-
-    // ---- ①' `--input-plan <不存在的文件>` ⇒ exit 2 且 stderr **点名那个路径** ----
-    //      红了 ⇒ 计划文件被静默忽略（那正是"以为按了、其实没按"的失效方式）。
-    g_current_case = "input-plan-missing-file";
-    {
-        const fs::path missing = root / "no-such-plan.plan";
-        const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(missing)}, childOptions(root));
-        LIFT_CHECK(r.started);
-        LIFT_CHECK(!r.timed_out);
-        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-        LIFT_CHECK(r.err.find("no-such-plan.plan") != std::string::npos);
-    }
-
-    // ---- ①'' `--input-plan <语法错文件>` ⇒ exit 2 且**点出行号**（`<path>:4:`）----
-    //      红了 ⇒ 语法错被当成"空计划"吞掉，或者报错不带位置（人无法修）。
-    //      ★ 坏行放在第 4 行：`expect …` 是**图语法**，plan 只认三条指令 ⇒ 未知指令。
-    g_current_case = "input-plan-syntax-error-names-line";
-    {
-        const fs::path bad = root / "bad.plan";
-        {
-            std::ofstream out(bad, std::ios::binary);
-            out << "# 语法错：第 4 行是图语法（--input-plan 不认）\n";
-            out << "await script TITLE\n";
-            out << "click 1 2\n";
-            out << "expect screen changed\n";
-        }
-        const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(bad)}, childOptions(root));
-        LIFT_CHECK(r.started);
-        LIFT_CHECK(!r.timed_out);
-        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-        // 行号 = 文件里第 4 行 —— 判据是"报错点出**那一行**"，不是"有行号"。
-        LIFT_CHECK(r.err.find("bad.plan:4:") != std::string::npos);
-        LIFT_CHECK(r.err.find("未知指令") != std::string::npos);
-        LIFT_CHECK(r.err.find("expect") != std::string::npos);
-    }
-
-    // ---- ①''' 旧指令一律**解析期硬错**：`await always` / `await presents <n>` / `key` ----
-    //      红了 ⇒ 旧配方被静默接受（"按了但语义不对"），或报错不点名行 / 不点名"未知指令"。
-    g_current_case = "input-plan-rejects-old-instructions";
-    {
-        struct OldInstr {
-            const char* name;
-            const char* text;
-        };
-        const OldInstr kOld[] = {
-            {"always.plan", "await always\n"},
-            {"presents.plan", "await presents 120\n"},
-            {"key.plan", "key 13\n"},
-        };
-        for (const OldInstr& o : kOld) {
-            const fs::path p = root / o.name;
-            {
-                std::ofstream out(p, std::ios::binary);
-                out << o.text;
-            }
-            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
-            LIFT_CHECK(r.started);
-            LIFT_CHECK(!r.timed_out);
-            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-            LIFT_CHECK(r.err.find(std::string(o.name) + ":1:") != std::string::npos);
-            LIFT_CHECK(r.err.find("未知指令") != std::string::npos);
-        }
-    }
-
-    // ---- ①'''' 缺参数 / 负毫秒 / 单位后缀 / `=left` ⇒ exit 2 + `文件:行号:` ----
-    g_current_case = "input-plan-rejects-bad-arguments";
-    {
-        struct BadArg {
-            const char* name;
-            const char* text;
-            const char* word;
-        };
-        const BadArg kBads[] = {
-            {"neg.plan", "wait -5\n", "正整数"},
-            {"unit.plan", "wait 500 wall_ms\n", "wait"},
-            {"missing.plan", "click 1\n", "缺参数"},
-            {"eqleft.plan", "click 1 2 =left\n", "按钮词"},
-            // 行内 `timeout` 的缺参 / 非数字 ⇒ 同样是 exit 2 + 行号（⛔ 不许静默当成 0）。
-            {"to-missing.plan", "await script TITLE timeout\n", "毫秒数"},
-            {"to-nan.plan", "await script TITLE timeout abc\n", "正整数"},
-        };
-        for (const BadArg& b : kBads) {
-            const fs::path p = root / b.name;
-            {
-                std::ofstream out(p, std::ios::binary);
-                out << b.text;
-            }
-            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
-            LIFT_CHECK(r.started);
-            LIFT_CHECK(!r.timed_out);
-            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-            LIFT_CHECK(r.err.find(std::string(b.name) + ":1:") != std::string::npos);
-            LIFT_CHECK(r.err.find(b.word) != std::string::npos);
-        }
-    }
-
-    // ---- ①''''' `timeout` **只能写在 `await …` 那一行的末尾**：跨行 / 挂在 `wait` / `click` 上 ⇒
-    //      exit 2 + 点名行号 + 文案指向修法。
-    //      红了 ⇒ 旧写法（"守上一条指令"）被静默接受，或者用户看不出该怎么改。
-    g_current_case = "input-plan-rejects-stray-timeout";
-    {
-        struct StrayTimeout {
-            const char* name;
-            const char* text;
-            const char* want_line;  // `文件:行:`
-            const char* word;       // 报错里必须出现的词（修法 / 原因）
-            const char* word2;      // 可空：第二条必须出现的词（`wait` 的文案要点名改写后的整行）
-        };
-        const StrayTimeout kStray[] = {
-            {"crossline.plan", "await script TITLE\ntimeout 30000\nclick 1 2\n", ":2:", "末尾", nullptr},
-            {"waitto.plan", "wait 5000 timeout 9000\n", ":1:", "固定时长", "写回 `wait 5000`"},
-            {"clickto.plan", "click 1186 373 timeout 5000\n", ":1:", "没有可等待的东西", nullptr},
-            {"quitto.plan", "quit timeout 5000\n", ":1:", "没有可等待的东西", nullptr},
-        };
-        for (const StrayTimeout& s : kStray) {
-            const fs::path p = root / s.name;
-            {
-                std::ofstream out(p, std::ios::binary);
-                out << s.text;
-            }
-            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
-            LIFT_CHECK(r.started);
-            LIFT_CHECK(!r.timed_out);
-            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-            LIFT_CHECK(r.err.find(std::string(s.name) + s.want_line) != std::string::npos);
-            LIFT_CHECK(r.err.find(s.word) != std::string::npos);
-            if (s.word2 != nullptr) LIFT_CHECK(r.err.find(s.word2) != std::string::npos);
-        }
     }
 
     // ---- ② `--cursor-warp` + 缺省呈现档（headless）⇒ exit 2，且是"headless 不接受窗口参数"----
@@ -763,9 +618,6 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
         LIFT_CHECK(r.err.find("--present headless") != std::string::npos);
         LIFT_CHECK(countOccurrences(r.err, kSoundNoticeMarker) == 0u);
-        // ★ S4 的对照：**不给** `--input-plan` ⇒ 那一行摘要**不出现**（缺省档逐字节不变的机械判据）。
-        LIFT_CHECK(r.out.find("input-plan:") == std::string::npos);
-        LIFT_CHECK(r.err.find("input-plan:") == std::string::npos);
     }
 
     fs::remove_all(root, ec);

@@ -22,7 +22,6 @@
 #include "check.h"
 #include "cmdline.h"
 #include "runtime/fault_state.h"  // AOT fault 现场（eip / 块 EA / 8 GPR + eflags / 32 字栈）
-#include "runtime/input_plan.h"   // fault 文本里的 `input-plan` 摘要（C）
 #include "runtime/lift_abi.h"     // LiftRegs
 #include "runtime/memory.h"
 #include "runtime/shims.h"       // ShimRegistry::invoke（`LIFT_WATCH` 的 shim 名接线）
@@ -130,23 +129,19 @@ void setFaultDumpEnv(const char* spec) {
 }
 
 // =====================================================================================
-// AOT 臂的 guest fault 现场（`REQ-01M7PG086DG4BBPA40VCVZTP4X` A）+ fault 文本里的
-// `input-plan` 摘要（同单 C）。
+// AOT 臂的 guest fault 现场（`REQ-01M7PG086DG4BBPA40VCVZTP4X` A）。
 //
 // ★ 为什么在子进程里：`guestFault` 以 `_Exit(3)` 结束进程（诊断的判据之一就是退出码）。
 // ★ 为什么要合成现场：AOT 没有 `Machine` ⇒ 解释器的 `liftFaultHook` 不成立；本用例直接驱动
-//   `fault_state.h`（AOT 的钩子）与 `InputPlan::printFaultSummary`（C 的唯一出口），不跑游戏、
-//   不读 LFS 资产 ⇒ pure 档。
-// ★ 修前红：字段不存在时（`eip` / `lift_cc_` / `eax=` / 第 32 个栈字 / `input-plan: steps=`）
-//   断言当场红 —— 这批断言就是"缺字段"的机械判据。
+//   `fault_state.h`（AOT 的钩子），不跑游戏、不读 LFS 资产 ⇒ pure 档。
+// ★ 修前红：字段不存在时（`eip` / `lift_cc_` / `eax=` / 第 32 个栈字）断言当场红 ——
+//   这批断言就是"缺字段"的机械判据。
+// ★ 2026-11-27（用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`）：fault 文本里的 `input-plan` 摘要
+//   （旧 C 段）随 `--input-plan` 退役**已删**；本用例的 **A 段（fault 现场）原样保留**。
+//   ⚠ `g_current_case` 名里的 `-and-plan-summary` 是先前的台账锚名，本批⛔ 不改（父级改锚时再动）。
 // =====================================================================================
 constexpr std::uint32_t kAotStack = 0x10000000u;   // 合成 guest 栈（32 字）
 constexpr std::uint32_t kAotBlockEa = 0x004B06D0u;  // 合成"当前派发块" EA
-
-void faultPlanText(void* ctx, std::FILE* out) {
-    auto* plan = static_cast<lift::InputPlan*>(ctx);
-    if (plan != nullptr) plan->printFaultSummary(out);
-}
 
 [[noreturn]] void childFaultAot() {
     if (!g_mem->commit(kAotStack, lift::GuestMemory::kPage, lift::RegionKind::Stack, "fault-report-stack")) {
@@ -177,14 +172,6 @@ void faultPlanText(void* ctx, std::FILE* out) {
     site.stub_span = 0x1000u;  // eip 不在桩页 ⇒ "块内直接访存"那条腿
     lift::setGuestFaultSite(site);
     lift::installAotFaultHook();  // = AotHost::init 装的那一个
-    // C：fault 文本里的 `input-plan` 摘要（同一份 InputPlan / RecipeOutcome）。
-    lift::InputPlan plan;
-    std::string perr;
-    if (!plan.loadText("await script NOSUCHSCRIPT\nclick 1 2\n", "mem", &perr)) {
-        std::fprintf(stderr, "合成配方被拒：%s\n", perr.c_str());
-        std::_Exit(93);
-    }
-    lift::setGuestFaultTextHook(&plan, &faultPlanText);
     g_mem->setSafeMode(true);
     (void)g_mem->rd32(kUncommitted);  // ⇒ guestFault ⇒ 两个钩子 ⇒ _Exit(3)
     std::_Exit(94);
@@ -448,7 +435,7 @@ ChildRun runChild(void (*fn)()) {
 
 #endif  // _WIN32
 
-// ④ A + C 的判据（两个平台的子进程跑完都走这一份；⛔ 不各写一套）。
+// ④ A 的判据（两个平台的子进程跑完都走这一份；⛔ 不各写一套）。
 void checkAotFault(const ChildRun& r) {
     LIFT_CHECK(r.exited);
     LIFT_CHECK_EQ_I64(r.exit_code, 3);  // guestFault 的退出码口径不变
@@ -462,10 +449,6 @@ void checkAotFault(const ChildRun& r) {
     // 32 字栈：第 1 个与第 32 个都要在（少打一个字就红 ⇒ 钉住"32 字"这个口径）
     LIFT_CHECK(r.stderr_text.find("A0000000") != std::string::npos);
     LIFT_CHECK(r.stderr_text.find("A000001F") != std::string::npos);
-    // ---- C：fault 文本里的 `input-plan` 摘要（与正常收口同一份数字 + RecipeOutcome）----
-    LIFT_CHECK(r.stderr_text.find("input-plan: steps=2 fired=0 pending=2") != std::string::npos);
-    LIFT_CHECK(r.stderr_text.find("outcome=running") != std::string::npos);
-    LIFT_CHECK(r.stderr_text.find("plan-step  : mem:1") != std::string::npos);
 }
 
 // ⑤ 真平台 guest fault 的判据（两个平台的子进程跑完都走这一份）。
@@ -814,7 +797,7 @@ int main(int argc, char** argv) {
     LIFT_CHECK(guest.stderr_text.find("READ 0x20000000  size=4") != std::string::npos);
     LIFT_CHECK(guest.stderr_text.find("=== host fault") == std::string::npos);
 
-    // ④ AOT 臂的 guest fault 现场（A）+ fault 文本里的 `input-plan` 摘要（C）：
+    // ④ AOT 臂的 guest fault 现场（A）：
     //   解释器臂那条 `liftFaultHook` 在 AOT 上不成立 ⇒ 这一条是 AOT 唯一的现场面。
     g_current_case = "aot-fault-site-and-plan-summary";
     const ChildRun aot = runChild(L"aot-fault");
@@ -876,7 +859,7 @@ int main(int argc, char** argv) {
     LIFT_CHECK(guest.stderr_text.find("READ 0x20000000  size=4") != std::string::npos);
     LIFT_CHECK(guest.stderr_text.find("=== host fault") == std::string::npos);
 
-    // ④ AOT 臂的 guest fault 现场（A）+ fault 文本里的 `input-plan` 摘要（C）
+    // ④ AOT 臂的 guest fault 现场（A）
     g_current_case = "aot-fault-site-and-plan-summary";
     const ChildRun aot = runChild(&childFaultAot);
     checkAotFault(aot);

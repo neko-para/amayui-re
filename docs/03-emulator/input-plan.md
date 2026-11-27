@@ -1,5 +1,15 @@
 # 组装输入：外部数据投递到 shim 输入分发点
 
+> ★ **2026-11-27 注记（用户裁决，`REQ-01M875NDRETPPNN68VCE3VMCT1`）**：`--input-plan` / `.plan`
+>   整体退役 —— **plan 驱动的测试已按裁决删除**（`input-plan-read-points` / `recipe-driver-parity` /
+>   `aot-stress-plan-exit5` / `aot-stress-boot-title` 四条 CTest + 它们的夹具，以及 `cli-aot-flags` /
+>   `aot-overlay` / `control_endpoint` / `input-inject-visible` / `fault-report` / `input-expect` 里的
+>   plan 子用例）。**唯一保留的 e2e = `aot-quit-exit`，已改为 `--plugin` 驱动**
+>   （`apps/emulator-lift/scripts/plugins/quit-at-title.js`；判据不变：TITLE 门 → click 被 guest
+>   消费 → guest 自己的退出路径 ⇒ exit 0 / `stop : stopped` / `misses=0` / 不含 `达到 --time-limit`）。
+>   ⚠ 本文 §5 的守卫表与文末「怎么查」里点名 plan 的命令**只作历史**（那些 CTest 已不在册）；
+>   产品侧入口 / `InputPlan` 类 / `scripts/recipes/*.plan` **下一批**才删，本文正文语义本批**不改**。
+
 > 状态口径：本文只写**不变量 / 落点 / 怎么查**。读数与历史进 `observations.md`；
 > 缺陷进 `defects.md`（`BUG-26`）；进度真源 `pnpm tools requirements plan`。
 > ★ **设备模型在 `input-device.md`**（`InputDevice` 的字段 / 转移表 / 租约 / 坐标链 / S9 注入路由）。
@@ -343,6 +353,10 @@ mouse_up left           # 用**当前设备位置**抬起（可与 down 不同�
 
 ## 5. 守卫（三种，**证明力不同，别混着说**）
 
+> ⚠ **2026-11-27**：下表 ③–⑩ 点名的 CTest / 子用例**多数已随 `--input-plan` 退役删除**
+> （见文首注记）；只剩 ①（源码形态，`input-plan-shape` ①）与 ②（读点闭环，同文件 ②）仍是活守卫，
+> 以及 `input-device.md` / `plugin-runtime.md` 里的设备面 / 插件面判据。此表**只作历史**。
+
 | # | 形状 | 证明力 |
 |---|---|---|
 | ① | **源码形态**：执行循环文件里那 6 个词命中 0（`tools/test/input-plan-shape.test.mjs`） | 强：谁把推进塞回循环就红 |
@@ -398,6 +412,11 @@ mouse_up left           # 用**当前设备位置**抬起（可与 down 不同�
   ★ 这条不查清，所有"解释器能跑通 / AOT 跑不通"的结论都要重打折扣。
 
 ## 怎么查
+
+> ⚠ **2026-11-27**：下面的 `ctest -R 'input-plan|cli-aot-flags'` / `mutate-check --match 'input-plan-read-points'`
+> 等命令**只对历史成立**（`input-plan-read-points` / plan 子用例已不在册）。今天仍可跑的是
+> `input-inject-visible`（只余插件路径两条）、`lift-control-endpoint`（控制层其余用例）与
+> `aot-quit-exit`（`LIFT_STRESS=1`，`--plugin` 驱动）。
 
 ```bash
 node tools/requirements.mjs --plan                 # 进度真源（父单 REQ-01M7G7EJF062NKQ0D40RF3BZ4Z）

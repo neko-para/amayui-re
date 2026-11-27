@@ -1322,47 +1322,26 @@ if(DEFINED ENV{LIFT_STRESS})
     # ★ 读的是**产品 target 的产物**（`emulator-lift-aot`）⇒ 显式依赖：否则 `--target
     #   lift-aot-quit-exit` 只编守卫 exe、产品 exe 停在变异前 ⇒ 变异自检假绿。
     add_dependencies(lift-aot-quit-exit emulator-lift-aot)
+    # ★ 2026-11-27（用户裁决：`--input-plan` 整体退役）：本用例的**驱动器**从 `.plan` 换成
+    #   JS 插件 `scripts/plugins/quit-at-title.js`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click`）。
+    #   第 5 个参数 = 插件入口的**绝对路径**（QJS 的 import 根 = 入口文件目录 ⇒ 入口必须与
+    #   `lib/` 同一个根：`scripts/plugins/`；夹具不能放 `tests/plugin_fixtures/` 再向上 import，
+    #   实测被 `moduleNormalize` 拒成"越出 UI 根目录"）。
+    #   判据不变：TITLE 门命中 → click 被 guest 消费 → guest 自己的退出路径走完 ⇒ exit 0 + stop stopped
+    #   + misses=0，且**不含** `达到 --time-limit`（防"用时间上限蒙出 exit 0"）。
     add_test(NAME aot-quit-exit
         COMMAND lift-aot-quit-exit
                 "$<TARGET_FILE:emulator-lift-aot>" "${_LIFT_STRESS_RAW_GAME_DIR}"
-                "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}")
+                "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/quit-at-title.js")
     set_tests_properties(aot-quit-exit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 420)
 
-    # ---- LIFT_STRESS：**判据 4 的自检**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23` · S1）----
-    # ★ 判据（详见 `tests/aot_stress_plan_exit5.cpp` 文件头）：一份**永不满足**的门
-    #   （`tests/fixtures/boot-title-exit-never.plan`）交给 `--input-plan` ⇒ **exit 5** +
-    #   stderr 点名 `<夹具文件名>:<门那一行>` + `pending != 0`。
-    #   规则级的 `recipeOutcomeExitCode` 已由 `input-plan-read-points` 钉住；本条钉的是
-    #   **`aot_main` 那个调用点**（端到端接线），只有它能抓"没走完却 exit 0"。
-    # ★ 夹具放 `tests/fixtures/`，⛔ **不放** `scripts/recipes/`：那个目录会被
-    #   `recipe-driver-parity` 的用例 5 逐条 replay 并要求 `Done`（永不满足的门会让它红）。
-    # ★ 本用例 spawn 产品 exe ⇒ `add_dependencies`（否则变异自检里 `--target` 只重建守卫 exe，
-    #   产品 exe 停在变异前 ⇒ 假绿；同 `aot-quit-exit` / `CMakeLists.txt:1046-1052` 的教训）。
-    add_executable(lift-aot-stress-plan-exit5 tests/aot_stress_plan_exit5.cpp)
-    target_link_libraries(lift-aot-stress-plan-exit5 PRIVATE emulator-lift-runtime lift-test-support)
-    add_dependencies(lift-aot-stress-plan-exit5 emulator-lift-aot)
-    add_test(NAME aot-stress-plan-exit5
-        COMMAND lift-aot-stress-plan-exit5
-                "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
-                "${_LIFT_STRESS_RAW_GAME_DIR}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/boot-title-exit-never.plan")
-    set_tests_properties(aot-stress-plan-exit5 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
-
-    # ---- LIFT_STRESS：**路径 1（boot → TITLE）**的读数面 ----
-    # ★ 判据（详见 `tests/aot_stress_boot_title.cpp` 文件头）：`scripts/recipes/boot-title.plan`
-    #   ⇒ exit 0 · `pending=0` · 停机原因 = `input-plan: quit`（⛔ 不是 `--time-limit` 的圆场）·
-    #   `[profile-window] begin/end label=boot-title` 存在（**不判 ms**：读数进文档，AGENTS §12.6）。
-    # ★ 这条给路径 1 一个**自动读数面**（窗口墙钟 / dispatch 表随 `--profile` 打在 stdout 上），
-    #   同时把"门 + quit 的配方在 AOT 臂上真的能走完"变成判据。
-    add_executable(lift-aot-stress-boot-title tests/aot_stress_boot_title.cpp)
-    target_link_libraries(lift-aot-stress-boot-title PRIVATE emulator-lift-runtime lift-test-support)
-    add_dependencies(lift-aot-stress-boot-title emulator-lift-aot)
-    add_test(NAME aot-stress-boot-title
-        COMMAND lift-aot-stress-boot-title
-                "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
-                "${_LIFT_STRESS_RAW_GAME_DIR}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/recipes/boot-title.plan")
-    set_tests_properties(aot-stress-boot-title PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # ---- 2026-11-27：`aot-stress-plan-exit5` / `aot-stress-boot-title` **已按用户裁决删除** ----
+    #   两条的主题都是 `.plan` 驱动（永不满足的门 ⇒ exit 5 / 门 + quit 配方 + profile 窗）；
+    #   `--input-plan` 整体退役的裁决见 `REQ-01M875NDRETPPNN68VCE3VMCT1`（测试面本批清，
+    #   产品入口 / `InputPlan` 类下一批删）。⚠ 连带：`tests/fixtures/boot-title-exit-never.plan`
+    #   只剩这两条消费者 ⇒ 夹具也删了；`scripts/recipes/boot-title.plan` **本批不动**（下一批）。
+    #   端到端的"boot → TITLE → guest 自己的退出路径"唯一保留在 `aot-quit-exit`（已改 JS 插件驱动）。
 
     # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
     # ★ 判据（详见 `tests/aot_stress_fellow_switch.cpp` 文件头）：真库驱动
@@ -1468,14 +1447,10 @@ add_executable(lift-input-anchor tests/input_anchor.cpp)
 target_link_libraries(lift-input-anchor PRIVATE emulator-lift-runtime)
 add_test(NAME input-anchor COMMAND lift-input-anchor)
 
-# ---- pure：输入**投递层** S1 的关系断言（`REQ-01M7G7EMX3JR272D8FVM7JFY9D`）----
-# ★ 判据（红了意味着什么）：每个读点调一次 shim ⇒ `InputPlan::deliverCalls(point)` 与
-#   `ShimDef::call_count` **逐点相等**。两个数来自**两个独立来源**（计划自己的账 vs shim 框架
-#   唯一的 `++` 点 `shims.cpp`）⇒ 红了 = 有一条读点没经过投递入口 / 投递入口被挪走了。
-# ★ 顶层无条件注册 ⇒ **pure** 档（夹具 = `initBare` + 自造机器码，⛔ 不需要游戏 / LFS / 窗口）。
-add_executable(lift-input-plan-read-points tests/input_plan.cpp)
-target_link_libraries(lift-input-plan-read-points PRIVATE emulator-lift-runtime)
-add_test(NAME input-plan-read-points COMMAND lift-input-plan-read-points)
+# ---- 2026-11-27：`tests/input_plan.cpp` 的 20 个子用例（CTest 注册已整块删）----
+#   `--input-plan` / `.plan` 整体退役（`REQ-01M875NDRETPPNN68VCE3VMCT1`）⇒ 这个纯 DSL 面的
+#   单元套件随类一起退场；`InputPlan` 类 / 产品 `src/` 本批**不动**（下一批删）。
+#   ⚠ 台账里仍有 4 条 `done` 单的 `verify:` 指着旧 CTest 名 —— 那几行**预期红**（父级改锚）。
 
 # ---- pure：插件运行时的 **TriggerRunner**（C1b；`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）----
 # ★ 判据（红了意味着什么）：
@@ -3217,35 +3192,16 @@ add_test(NAME arena-recycle COMMAND lift-arena-recycle)
 endif()
 
 # =====================================================================================
-# J · C3：JS recipe driver 的 parity（旧 `--input-plan` = oracle；`Step[]` 的唯一 JSON 出口）
+# J · C3：JS recipe driver 的 parity（旧 `--input-plan` = oracle）—— **2026-11-27 已删**
 #
-# 合同：`docs/03-emulator/plugin-runtime.md` §5 C3（`:1162-1206`）；母单
-#       `data/requirements/01M7T0VJPG2S0RZ1HNWW0HH3HY.md:51`（"JS recipe driver + parity（`InputPlan` 保留）"）。
-#
-# ★ 落点（本切片**只新增**；⛔ `recipe.h/.cpp` 的 parser / `StepKind` / `stepWindowExpired`
-#   一个字符不动 —— 那是冻结面，`src/runtime/recipe_json.cpp` 是**独立 TU**）：
-#   · `src/runtime/recipe_json.{h,cpp}`         —— `Step[]` 的**唯一** JSON 出口（只读 `Step`，不执行）
-#   · `tests/recipe_driver_parity.cpp`          —— oracle（`InputPlan`）vs driver（`PluginHost` + lib）
-#   · `scripts/plugins/lib/recipe.js`           —— `runRecipe(steps)`（只由 parity 夹具加载，⛔ 不接生产）
-#   · `tests/plugin_fixtures/recipe-driver.js`  —— parity 的插件入口（相对 import 落在 run 私有临时目录）
-#
-# ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4 判据 = 注册位置；`cmakeTestTier()` 把外层
-#   `if(LIFT_BUILD_TESTS)` 当透明）：零 `Machine` / 零 GPU / 零真窗口 / 零游戏安装 / 零 LFS 资产
-#   ⇒ 与 `plugin-runtime` / `plugin-overlay` 同一档。
-# ★ `LIFT_RECIPES_DIR` = 官方配方目录：`scripts/recipes/*.plan` 逐条 replay（只读；⛔ 运行时复制 / 改写）。
-# ★ 不 spawn 产品 exe ⇒ **不需要** `add_dependencies`（与 `plugin-headless` 的差别）。
+# ★ 用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`：`--input-plan` / `.plan` 整体退役 ⇒
+#   `tests/recipe_driver_parity.cpp`（oracle = `InputPlan`，逐条 replay 12 份 `.plan`）与它的
+#   插件入口 `tests/plugin_fixtures/recipe-driver.js` 一起退场。`scripts/plugins/lib/recipe.js`
+#   与 `src/runtime/recipe_json.cpp` 是**产品侧**、本批**不动**（入口 / 类的删除在下一批）。
+# ★ `src/runtime/recipe_json.cpp` 仍是 `Step[]` 的**唯一** JSON 出口（只读 `Step`，不执行）⇒
+#   保留注册（否则 `recipe.js` 的消费面在下批删除前先失去编译面）。
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE src/runtime/recipe_json.cpp)
-
-if(LIFT_BUILD_TESTS)
-    add_executable(lift-recipe-driver-parity tests/recipe_driver_parity.cpp)
-    target_link_libraries(lift-recipe-driver-parity PRIVATE emulator-lift-runtime)
-    target_compile_definitions(lift-recipe-driver-parity PRIVATE
-        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
-        LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib"
-        LIFT_RECIPES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/recipes")
-    add_test(NAME recipe-driver-parity COMMAND lift-recipe-driver-parity)
-endif()
 
 # =====================================================================================
 # K · 二级设置页 `scripts/ui/settings-page.js`（父级裁决 `.tmp/settings-overlay/decision.md` D2/D4）

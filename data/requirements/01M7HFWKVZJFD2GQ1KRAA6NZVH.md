@@ -4,7 +4,6 @@
 - type: req
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
-- verify: apps/emulator-lift/CMakeLists.txt#input-plan-read-points
 - done_reason: await position <SCRIPT> <FROM> <TO> 落地（hex、FROM<TO、半开区间、读不到继续等 + positionMisses 诊断）。★ 确定性成立：正例 [0x0460,0x0520) + click 1070 480 left ⇒ fired=1 + region 117490928/25，4 次逐位相同（实现者 3 + 父级 1）；负对照 [0x388C,0x38A4) ⇒ fired=0 + 基线 108595152/21/6674。★ 两条我把票写错的、已纠正：(1) 区间写反了——轮询体 [0x039C,0x0460) 门命中但点击无效果，能生效的是 TITLE 回调体输入端 [0x0460,0x0520)；(2) header_len 不能从装载头读（头被读进栈、不进 guest 内存），只能是常量 0x3C（941/941 SYS4450）。门禁：build exit 0 · ctest 102/102（6 skip）· pnpm test 552/552 · pnpm verify 500/500 · 变异 3/3 红（含半开区间改闭区间）。
 - tags: [emulator-lift, input, dsl, position]
 

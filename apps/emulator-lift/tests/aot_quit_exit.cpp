@@ -1,26 +1,33 @@
 // emulator-lift · **TITLE→Quit 退出路径**的端到端**复现件**（`LIFT_STRESS` 档；真 run）
 //
-// ★ 档位：这条**真跑原版安装树**（`links/raw` + TITLE 界面 + 135 帧），判据是"guest 自己的退出
+// ★ 档位：这条**真跑原版安装树**（`links/raw` + TITLE 界面），判据是"guest 自己的退出
 //   路径走完"（`Command_Exit_Exception` 的 catch 续延 → `ExitProcess`），⛔ 不是某个 shim 接口的
 //   合同 ⇒ 按用途只能进 `if(DEFINED ENV{LIFT_STRESS})`（唯一允许跑真游戏的一档）。
 //   ⇒ 默认档的**机制守卫**是 `lift-closure-imm32`（顶层无条件注册：候选集 + 派发表里必须有三行
 //     `LIFT_AOT_ENTRY`，不跑游戏）。本文件是它的**端到端复现件**，不是门禁。
 //
+// ★ 驱动器（2026-11-27 用户裁决：`--input-plan` / `.plan` 整体退役）：JS 插件
+//   `scripts/plugins/quit-at-title.js`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click(1180,640)`）
+//   经 `--plugin <绝对路径>`（CTest 第 5 个参数）装载。⛔ 插件**不许**用 `ctx.quit()` /
+//   `ctx.finish()` 代替 guest 退出 —— 那测的就不是 guest 自己的 Quit 路径了。
+//
 // 判据（红了意味着什么）：
-//   ① **正常退出**：按下 TITLE 的 Quit 后，AOT 臂走完 guest 自己的退出路径
+//   ① **正常退出**：TITLE 门命中后，click 被 guest 消费，AOT 臂走完 guest 自己的退出路径
 //      （`Command_Exit_Exception` 的 catch 续延 → `ExitProcess`）⇒ 宿主进程 **exit 0**，
-//      摘要为 `stop      : stopped`，派发表 `misses=0`，`input-plan` 没有 pending。
-//   ② **没有响亮错**：stdout / stderr 里都**没有** `⛔` · `派发表里没有的 EA` · `decode-error`。
-//      ⇒ 红了意味着退出路径又停在派发表外（典型：D26 的未对齐 imm32 扫描退化成对齐扫描）。
+//      摘要为 `stop      : stopped`，派发表 `misses=0`。
+//      ⛔ **不含** `达到 --time-limit`：那条是"用时间上限把 exit 0 蒙出来"的圆场（时间上限也
+//      exit 0）⇒ 它出现就说明 guest 的 Quit 根本没被走到，本用例必须红。
+//   ② **没有响亮错**：stdout / stderr 里都**没有** `emulator-lift-aot: ⛔` · `派发表里没有的 EA` ·
+//      `decode-error`。红了意味着退出路径又停在派发表外（典型：D26 的未对齐 imm32 扫描退化成对齐扫描）。
 //   ③ **反向对照：真失败仍然响亮**：同一个可执行体 + `--exe <links/raw/AGE.EXE>`
 //      （sha256 与构建期 pin 不一致）⇒ **exit 2** 且 stderr 有 `pin 核对失败` / `不一致`。
 //      ⇒ 红了意味着有人把"退出路径正常收口"扩大成了"什么都 exit 0"。
 //
 // ★ 为什么是**真 run**（不是纯夹具）：退出路径是 guest 字节 + SEH 机器 + 派发表三者共同的产物；
 //   纯夹具只能钉其中一段。本用例的可执行体就是构建期 pin 住的那份 lifted 代码。
-// ★ 代价：一次 run 3.8 s（mac arm64 / RelWithDebInfo / headless / 135 帧；2026-11-17 实测）。
+// ★ 代价：一次 run 几秒（mac arm64 / RelWithDebInfo / headless；`--time-limit 120` 只是兜底）。
 //   CTest 用 420 s 上限（win32 未实测，留足余量）。
-// ★ 输入（执行源 / `links/raw`）假定在场；缺了 `LIFT_SKIP`（77）。
+// ★ 输入（执行源 / `links/raw` / 插件入口）假定在场；缺了 `LIFT_SKIP`（77）。
 //   ⛔ 不许"什么都不做然后 return 0"（那与跑绿了长得一样，见 `check.h`）。
 // ★ 子进程输出**重定向到文件**（⛔ 不走管道：受限沙箱里管道会 EPERM；与 `tools/corpus.mjs`
 //   的 `runCapture` 同一口径）。
@@ -143,20 +150,22 @@ int runChild(const fs::path& exe, const std::vector<std::string>& args, const fs
 int main(int argc, char** argv) {
     using namespace lift_test;
 
-    if (argc < 5) {
+    if (argc < 6) {
         LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <links/raw> <links/raw/AGE.EXE> "
-                  "<corpus/assets/age/AGE.EXE__dumped.sectfix.EXE>（见 CMakeLists）");
+                  "<corpus/assets/age/AGE.EXE__dumped.sectfix.EXE> <插件入口 quit-at-title.js>（见 CMakeLists）");
     }
     const fs::path aot_exe = argv[1];
     const fs::path game_dir = argv[2];
     const fs::path wrong_pe = argv[3];
     const fs::path right_pe = argv[4];
+    const fs::path plugin = argv[5];
 
     std::error_code ec;
     if (!fs::exists(aot_exe, ec)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::is_directory(game_dir, ec)) LIFT_SKIP("links/raw 不在场（原版安装树）");
     if (!fs::exists(wrong_pe, ec)) LIFT_SKIP("links/raw/AGE.EXE 不在场（反向对照需要一份 sha 不同的 PE）");
     if (!fs::exists(right_pe, ec)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
+    if (!fs::exists(plugin, ec)) LIFT_SKIP("插件入口 scripts/plugins/quit-at-title.js 不在场");
 
     const fs::path root =
         fs::temp_directory_path(ec) / ("lift-aot-quit-exit-" + std::to_string(
@@ -172,31 +181,25 @@ int main(int argc, char** argv) {
     const fs::path appdata = root / "appdata";
     fs::create_directories(appdata, ec);
     LIFT_CHECK(!ec);
-    const fs::path plan = root / "quit.plan";
-    {
-        std::ofstream f(plan, std::ios::binary | std::ios::trunc);
-        f << "await position TITLE 0x0460 0x0520 timeout 30000\n";
-        f << "click 1180 640\n";
-        if (!f) LIFT_SKIP("写不进临时 plan");
-    }
 
     const std::vector<std::string> common = {
         "--present", "headless", "--skip-logo", "--audio", "off", "--game-dir",
         game_dir.string(), "--appdata", appdata.string(), "--time-limit", "120",
         // ★ 判据行（`misses=0` 在收口 readout 里）在默认档**不打**（2026-11-27 用户判据：
         //   默认档只留出错 / 警告 + 插件日志 + 1 行 `stop`）⇒ 本用例显式开 `--log-level info`
-        //   才能读到它。⛔ 判据本身没放宽：`stop` / `misses=0` 仍按原文判。
+        //   才能读到它。⛔ 判据本身没放宽：`stop` / `misses=0` / 不含 time-limit 仍按原文判。
         "--log-level", "info"};
 
-    // ---- ① + ② 正例：TITLE → Quit ⇒ exit 0，且没有响亮错 ----
+    // ---- ① + ② 正例：TITLE 门 → click Quit ⇒ guest 退出 ⇒ exit 0，且没有响亮错 ----
     g_current_case = "aot-quit/exit-zero";
     {
         std::vector<std::string> args = common;
-        // ★ 子进程 cwd 是临时目录 ⇒ `--exe` 必须是**绝对路径**（AOT 不会从 cwd 找仓库内入库件）。
+        // ★ 子进程 cwd 是临时目录 ⇒ `--exe` / `--plugin` 必须是**绝对路径**（AOT 不会从 cwd
+        //   找仓库内入库件；插件入口也一样 —— CTest 给的是 `${CMAKE_CURRENT_SOURCE_DIR}/...`）。
         args.push_back("--exe");
         args.push_back(right_pe.string());
-        args.push_back("--input-plan");
-        args.push_back(plan.string());
+        args.push_back("--plugin");
+        args.push_back(plugin.string());
         const fs::path out = root / "quit.out";
         const fs::path err = root / "quit.err";
         const int code = runChild(aot_exe, args, root, out, err);
@@ -227,9 +230,9 @@ int main(int argc, char** argv) {
         // 正常结局 + 派发表零 miss（退出路径上的每个 EA 都在表里）。
         LIFT_CHECK(contains(stdout_text, "stop      : stopped"));
         LIFT_CHECK(contains(stdout_text, "misses=0"));
-        // 配方两步都走完（没有 pending）。
-        LIFT_CHECK(contains(stdout_text, "input-plan: steps=2"));
-        LIFT_CHECK(!contains(stdout_text, "pending=1"));
+        // ★ 防"用时间上限蒙出 exit 0"：停因必须是 guest 自己收的口，⛔ 不是 `--time-limit`。
+        LIFT_CHECK(!contains(stdout_text, "达到 --time-limit"));
+        LIFT_CHECK(!contains(stderr_text, "达到 --time-limit"));
     }
 
     // ---- ③ 反向对照：错误执行源仍然**响亮**失败（exit 2），不是 0 ----

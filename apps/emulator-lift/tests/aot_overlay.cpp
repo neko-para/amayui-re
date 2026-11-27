@@ -31,8 +31,10 @@
 //      行序 / 命中键 / bold 必须不变）。
 //   ⑧ `--overlay` + **显式** `--plugin`（有 render）⇒ 插件赢：像素 = 插件 fill + 恰一行取代语。
 //   ⑨ `--overlay` + **无 render** 的插件 ⇒ HUD **照画**（(0,360)=#0D131A；S2 复审 I2，⛔ 静默无 HUD）。
-//   ⑩ 预设不改互斥：`--overlay --input-plan` 仍 exit 5 + `input-plan: FAIL`；
-//      `--overlay --plugin hud --input-plan` 仍 exit 2。
+//
+// ★ 2026-11-27（用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`）：旧 ⑩（`--overlay --input-plan` 仍
+//   exit 5 / `--overlay --plugin hud --input-plan` 仍 exit 2）随 `--input-plan` 整体退役**已删** ——
+//   `--input-plan` 不再是合法入口，那种"组合面"不存在了。预设与显式插件的其余语义（⑥–⑨）不变。
 //
 // ★ 缺 GPU / 生成物 / 执行源 / 安装树（`--game-dir`）/ 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 // ★ 子进程 cwd / `--appdata` 都指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
@@ -739,53 +741,6 @@ int main(int argc, char** argv) {
             LIFT_CHECK(nearByte(origin.g, (want >> 8) & 0xFFu, 1));
             LIFT_CHECK(nearByte(origin.b, want & 0xFFu, 1));
         }
-    }
-
-    // ---- S2 复审 I4：预设**不改**互斥语义 ------------------------------------------------
-    //   ① `--overlay --input-plan <永不成立的门>` ⇒ 仍 exit 5 + `input-plan: FAIL`（预设不吞 quit /
-    //      不把 quit 停掉：render-only hud 不接管 `stop_requested`）；
-    //   ② `--overlay --plugin hud --input-plan` ⇒ 显式插件走**既有**互斥 ⇒ exit 2。
-    {
-        g_current_case = "overlay-input-plan-exit5";
-        const fs::path plan =
-            fs::path(LIFT_PLUGIN_FIXTURES_DIR).parent_path() / "fixtures" / "boot-title-exit-never.plan";
-        if (!fs::exists(plan)) LIFT_SKIP("夹具 boot-title-exit-never.plan 不在场");
-        const fs::path appdata = root / "appdata-overlay-input-plan";
-        fs::create_directories(appdata, ec);
-        std::vector<Arg> args = common;
-        args.push_back(argFromAscii("--max-frames"));
-        args.push_back(argFromAscii("1"));
-        args.push_back(argFromAscii("--appdata"));
-        args.push_back(appdata.native());
-        args.push_back(argFromAscii("--overlay"));
-        args.push_back(argFromAscii("--input-plan"));
-        args.push_back(plan.native());
-        const ChildRun r = runChild(exe, args, root, root / "overlay-input-plan.out", root / "overlay-input-plan.err");
-        LIFT_CHECK(r.started);
-        std::printf("overlay-input-plan: exit=%d\n", r.exit_code);
-        if (r.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
-        if (r.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
-        if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 5u);
-        LIFT_CHECK(r.err.find("input-plan: FAIL") != std::string::npos);
-    }
-    {
-        g_current_case = "overlay-plugin-hud-input-plan-mutex";
-        const fs::path plan =
-            fs::path(LIFT_PLUGIN_FIXTURES_DIR).parent_path() / "fixtures" / "boot-title-exit-never.plan";
-        std::vector<Arg> args = common;
-        args.push_back(argFromAscii("--overlay"));
-        args.push_back(argFromAscii("--plugin"));
-        args.push_back(argFromAscii("hud"));
-        args.push_back(argFromAscii("--input-plan"));
-        args.push_back(plan.native());
-        const ChildRun r = runChild(exe, args, root, root / "overlay-plugin-hud-plan.out",
-                                    root / "overlay-plugin-hud-plan.err");
-        LIFT_CHECK(r.started);
-        std::printf("overlay-plugin-hud-input-plan: exit=%d\n", r.exit_code);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 2u);
-        LIFT_CHECK(r.err.find("--plugin") != std::string::npos);
-        LIFT_CHECK(r.err.find("--input-plan") != std::string::npos);
     }
 
     if (outs.size() != 4) return finish("aot-overlay");

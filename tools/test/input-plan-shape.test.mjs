@@ -1,11 +1,17 @@
-/** @env pure @kind gate @why 输入投递层 S1 的三条形状判据掉了 —— ① 执行循环里又长出一个投递/推进调用点（"块边界 pump"回来了）· ② 有一条读 guest 输入态/消息队列的已注册 shim 没经投递入口（漏一条读路径）· ③ 关系断言退化成恒真（两个"独立来源"变成同一个） */
+/** @env pure @kind gate @why 输入投递层 S1 的两条形状判据掉了 —— ① 执行循环里又长出一个投递/推进调用点（"块边界 pump"回来了）· ② 有一条读 guest 输入态/消息队列的已注册 shim 没经投递入口（漏一条读路径） */
 /**
  * `apps/emulator-lift` 输入**投递层** S1 的源码形态守卫（纯文本，不构建、不跑 exe）。
  *
  * 引用单：`REQ-01M7G7EMX3JR272D8FVM7JFY9D`（父单 `REQ-01M7G7EJF062NKQ0D40RF3BZ4Z`）。
  * 设计：`.tmp/aot/input/design.md`（⚠ 有错）· 复审：`.tmp/aot/input-review/review.md`（逐条纠错）。
  *
- * ## 三条判据（红了意味着什么）
+ * ★ **2026-11-27（用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`，`--input-plan` 整体退役）**：
+ *   旧的 ③（"关系断言不是恒真"—— 钉 `tests/input_plan.cpp` 的 `deliverCalls == ShimDef::call_count`
+ *   与 `add_test(NAME input-plan-read-points …)`）**已删**：那个 CTest 与源文件本批一起退场
+ *   （`input-plan-shape` 的 ③ 没有对象了）。①/② 保持不变 —— ② 判的投递层今天仍服务
+ *   `ReadPointObserver`（`input.h` 的 `input::deliver*`），与 plan 类是否存在无关。
+ *
+ * ## 两条判据（红了意味着什么）
  * ① **执行循环里不许出现投递层**：`src/runtime/machine.cpp` / `src/aot/aot_run.cpp` 里
  *    `InputPlan` / `input_plan` / `input::` / `deliver(` / `atPoint(` / **`note(`** 命中 = 0。
  *    ★ `note(` 是复审点名的**原设计漏掉的那个入口**：原设计允许 `sampleMarker()`（它在
@@ -27,18 +33,6 @@
  *    ★ 诚实边界（与 `aot-arm-shape.test.mjs:21` 同口径）：这是**源码谓词**，所以
  *      "把读操作藏进另一个 helper"能绕过。真正补它的是"未注册 ⇒ 响亮 trap"（`shims.cpp`
  *      的 `trapUnimplemented`）与 S2 之后的行为用例。
- *
- * ③ **关系断言不是恒真**：运行期的关系断言在 CTest `input-plan-read-points`
- *    （`apps/emulator-lift/tests/input_plan.cpp`）：`plan.deliverCalls(point)` 与
- *    `ShimDef::call_count` **两个独立来源**逐点相等。本守卫钉的是"它没有退化成恒真"：
- *      · 两个计数的 `++` 点各只有一处，且在不同 TU（`input_plan.cpp` 的 `atPoint` vs
- *        `shims.cpp` 的 `invoke`）；
- *      · C++ 用例里 `shim_calls` 必须**取自 `ShimDef::call_count`**，⛔ 不许直接抄 `delivered`；
- *      · 用例必须真的 `setInputPlan(&plan)`（否则计划恒空、只有一侧非 0，用例会红而不是恒真）；
- *      · `add_test(NAME input-plan-read-points …)` 必须注册在**顶层**（pure 档）。
- *    ⚠ 当期口径：S1 没有配方（`armed()` 恒 false），生产路径**没有任何** `setInputPlan`；
- *      关系断言只在本 CTest 里被驱动 ⇒ 它是**有效**的（挂上计划后逐点相等；去掉计划后计数不动、
- *      shim 照常被调用），不是恒真。
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -49,10 +43,6 @@ const ROOT = new URL('../../', import.meta.url);
 const MACHINE_CPP = new URL('apps/emulator-lift/src/runtime/machine.cpp', ROOT);
 const AOT_RUN_CPP = new URL('apps/emulator-lift/src/aot/aot_run.cpp', ROOT);
 const SHIMS_DIR = new URL('apps/emulator-lift/src/shims/', ROOT);
-const INPUT_PLAN_CPP = new URL('apps/emulator-lift/src/runtime/input_plan.cpp', ROOT);
-const SHIMS_CPP = new URL('apps/emulator-lift/src/runtime/shims.cpp', ROOT);
-const INPUT_PLAN_TEST = new URL('apps/emulator-lift/tests/input_plan.cpp', ROOT);
-const CMAKE = new URL('apps/emulator-lift/CMakeLists.txt', ROOT);
 
 function read(url) {
   return fs.readFileSync(url, 'utf8');
@@ -236,50 +226,5 @@ test('② 读点闭环：按谓词枚举所有已注册 shim，"读输入/队列
     mismatches,
     [],
     '读点闭环断了（漏一条读路径，或给非读者硬塞了投递）：\n  ' + mismatches.join('\n  '),
-  );
-});
-
-// =====================================================================================
-// ③ 关系断言不是恒真
-// =====================================================================================
-test('③ 关系断言的两个来源互相独立（不许退化成恒真）+ CTest 顶层注册', () => {
-  const cpp = read(INPUT_PLAN_TEST);
-  assert.ok(
-    /const std::uint64_t shim_calls = defs\[i\] != nullptr \? defs\[i\]->call_count : 0;/.test(cpp),
-    'tests/input_plan.cpp：`shim_calls` 必须取自 `ShimDef::call_count`（两个独立来源之一）',
-  );
-  assert.ok(
-    /LIFT_CHECK_EQ_I64\(static_cast<std::int64_t>\(delivered\), static_cast<std::int64_t>\(shim_calls\)\)/.test(cpp),
-    'tests/input_plan.cpp：缺少 `deliverCalls(point) == ShimDef::call_count` 的逐点断言',
-  );
-  assert.ok(
-    /wm->setInputPlan\(&plan\)/.test(cpp),
-    'tests/input_plan.cpp：没有把计划挂到 WindowManager 上 ⇒ 关系断言会恒真/恒假，测不到接线',
-  );
-
-  // 两个计数各自只有一个 `++` 点，而且在不同 TU ⇒ 不是同一个来源的两种写法。
-  const planSrc = read(INPUT_PLAN_CPP);
-  const incDeliver = (planSrc.match(/\+\+deliver_calls_\[/g) ?? []).length;
-  assert.equal(incDeliver, 1, `input_plan.cpp：\`++deliver_calls_[\` 有 ${incDeliver} 处（应恰好 1 处 = atPoint）`);
-  const shimsSrc = read(SHIMS_CPP);
-  // ★ lift-opt（2026-11-22）：`invokeById` / `invoke` 现在共用 `prepareLocked()`（一次锁 + 一次
-  //   `ShimDef` 拷贝）⇒ 自增点的形参名从 `local` 变成 `out`。**判据不许放宽成"有就行"**：
-  //   ① 全文**恰好一处** `++defs_[<任意下标>].call_count`（= 计数只有一个来源）；
-  //   ② 那一处必须落在 `prepareLocked()` 的**函数体**里（两条 invoke 路径共用它）——
-  //      只断言"函数存在"是不够的（别处再记一次它照样绿）。
-  const incRe = /\+\+defs_\[[^\]\n]+\]\.call_count/g;
-  const incShim = (shimsSrc.match(incRe) ?? []).length;
-  assert.equal(incShim, 1, `shims.cpp：\`++defs_[<下标>].call_count\` 有 ${incShim} 处（应恰好 1 处）`);
-  const prep = /void ShimRegistry::prepareLocked\([^)]*\) \{([\s\S]*?)\n\}\n/.exec(shimsSrc);
-  assert.ok(prep, 'shims.cpp：找不到 `ShimRegistry::prepareLocked` 的函数体（判据要靠它定位唯一自增点）');
-  assert.equal(
-    (prep[1].match(incRe) ?? []).length,
-    1,
-    'shims.cpp：唯一那处 `call_count` 自增必须在 `prepareLocked()` 里（两条 invoke 路径共用它）',
-  );
-
-  assert.ok(
-    /^add_test\(NAME input-plan-read-points /m.test(read(CMAKE)),
-    'CMakeLists.txt：`input-plan-read-points` 必须注册在**顶层**（pure 档；放在 if/foreach 里会变 assets 档）',
   );
 });
