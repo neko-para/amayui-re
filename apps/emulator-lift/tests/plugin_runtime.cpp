@@ -9,6 +9,11 @@
 //   · `plugin/concurrent-arm`             ：一读点最多一个（注册顺序）；返回数组**完整替换**；`[]`=done。
 //   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
 //                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
+//   · `plugin/ts-module`（S1b）           ：入口 `.ts` 经 `initFromFile`（路径形式）+ `lib/helper.ts`
+//                                            运行期 import（宿主按扩展名加 `JS_EVAL_FLAG_TYPESCRIPT`）；
+//                                            click 坐标 = helper 的**运行期**导出（⛔ 不是"没报错"）。
+//   · `plugin/js-comparison-unchanged`（S1b）：`.js` 的 `f<a>(b)` 仍是比较（⛔ 不按泛型调用）。
+//   · `plugin/ts-uppercase-ext`（S1b）     ：扩展名判据 ASCII 大小写不敏感（`.TS` / `.MTS`）。
 //   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）；
 //                                            参考入口 = 根 `scripts/plugins/load-save.js`（S1 拆出）：
 //                                            `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
@@ -264,13 +269,10 @@ struct Fixture {
     }
 
     // 从**任意绝对路径**装载（`origin` = 该路径：QJS 的 import 根 = 它的目录）。
+    // ★ 路径形式走 `PluginHost::initFromFile`（与生产的 `--plugin <路径>` 同一条；⛔ 不要测试
+    //   自己读源码再 `init` —— 那会漏掉 initFromFile 的读文件 / 日志归属面）。
     bool loadFile(const std::string& path, const std::map<std::string, std::string>& params = {},
                   const lift::ui::UiHostOps* host_ops = nullptr) {
-        std::string source;
-        if (!readHostFile(path, &source)) {
-            load_error = "读不到插件：" + path;
-            return false;
-        }
         host = std::make_unique<lift::plugin::PluginHost>(readings);
         // ★ 预算（D5 的 2 ms / 100k 是**运行时口径**，不是本用例的判据）：这里放宽到
         //   500 ms / 1e7 ops —— 只为让"QJS 冷启动（第一次 JS_Call + 若干个对象分配）"不把
@@ -278,7 +280,7 @@ struct Fixture {
         host->runner().setBudget(lift::plugin::Budget{500'000'000ull, 10'000'000u});
         // ★ 装配顺序与 `aot_main` **一致**：`init`（编译 + 沙箱）→ `attachMemory`（Edit/Read）。
         //   `host_ops` 只在需要判"profile 桥有没有被调到"的用例里给（`plugin/render-stored-runctx-rejected`）。
-        if (!host->init(source, path, params, host_ops, &load_error)) return false;
+        if (!host->initFromFile(path, params, host_ops, &load_error)) return false;
         host->attachMemory(mem);
         return true;
     }
@@ -2983,6 +2985,102 @@ void caseCallbackWallOnly() {
 }
 #endif  // _WIN32
 
+// =====================================================================================
+// S1b · `plugin/ts-module`：**入口 `.ts` 经 `initFromFile` 路径装载**（宿主按扩展名加
+//   `JS_EVAL_FLAG_TYPESCRIPT`）；`lib/helper.ts` 走 `moduleLoad`（按**被导入模块名**的扩展名）。
+//
+// 判据（红了意味着什么）：
+//   ① 插件入口没带 flag ⇒ `entry.ts` 在 `interface` / 注解处语法错（装载失败）；
+//   ② `moduleLoad` 没带 flag ⇒ `lib/helper.ts` 被当 JS 解析（装载失败）；
+//   ③ helper 的运行期导出没被用到 ⇒ start 里提交的 click 坐标不是 helper 算出来的 (311,207)；
+//   ④ Run 没以 done 收口 / 回调不是恰好 1 次。
+// ★ ⛔ 只断言"没报错"：坐标 + `run=done` + log 行数都是可判读数（click 在**下一读点**落地）。
+// =====================================================================================
+void caseTsModule() {
+    lift_test::g_current_case = "plugin/ts-module";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    // ★ **路径形式**（不是 id）：与生产 `--plugin <路径>` 同一条 `initFromFile`。
+    const std::string path = (fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "ts-smoke" / "entry.ts").string();
+    const bool loaded = f.loadFile(path);
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();  // start：helper.describe(…) → ctx.log；helper.point() → click(311,207) 入队
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRun());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+    // helper 的 describe() 结果真的经 `ctx.log` 出去了（⛔ 不是"没报错"）。
+    LIFT_CHECK(f.host->logLines() >= 1u);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=done") != std::string::npos);
+    // 下一读点：start 里提交的 click 落地 ⇒ 坐标 = helper.ts 的运行期导出。
+    int cx = 0;
+    int cy = 0;
+    f.pump();
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 311);
+    LIFT_CHECK_EQ_I64(cy, 207);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// =====================================================================================
+// S1b · `plugin/js-comparison-unchanged`：`.js` **不带** `JS_EVAL_FLAG_TYPESCRIPT`。
+//   `f < a > (b)` 在 flags-on 下会被读成泛型调用 `f<a>(b)`（上游自认的唯一语义变化）；
+//   本仓的 `.js` 必须仍按比较解析 —— `r` 是 false（泛型调用会得到 `f(5)` = 15）。
+// ★ 这是"`.js` 行为不变"的**最小判据**：本切片只按扩展名加 flag ⇒ `.js` 永远 flags=0。
+// =====================================================================================
+void caseJsComparisonUnchanged() {
+    lift_test::g_current_case = "plugin/js-comparison-unchanged";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("comparison-call.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());  // 夹具在 `r !== false` 时 `ctx.fail` ⇒ 这里红
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+}
+
+// =====================================================================================
+// S1b · `plugin/ts-uppercase-ext`：扩展名判据 **ASCII 大小写不敏感**（`.TS` / `.MTS`）。
+//   ★ 用**内存源码 + origin 字符串**（⛔ 不落文件）：大小写只在宿主判据里折叠，与当前卷是否
+//     大小写敏感无关 ⇒ 这条在 Linux 上也成立。
+//   ★ 源码含只有 TS 才能编过的语法（`interface` + 注解）⇒ 不带 flag 必失败。
+// =====================================================================================
+void caseTsUppercaseExtension() {
+    lift_test::g_current_case = "plugin/ts-uppercase-ext";
+    const char* const kSource =
+        "interface Probe { value?: number }\n"
+        "const probe: Probe = { value: 1 };\n"
+        "export default {\n"
+        "    start() { return []; },\n"
+        "    onTrigger() { return []; },\n"
+        "};\n";
+    for (const char* origin : {"UPPER.TS", "UPPER.MTS"}) {
+        lift::ui::PluginLoadOptions opts;
+        opts.origin = origin;
+        std::string err;
+        std::unique_ptr<lift::ui::PluginScript> plugin =
+            lift::ui::makeQuickJsPlugin(kSource, opts, &err);
+        ++lift_test::g_checks;
+        if (plugin == nullptr) {
+            lift_test::failf(__FILE__, __LINE__, "%s: 大写扩展名没拿到 TS flag：%s", origin, err.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2993,6 +3091,12 @@ int main() {
         LIFT_SKIP("缺宿主字体 Amayui-CN_cnjp.ttf（LIFT_HOST_FONT_PATH / corpus/assets/fonts）");
     }
     caseModuleContract();
+    // ---- S1b：`.ts` 直读（宿主按扩展名加 `JS_EVAL_FLAG_TYPESCRIPT`）----
+    caseTsModule();
+    // ---- S1b：扩展名判据 ASCII 大小写不敏感（`.TS` / `.MTS`）----
+    caseTsUppercaseExtension();
+    // ---- S1b：`.js` 不带 TS flag 的最小判据（`f<a>(b)` 仍是比较）----
+    caseJsComparisonUnchanged();
     caseApiSurface();
     caseInitialState();
     caseConcurrentArm();
