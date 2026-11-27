@@ -15,6 +15,13 @@
 //      即 `ctx.edit.global.set` 的唯一实现）写同一地址 ⇒ pending 被**主动撤销**：下一拍既不写回、
 //      也不记 `restores` / `restore_conflicts`，地址保持持久写的值。
 //      红了 = 持久写被瞬时覆盖的恢复盖掉（"持久写赢过瞬时覆盖"只在 CAS 下"碰巧"成立）。
+//   ⑥ `instr-hook/sink-hit-fields`（S2a）：命中后 `InstrHookSink::on_hit` 收到的
+//      handle / script / pos / opcode / hits / local counts 逐项正确；pos 过滤仍有效；
+//      注销 sink 之后不再分发、但 `stats().hits` 照旧（计数不依赖 sink）。
+//      红了 = 指令点 → ui 的反向通道断了或字段漂（`handle.onTick` 永远不跑 / 参数错）。
+//   ⑦ `instr-hook/sink-release-events`（S2a）：remove / releaseOwner / clear 摘条目时
+//      `on_released` 各发**恰好一次**、按安装顺序、互不重复；不存在的句柄不发。
+//      红了 = ui 层的 JS handler 泄漏（条目没了、JS 值还在）。
 //
 // ★ 夹具形状：一块假 `GuestMemory`（假 Engine / 帧记录 / 名字表 / int 池 / ptr local）+
 //   一个只填了 `mem` 的 `X86` + 直接调 `instrHookProbe` —— ⛔ 不需要 AOT、不需要游戏安装 / LFS。
@@ -309,6 +316,153 @@ void caseEditCancelsPending() {
     LIFT_CHECK(L::instrHookList().empty());
 }
 
+// =====================================================================================
+// ⑥ S2a · sink 的命中字段（`instr-hook/sink-hit-fields`）
+//
+//   红 = 指令点命中后 ui 层收不到"现场"（或收到错的值）⇒ `handle.onTick` 永远不跑 / 参数漂。
+//   判据：一次 dispatch ⇒ 恰好 1 条 hit，且 handle / script / pos / opcode / hits / counts 逐项相等；
+//   再 dispatch ⇒ hits 递增；**另一个 pos** ⇒ 0 条新 hit（pos 过滤没被破坏）；
+//   注销 sink 之后 ⇒ 0 条新 hit，但 `stats().hits` 照旧 +1（**计数不依赖 sink**）。
+//   ★ opcode 必须摆在 `pc = kBody + (pos - 0x3C)` 上（`sampleFrame` 的 pc 公式）。
+// =====================================================================================
+constexpr std::uint32_t kOpcode = 114u;
+constexpr std::uint32_t kPcA = kBody + (kPosA - L::kScriptHeaderLen);
+
+struct RecordingSink {
+    std::vector<L::InstrHit> hits;
+    std::vector<std::uint32_t> released;
+    std::vector<std::string> scripts;
+};
+
+void recordingOnHit(void* user, const L::InstrHit& hit) {
+    auto* sink = static_cast<RecordingSink*>(user);
+    sink->hits.push_back(hit);
+    sink->scripts.push_back(hit.script != nullptr ? std::string(hit.script) : std::string("<null>"));
+}
+
+void recordingOnReleased(void* user, std::uint32_t handle) {
+    static_cast<RecordingSink*>(user)->released.push_back(handle);
+}
+
+void caseSinkHitFields() {
+    lift_test::g_current_case = "instr-hook/sink-hit-fields";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    RecordingSink sink;
+    L::InstrHookSink hooks;
+    hooks.user = &sink;
+    hooks.on_hit = &recordingOnHit;
+    hooks.on_released = &recordingOnReleased;
+    L::instrHookAddSink(hooks);
+    LIFT_CHECK(L::instrHookHasSink());
+
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    LIFT_CHECK(put32(mem, kPcA, kOpcode));
+
+    bool added = false;
+    const std::uint32_t h = addHook(5u, kPosA, &added);
+    LIFT_CHECK(added);
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 1);
+    if (sink.hits.size() == 1) {
+        const L::InstrHit& hit = sink.hits[0];
+        LIFT_CHECK_EQ_U32(hit.handle, h);
+        LIFT_CHECK_EQ_U32(hit.script_id, kScriptId);
+        LIFT_CHECK(hit.script != nullptr && std::strcmp(hit.script, kScript) == 0);
+        LIFT_CHECK_EQ_U32(hit.pos, kPosA);
+        LIFT_CHECK(hit.opcode_ok);
+        LIFT_CHECK_EQ_U32(hit.opcode, kOpcode);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hit.hits), 1);
+        LIFT_CHECK_EQ_U32(hit.int_count, 8u);
+        LIFT_CHECK_EQ_U32(hit.ptr_count, 2u);
+        LIFT_CHECK_EQ_U32(hit.int_base, kIntPool);
+        LIFT_CHECK_EQ_U32(hit.ptr_base, kPtrSlot);
+        LIFT_CHECK_EQ_U32(hit.codec_key, kKey);
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.scripts.size()), 1);
+
+    // 第二次命中 ⇒ 累计命中随 `stats()` 一起涨。
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 2);
+    if (sink.hits.size() == 2) LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits[1].hits), 2);
+    // 另一个位置 ⇒ 不命中（pos 过滤没坏）。
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 2);
+
+    // 反向自检：sink 注销后不再分发，但 runtime 的计数照旧（计数不依赖 sink）。
+    L::instrHookRemoveSink(&sink);
+    LIFT_CHECK(!L::instrHookHasSink());
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 2);
+    L::InstrHookStatus st;
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 3);
+    L::instrHookReleaseOwner(5u);
+    LIFT_CHECK(L::instrHookList().empty());
+    L::instrHookRemoveSink(&sink);  // 幂等（重复注销不炸）
+}
+
+// =====================================================================================
+// ⑦ S2a · `on_released` 的三个调用点（`instr-hook/sink-release-events`）
+//
+//   红 = 摘条目时 ui 层收不到通知 ⇒ `Impl::hook_handlers` 里的 JSValue 泄漏 / 一直跑到下一个 Run。
+//   判据：remove / releaseOwner / clear 各发**恰好一次**、互不重复；不存在的句柄不发。
+//   ★ 顺序也判：releaseOwner 与 clear 都是**安装顺序**（entries 顺序）。
+// =====================================================================================
+void caseSinkReleaseEvents() {
+    lift_test::g_current_case = "instr-hook/sink-release-events";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    RecordingSink sink;
+    L::InstrHookSink hooks;
+    hooks.user = &sink;
+    hooks.on_hit = &recordingOnHit;
+    hooks.on_released = &recordingOnReleased;
+    L::instrHookAddSink(hooks);
+
+    bool a_ok = false;
+    bool b_ok = false;
+    const std::uint32_t a = addHook(0xAu, kPosA, &a_ok);
+    const std::uint32_t b = addHook(0xBu, kPosB, &b_ok);
+    LIFT_CHECK(a_ok);
+    LIFT_CHECK(b_ok);
+    LIFT_CHECK(sink.released.empty());
+
+    L::instrHookReleaseOwner(0xAu);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.released.size()), 1);
+    if (sink.released.size() == 1) LIFT_CHECK_EQ_U32(sink.released[0], a);
+    // 不存在的句柄 ⇒ 不发（"摘不到"不是"释放了一个"）。
+    LIFT_CHECK(!L::instrHookRemove(999u));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.released.size()), 1);
+
+    LIFT_CHECK(L::instrHookRemove(b));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.released.size()), 2);
+    if (sink.released.size() == 2) LIFT_CHECK_EQ_U32(sink.released[1], b);
+
+    // clear：按安装顺序逐条发（两个不同 owner）。
+    bool c_ok = false;
+    bool d_ok = false;
+    const std::uint32_t c = addHook(0xCu, kPosA, &c_ok);
+    const std::uint32_t d = addHook(0xDu, kPosB, &d_ok);
+    LIFT_CHECK(c_ok);
+    LIFT_CHECK(d_ok);
+    L::instrHookClear();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.released.size()), 4);
+    if (sink.released.size() == 4) {
+        LIFT_CHECK_EQ_U32(sink.released[2], c);
+        LIFT_CHECK_EQ_U32(sink.released[3], d);
+    }
+    // 幂等：空表再 clear 不发。
+    L::instrHookClear();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.released.size()), 4);
+    LIFT_CHECK(L::instrHookList().empty());
+    L::instrHookRemoveSink(&sink);
+}
+
 }  // namespace
 
 int main() {
@@ -319,5 +473,8 @@ int main() {
     caseNoInjection();
     caseOwnerRelease();
     caseEditCancelsPending();
+    // ---- S2a（反向 sink：指令点命中 → ui 层；摘条目 → on_released）----
+    caseSinkHitFields();
+    caseSinkReleaseEvents();
     return lift_test::finish("instr-hook");
 }

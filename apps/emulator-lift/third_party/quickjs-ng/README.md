@@ -108,7 +108,7 @@ quickjs-ng 是 MIT、单层 C、可静态链进 exe（发行树不多一个 DLL�
 
 | 文件 | 改动 | 规模 |
 |---|---|---|
-| `quickts_e1.h` | **新增**：擦除用的 static 函数（类型跳过 / 注解 / `import type` / `as`/`satisfies` / 泛型 / class 成员 / 声明） | 1,117 行（含注释；功能面 = 上游 1,163 行删掉下列段落） |
+| `quickts_e1.h` | **新增**：擦除用的 static 函数（类型跳过 / 注解 / `import type` / `as`/`satisfies` / 泛型 / class 成员 / 声明） | 1,125 行（含注释；功能面 = 上游 1,163 行删掉下列段落） |
 | `quickjs.c` | 18 个插入区 / 36 个代码块：`JSParseState` +5 字段、`ts_type_params` 前置声明、`#include "quickts_e1.h"`、各解析路径的钩子、`__JS_EvalInternal` 读 flag | `+245 / −5`（5 行是 `#06a`/`#10c`/`#10e`/`#11b` 的**改写**，不是删除语义） |
 | `quickjs.h` | `JS_EVAL_FLAG_TYPESCRIPT (1 << 8)`（bit 8 原本空闲；只在 `1 << 7` 之后加一行） | `+3 / −0` |
 

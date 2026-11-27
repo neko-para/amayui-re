@@ -24,6 +24,10 @@ const OPS = [
     "hook.capture",
     "hook.stats",
     "hook.handle.clear",
+    // ★ S2a：`handle.onTick(fn)` 也是**只用于 Run 回调**的句柄出口（门 = `inCallback()`）；
+    //   render 期（含**存下来的 RunCtx**）调它必须 TypeError —— 否则 render 里能注册 tick
+    //   handler（静默越权：那会在下一次探针时跑用户 JS，且不经过任何入口的预算窗）。
+    "hook.onTick",
 ];
 
 let saved = null;
@@ -48,6 +52,7 @@ const plugin = {
                 else if (op === "hook.capture") savedHook.capture({ ints: [0] });
                 else if (op === "hook.stats") savedHook.stats();
                 else if (op === "hook.handle.clear") savedHook.clear();
+                else if (op === "hook.onTick") savedHook.onTick(() => {});
                 else throw new Error("unknown op: " + op);
             } catch (e) {
                 // 唯一正确的形状：非回调期 ⇒ TypeError（⛔ 不是"接受"、也不是别的错）。
