@@ -289,6 +289,10 @@ struct GenIrTarget {
     //     也**不发** `syncBeforeHostCall()`（纯 guest store 不是宿主调用）。
     //   ★ true ⇒ 与今天逐字节一致（debug 诊断保留）。
     bool note_write = false;
+    // ★ `--quiet`（CMake 的 AOT 生成命令带它）：只静音**非错误**的读数打印（`emitPrologue` 里
+    //   `[S7 结构翻译]` / `[EFLAGS 活性]` 两条 stderr 汇总）。这两条读数**同一份内容**也写在 `.ll`
+    //   头部注释里 ⇒ quiet 下不丢信息；⛔ 判据 / 产物字节一个都不动。缺省 false = 输出逐字不变。
+    bool quiet = false;
     // 两个都非空才发属性（见上：任一为空 ⇒ 今天的字节）。
     bool empty() const { return cpu.empty() || features.empty(); }
 };

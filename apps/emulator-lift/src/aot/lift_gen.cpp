@@ -176,6 +176,21 @@ constexpr bool kCloseDataByDefault = true;
 // =====================================================================================
 constexpr bool kCloseJmptabByDefault = true;
 
+// =====================================================================================
+// ★ `--quiet`（CMake 的 AOT 生成命令带它；**默认关** = 输出与今天逐字相同）
+//   口径：只静音**非错误**的进度 / 对账打印 —— `[jmptab]` 每表行、`[jmptab/summary|exclude|items|guard]`、
+//   `lift-gen: …` 的各条读数、`[S7 downgrade]` 每单元一行、提升 / 冲突的逐条进度、soft-root 样例…
+//   **不静音**（⛔ 一个字节都不许少）：
+//     · stderr 的错误 / 守卫失败：`emulator-lift-gen: …`、`[jmptab/P-*]`、`[jmptab/reject]`、
+//       `[jmptab/bad-item]`、`unsupported … (llvm.trap)`（= exit 3）；
+//     · `--closure-gate` 的汇总行（构建期硬闸的判据面，只有一行）；
+//     · `--help` / 参数错误 / `--check`·`--verify-split`·`--verify-ir-target` 的单行结论。
+//   ★ 只改**打印**：退出码 / 判据 / 产物一个字节都不动（`--jmptab-audit` 的 CTest 与 golden
+//     生成命令都不传它 ⇒ 它们看到的输出完全不变）。
+// =====================================================================================
+bool g_quiet = false;
+bool quiet() { return g_quiet; }
+
 struct Options {
     std::string exe;
     std::string roots;
@@ -228,6 +243,9 @@ struct Options {
     std::string dump_blocks;
     unsigned long max_components = 0;
     bool verbose = false;
+    // ★ `--quiet`（纯开关）：只静音非错误的进度 / 对账打印（口径见文件上方 `g_quiet` 的头注）。
+    //   默认 **false** = 输出逐字不变；CMake 的 AOT 生成命令带它。
+    bool quiet = false;
     // ★ S7（D53）：一对一结构翻译（`ret`→宿主 ret / `call`→宿主 call / 间接→`lift_dyn`）。
     //   默认**开**；`--no-s7` 关（= 回到 D55 之前的形状：每个 `call`/`ret` 都回 trampoline）。
     //   ★ 为什么需要这个开关：**协议形状**的差分夹具（`lift-ir-gen-shim` 的 `golden_gen.ll`）
@@ -317,6 +335,8 @@ void usage() {
         "                        (every call/ret goes back through the trampoline; protocol-shape fixtures use it)\n"
         "  --max-components N    component count limit (exceeding => exit code 2; default unlimited)\n"
         "  --verbose             per-component readout\n"
+        "  --quiet               suppress non-error progress/accounting output (errors, guard failures and the\n"
+        "                        one-line --closure-gate summary still print; default off = verbatim today's output)\n"
         "  --help\n"
         "exit codes: 0 success - 2 argument/input error - 3 llvm.trap remains (= generator internal inconsistency: control fell into the default path)\n"
         "        - 4 root (EA from --roots) failed to decode / out of range (a derived leader that fails to decode is only dropped + counted, no exit-code effect)\n"
@@ -2347,7 +2367,7 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
                 for (const std::uint32_t ea : jump_table.unclaimed) {
                     if (promoted.insert(ea).second) {
                         ++n_jump_promoted;
-                        std::fprintf(stderr,
+                        if (!quiet()) std::fprintf(stderr,
                                      "lift-gen: jump-table target %08X is a block start but no component claims it"
                                      " => promoting to a new entry EA and rerunning\n",
                                      ea);
@@ -2373,14 +2393,14 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
                     continue;
                 }
                 if (promoted.insert(ea).second) {
-                    std::fprintf(stderr,
+                    if (!quiet()) std::fprintf(stderr,
                                  "lift-gen: entry %08X has no component claim (reachable only after a rejected soft-root segment)"
                                  " => promoting to a new entry EA and rerunning\n",
                                  ea);
                 }
             }
             if (n_unbuildable != 0) {
-                std::fprintf(stderr,
+                if (!quiet()) std::fprintf(stderr,
                              "lift-gen: %zu entries have **no block** (inside an already-emitted block's byte range / undecodable)"
                              " => not promoting, dropping them from the entry set (edges to them emit ret i32)\n",
                              n_unbuildable);
@@ -2396,7 +2416,7 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
             unbuildable.insert(conflict);
             drops->dropped.insert(conflict);
             explorer->dropEntry(conflict);
-            std::fprintf(stderr,
+            if (!quiet()) std::fprintf(stderr,
                          "lift-gen: conflicting block EA %08X has no block (inside an already-emitted block's byte range / undecodable)"
                          " => dropping it from the entry set (edges to it emit ret i32)\n",
                          conflict);
@@ -2404,7 +2424,7 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
             components.clear();
             continue;
         }
-        std::fprintf(stderr, "lift-gen: block %08X is claimed by two entry functions => promoting to a new entry EA and rerunning\n",
+        if (!quiet()) std::fprintf(stderr, "lift-gen: block %08X is claimed by two entry functions => promoting to a new entry EA and rerunning\n",
                      conflict);
         if (!promoted.insert(conflict).second) {
             if (err != nullptr) *err = "partition promotion does not converge (EA " + hexEa(conflict) + " conflicts repeatedly)";
@@ -2732,7 +2752,7 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
         const auto bit = run.boundaries.find(t.ea);
         const std::string cmp_str = t.src_b ? "-" : hexEa(t.cmp_ea);
         const std::string ja_str = t.src_b ? "-" : hexEa(t.ja_ea);
-        std::printf("[jmptab] ea=0x%08X n=%u src=%s cmp=%s ja=%s site=0x%08X "
+        if (!quiet()) std::printf("[jmptab] ea=0x%08X n=%u src=%s cmp=%s ja=%s site=0x%08X "
                     "range=[0x%08X,0x%08X) in_section=%d items=%zu items_in_exec=%u "
                     "items_decode=%u items_undet=%u items_overlap=%zu items_nondispatch=%zu "
                     "items_selfref=%u block_starts_in_range=%zu v1=%d v2=%d v3=%d v4=%d "
@@ -2777,7 +2797,7 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
                      r.site, r.n, r.src_b ? "B" : "A", r.why.c_str());
     }
     // ---- 汇总（靠它做对账；⚠ 这些数是**读数**，⛔ 不是断言值）----
-    std::printf(
+    if (!quiet()) std::printf(
         "[jmptab/summary] candidates=%zu tables=%zu rejected=%zu covers_protected=%llu srcA=%llu "
         "srcB=%llu items=%llu distinct=%llu items_in_exec=%llu items_decode=%llu items_undet=%llu "
         "items_selfref=%llu items_nondispatch=%llu items_overlap=%llu "
@@ -2794,13 +2814,13 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
         static_cast<unsigned long long>(block_starts_in_range_total), run.passes,
         run.jmptab_on ? 1 : 0, roots.size());
     // ---- P1 / P2 的读数（与"改前/改后"的对照直接相关）----
-    std::printf(
+    if (!quiet()) std::printf(
         "[jmptab/exclude] leaders_in_range=%llu (leaders blocked by a range) - root_hits=%llu (should be 0) - "
         "call_ret_in_range=%llu (the shape where a noreturn call is adjacent to the table start)\n",
         static_cast<unsigned long long>(run.data_range_leaders),
         static_cast<unsigned long long>(run.data_range_root_hits),
         static_cast<unsigned long long>(run.call_ret_in_data_range));
-    std::printf(
+    if (!quiet()) std::printf(
         "[jmptab/items] seeds=%llu added=%zu already=%llu shim=%llu outside=%llu in_range=%llu - "
         "undecodable=%zu overlap=%zu\n",
         static_cast<unsigned long long>(run.item_seeds), run.soft_item.added.size(),
@@ -2811,7 +2831,7 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
         run.soft_item.overlap.size());
     // ---- 守卫判据（P-1..P-4）----
     const bool ok = (p1_bad == 0 && p2_bad == 0 && p3_bad == 0 && p4_bad == 0);
-    std::printf(
+    if (!quiet()) std::printf(
         "[jmptab/guard] P-1 range inside executable section=%llu bad - P-2 no block start inside range=%llu bad - "
         "P-3 table items dispatchable=%llu bad - P-4 recognition self-consistent=%llu bad => %s\n",
         static_cast<unsigned long long>(p1_bad), static_cast<unsigned long long>(p2_bad),
@@ -3686,6 +3706,8 @@ int main(int argc, char** argv) {
             if (!needValue("--dump-blocks", &opt.dump_blocks)) return 2;
         } else if (a == "--verbose") {
             opt.verbose = true;
+        } else if (a == "--quiet") {
+            opt.quiet = true;
         } else if (a == "--help" || a == "-h") {
             usage();
             return 0;
@@ -3695,9 +3717,11 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    g_quiet = opt.quiet;  // ★ 解析完立刻生效：独立模式（--check / --verify-* / --jmptab-audit）也照同一口径
     // ★ `--note-write` 直接落到发射器的 target 旋钮上（`GenIrTarget` 已经一路传到 `FnEmit` ——
     //   ⛔ 不再加一条并行参数链，避免"解析了但没传到"这种静默失效）。
     opt.ir_target.note_write = opt.note_write;
+    opt.ir_target.quiet = opt.quiet;  // ★ 同一口径：只静音非错误读数，产物字节不动
     // ★ `--verify-split` 是**独立模式**：只读 `out/aot/` 的产物，⛔ 不需要 `--exe/--roots/--out`。
     if (!opt.verify_split.empty()) {
         return verifyAotSplit(opt.verify_split, opt.split);
@@ -3937,7 +3961,7 @@ int main(int argc, char** argv) {
     gen_structure.enabled = opt.s7;
     gen_structure.structured_roots = opt.s7 ? structure.structured : std::set<std::uint32_t>{};
     if (!opt.s7) {
-        std::fprintf(stderr, "lift-gen: [S7] --no-s7 => structural translation disabled (all call/ret go back through the trampoline)\n");
+        if (!quiet()) std::fprintf(stderr, "lift-gen: [S7] --no-s7 => structural translation disabled (all call/ret go back through the trampoline)\n");
     }
     gen_structure.shim_begin = layout.shim_page;
     gen_structure.shim_end = layout.shim_page + layout.shim_slots * 4u;
@@ -3954,7 +3978,7 @@ int main(int argc, char** argv) {
         if (entry_owner.count(hook) != 0) {
             gen_structure.hook_eas.insert(hook);
         } else {
-            std::fprintf(stderr,
+            if (!quiet()) std::fprintf(stderr,
                          "lift-gen: [S7] host hook EA %08X is not in this module's entry set (small-root-set module) => not listing a checkpoint\n",
                          hook);
         }
@@ -4045,7 +4069,7 @@ int main(int argc, char** argv) {
     // ★ S7（D53）的覆盖率读数（stderr + `.ll` 头部都有；⛔ 只进读数、不进判据）。
     {
         const lift::aot::StructStats& s7 = structure.stats;
-        std::fprintf(stderr,
+        if (!quiet()) std::fprintf(stderr,
                      "lift-gen: [S7 criteria] unit roots=%llu self-pass=%llu structurable=%llu (self-downgrade=%llu - "
                      "callgraph contagion=%llu) - primary causes variable-stack=%llu writes-return-slot=%llu indirect-call=%llu dynamic-return=%llu "
                      "off-table-callee=%llu\n",
@@ -4059,7 +4083,7 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(s7.reason_indirect_call),
                      static_cast<unsigned long long>(s7.reason_dynamic_ret),
                      static_cast<unsigned long long>(s7.reason_unknown_callee));
-        std::fprintf(stderr,
+        if (!quiet()) std::fprintf(stderr,
                      "lift-gen: [S7 criteria/site accounts] ret=%llu (in structured units=%llu) - call=%llu (static=%llu "
                      "indirect=%llu) => host-call=%llu lift_dyn=%llu shim-dispatch=%llu other-dispatch=%llu - jmp=%llu"
                      "(static=%llu indirect=%llu)\n",
@@ -4080,14 +4104,14 @@ int main(int argc, char** argv) {
         for (const auto& kv : structure.reason) {
             const auto eit = structure.reason_ea.find(kv.first);
             const auto cit = structure.contagious_from.find(kv.first);
-            std::fprintf(stderr, "lift-gen: [S7 downgrade] %08X reason=%s site=%08X%s%08X\n", kv.first,
+            if (!quiet()) std::fprintf(stderr, "lift-gen: [S7 downgrade] %08X reason=%s site=%08X%s%08X\n", kv.first,
                          lift::aot::structReasonName(kv.second),
                          eit != structure.reason_ea.end() ? eit->second : 0u,
                          cit != structure.contagious_from.end() ? " contagious-from=" : "",
                          cit != structure.contagious_from.end() ? cit->second : 0u);
             ++printed;
         }
-        std::fprintf(stderr, "lift-gen: [S7 downgrade] total %zu unit roots are not structurable (one line each above)\n", printed);
+        if (!quiet()) std::fprintf(stderr, "lift-gen: [S7 downgrade] total %zu unit roots are not structurable (one line each above)\n", printed);
     }
 
     // 计数（父级要求的读数）
@@ -4159,7 +4183,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift-gen: write to `%s` failed\n", manifest.string().c_str());
             return 2;
         }
-        std::printf("lift-gen: %zu parts (%s/%s.part*.ll - manifest %s - total functions %llu - total bytes %llu - "
+        if (!quiet()) std::printf("lift-gen: %zu parts (%s/%s.part*.ll - manifest %s - total functions %llu - total bytes %llu - "
                     "largest part %llu)\n",
                     parts.size(), opt.out_dir.c_str(), opt.split_prefix.c_str(), manifest.string().c_str(),
                     static_cast<unsigned long long>(total_functions),
@@ -4193,7 +4217,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift-gen: --pin failed: %s\n", err.c_str());
             return 2;
         }
-        std::printf("lift-gen: pin %s (sha256=%s entry=%08X)\n", opt.pin.c_str(), image.sha256.c_str(),
+        if (!quiet()) std::printf("lift-gen: pin %s (sha256=%s entry=%08X)\n", opt.pin.c_str(), image.sha256.c_str(),
                     image.entry_ea);
     }
     if (!opt.table.empty()) {
@@ -4204,10 +4228,10 @@ int main(int argc, char** argv) {
         }
         std::size_t rows = 0;
         for (const GenComponent& comp : components) rows += comp.entries.size();
-        std::printf("lift-gen: dispatch table %s (%zu rows = entry EA -> component root function)\n", opt.table.c_str(), rows);
+        if (!quiet()) std::printf("lift-gen: dispatch table %s (%zu rows = entry EA -> component root function)\n", opt.table.c_str(), rows);
     }
     if (!intrinsics.entries.empty()) {
-        std::printf("lift-gen: intrinsics %s (%zu unit root%s; PE sha prefix %s)\n",
+        if (!quiet()) std::printf("lift-gen: intrinsics %s (%zu unit root%s; PE sha prefix %s)\n",
                     opt.intrinsics.c_str(), intrinsics.entries.size(),
                     intrinsics.entries.size() == 1 ? "" : "s", intrinsics.pe_sha256_prefix.c_str());
     }
@@ -4222,7 +4246,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift-gen: --dump-blocks failed: %s\n", err.c_str());
             return 2;
         }
-        std::printf("lift-gen: block dump %s (blocks=%zu bytes=%llu insns=%llu; not part of .ll / dispatch table)\n",
+        if (!quiet()) std::printf("lift-gen: block dump %s (blocks=%zu bytes=%llu insns=%llu; not part of .ll / dispatch table)\n",
                     opt.dump_blocks.c_str(), dumped_blocks,
                     static_cast<unsigned long long>(dumped_bytes),
                     static_cast<unsigned long long>(dumped_insns));
@@ -4272,7 +4296,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- ⑥ 读数 ----
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: roots=%zu entries=%zu functions=%zu blocks=%llu insns=%llu promotions=%zu "
         "traps=%llu(%llu unsupported + %llu bad)\n",
         roots.size(), dispatch_entries.size(), components.size(),
@@ -4280,9 +4304,9 @@ int main(int argc, char** argv) {
         promoted.size(), static_cast<unsigned long long>(stats.traps_unsupported + stats.traps_bad),
         static_cast<unsigned long long>(stats.traps_unsupported),
         static_cast<unsigned long long>(stats.traps_bad));
-    std::printf("lift-gen: lift_one call sites %llu (%zu ops; single-instruction host primitives, not traps)\n",
+    if (!quiet()) std::printf("lift-gen: lift_one call sites %llu (%zu ops; single-instruction host primitives, not traps)\n",
                 static_cast<unsigned long long>(stats.lift_one_sites), stats.lift_one_by_op.size());
-    {
+    if (!quiet()) {
         std::printf("lift-gen: lift_one totals:");
         bool first = true;
         for (const auto& kv : stats.lift_one_by_op) {
@@ -4292,16 +4316,16 @@ int main(int argc, char** argv) {
         }
         std::printf("\n");
     }
-    std::printf("lift-gen: dropped derived leaders %zu (%zu undecodable + %zu inside already-emitted block bytes)\n",
+    if (!quiet()) std::printf("lift-gen: dropped derived leaders %zu (%zu undecodable + %zu inside already-emitted block bytes)\n",
                 drops.dropped.size(), drops.undecodable.size(), drops.inside_block.size());
     // ★ D14：静态调用闭包的账 —— 与上面"派生 leader"**分开报**（越界 / 解不出 / 重叠各一个数）。
     //   同一条也打到 stderr（要求：不静默），并把每个丢弃类别的 **3 个样例**打出来。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: static call closure %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
         "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_calls ? "on" : "off", soft_call.added.size(), soft_call.outside.size(),
         soft_call.undecodable.size(), soft_call.overlap.size(), soft_call.shim_targets.size());
-    std::fprintf(stderr,
+    if (!quiet()) std::fprintf(stderr,
                  "lift-gen: [static call closure D14/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
                  "- shim targets skipped=%zu\n",
                  opt.close_calls ? "on" : "off", soft_call.added.size(), soft_call.outside.size(),
@@ -4309,15 +4333,15 @@ int main(int argc, char** argv) {
     // ★ D15：第二类软根（写内存 mov 的 imm32）—— **独立一行**，三档丢弃同样各一个数。
     //   `写内存 mov 的 imm32 站点` 是判据的**输入面**（读数，不是判据）：越界那一个数之所以大，
     //   就是因为绝大多数 `mov [x], <数据常量>` 的 imm 不是代码地址（站点 − 落在可执行节内 ≈ 它们）。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: code-pointer immediates (D15) %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
         "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
         soft_store.undecodable.size(), soft_store.overlap.size(), soft_store.shim_targets.size());
-    std::printf("lift-gen: memory-writing mov imm32: sites=%llu (of which imm falls inside an executable section=%llu)\n",
+    if (!quiet()) std::printf("lift-gen: memory-writing mov imm32: sites=%llu (of which imm falls inside an executable section=%llu)\n",
                 static_cast<unsigned long long>(run.store_imm_sites),
                 static_cast<unsigned long long>(run.store_imm_in_exec));
-    std::fprintf(stderr,
+    if (!quiet()) std::fprintf(stderr,
                  "lift-gen: [code-pointer immediates D15/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
                  "- shim targets skipped=%zu - sites=%llu (imm inside an executable section=%llu)\n",
                  opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
@@ -4330,12 +4354,12 @@ int main(int argc, char** argv) {
     //   再去重才是候选数（`distinct`），候选里"已在入口集 / 已判过"的不重复收（`skipped`）。
     //   ⇒ 恒等式（可手工核）：`distinct = added + overlap + skipped`（outside / shim 结构性为 0：
     //   候选的定义就是"值落在可执行节内"、而 shim 桩页不在可执行节里）。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: static code pointers (D17) %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
         "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_data ? "on" : "off", soft_data.added.size(), soft_data.outside.size(),
         soft_data.undecodable.size(), soft_data.overlap.size(), soft_data.shim_targets.size());
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: 4-byte aligned dwords in non-executable sections: sites=%llu (value inside an executable section=%llu) - distinct candidates=%llu "
         "- already in entry set/already judged=%llu\n",
         static_cast<unsigned long long>(run.data_ptr_sites),
@@ -4346,9 +4370,9 @@ int main(int argc, char** argv) {
     //   其中"重叠"的**收之前挡下**那部分（`data_overlap_pre`）是判据前移挡的，其余是收进来之后
     //   由 `dropLeadersInsideBlocks` 事后判的（那一部分同时也在 `新增` 里 —— `added` 记的是
     //   "被接受为软根"，与 D14/D15 同一口径）。
-    std::printf("lift-gen: of which blocked before acceptance (inside already-emitted block byte range) = %llu\n",
+    if (!quiet()) std::printf("lift-gen: of which blocked before acceptance (inside already-emitted block byte range) = %llu\n",
                 static_cast<unsigned long long>(run.data_ptr_overlap_pre));
-    std::fprintf(stderr,
+    if (!quiet()) std::fprintf(stderr,
                  "lift-gen: [static code pointers D17/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
                  "- shim targets skipped=%zu - sites=%llu (value inside an executable section=%llu) - distinct candidates=%llu - already in entry set/already judged=%llu\n",
                  opt.close_data ? "on" : "off", soft_data.added.size(), soft_data.outside.size(),
@@ -4361,7 +4385,7 @@ int main(int argc, char** argv) {
     // ★ D26：第五类软根（可执行节跳表 dword → **尚未解码**的代码）—— **独立一行**，三档丢弃各一个数；
     //   再一行是**候选面**（"先量后收"：每一档只归一类，五档相加 = `不同候选`）。
     //   ★ 与 D17 的本质区别：这里的 `added` 是**新增 unit 根 = 新增块 / 新增指令**（D17 那行不是）。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: executable-section jump-table targets (D26) %s soft-roots=%zu (new unit roots = **may add blocks**) - dropped: outside=%zu "
         "undecodable=%zu overlap=%zu - shim targets skipped=%zu - fixed-point rounds=%llu - still in entry set=%llu\n",
         opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(), soft_jumptab.outside.size(),
@@ -4374,7 +4398,7 @@ int main(int argc, char** argv) {
         // ★ D26 的第二条扫描（未对齐 imm32：`push imm32` / `mov reg, imm32`）：**只有输入面读数**。
         //   候选已经并进下面那行的"不同候选（并集）"，收/丢的账仍然是 `soft_jumptab`
         //   （⛔ 不另立一类软根）。
-        std::printf(
+        if (!quiet()) std::printf(
             "lift-gen: unaligned imm32 candidate surface (D26 second scan): sites=%llu (push imm32=%llu - mov reg, "
             "imm32=%llu) - value inside an executable section=%llu - distinct candidates=%llu (of which found only by this scan=%llu)\n",
             static_cast<unsigned long long>(run.imm32_sites),
@@ -4383,7 +4407,7 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(run.imm32_in_exec),
             static_cast<unsigned long long>(run.imm32_distinct),
             static_cast<unsigned long long>(run.imm32_only));
-        std::printf(
+        if (!quiet()) std::printf(
             "lift-gen: executable code-pointer candidate surface (aligned dwords union unaligned imm32): aligned dword sites=%llu - "
             "value inside an executable section=%llu - distinct candidates (union)=%llu "
             "- already in entry set/already judged=%llu - already a block start (handled as kind 4, D21)=%llu - decodable=%llu - undecodable=%llu "
@@ -4396,7 +4420,7 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(s.undecodable_pre),
             static_cast<unsigned long long>(s.overlap_pre), static_cast<unsigned long long>(s.shim));
         // ★ 恒等式（可手工核）：`不同候选 = 已在入口集/已判过 + shim 桩 + 已是块首 + 被重叠挡下 + 可解码 + 解不出`。
-        std::fprintf(stderr,
+        if (!quiet()) std::fprintf(stderr,
                      "lift-gen: [executable jump table D26/%s] soft-roots=%zu (still in entry set at the end=%llu) dropped: outside=%zu "
                      "undecodable=%zu overlap=%zu - shim targets skipped=%zu - rounds=%llu - aligned dword sites=%llu (value inside an executable section=%llu)"
                      " - unaligned imm32 sites=%llu (push=%llu - mov=%llu - value inside an executable section=%llu, found only by this scan=%llu)"
@@ -4424,6 +4448,7 @@ int main(int argc, char** argv) {
     }
     // 样例（⛔ 不是"看看"：这三类的形状由 D14 的三条判据定义，样例是规则的实证）
     auto printSamples = [](const char* tag, const std::set<std::uint32_t>& eas) {
+        if (quiet()) return;
         if (eas.empty()) return;
         std::fprintf(stderr, "lift-gen: [%s] %zu site(s), samples:", tag, eas.size());
         std::size_t n = 0;
@@ -4439,6 +4464,7 @@ int main(int argc, char** argv) {
     printSamples("dropped/undecodable", drops.undecodable);
     printSamples("dropped/inside already-emitted block bytes", drops.inside_block);
     auto printSoftSamples = [](const char* tag, const std::set<std::uint32_t>& eas) {
+        if (quiet()) return;
         if (eas.empty()) return;
         std::fprintf(stderr, "lift-gen: [%s] %zu site(s), samples (3):", tag, eas.size());
         std::size_t n = 0;
@@ -4465,7 +4491,7 @@ int main(int argc, char** argv) {
     printSoftSamples("soft-root/overlap (jmptab)", soft_jumptab.overlap);
     printSoftSamples("soft-root/accepted (jmptab)", soft_jumptab.added);
     // ★ BUG-24 / P2（S3）：**表项**的账 —— 独立一行（⛔ 不与 D26 合并：两类来源不同）。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: jump-table items (S3/P2) %s candidates=%llu - accepted as leaders (before block building)=%zu - already entries=%llu - "
         "outside=%llu - shim=%llu - inside a table range=%llu - undecodable=%zu - overlaps an emitted block=%zu\n",
         opt.close_jmptab_items ? "on" : "off",
@@ -4478,7 +4504,7 @@ int main(int argc, char** argv) {
     printSoftSamples("soft-root/undecodable (jmptab-item)", soft_item.undecodable);
     printSoftSamples("soft-root/overlap (jmptab-item)", soft_item.overlap);
     // ★ BUG-24 / S1：**跳表识别**的账（逐表细节走 `--jmptab-audit`；这里只报能对账的汇总）。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: jump-table recognition (S1) %s - sites=%llu - candidate tables=%zu - recognised=%zu (srcA=%zu srcB=%zu) - "
         "rejected=%zu (of which (5) range covers a root/call target=%llu) - items=%zu - passes=%u - switches exclude=%d items=%d\n",
         run.jmptab_on ? "on" : "off", static_cast<unsigned long long>(run.jmptab.sites),
@@ -4498,7 +4524,7 @@ int main(int argc, char** argv) {
         run.jmptab.items().size(), run.passes, opt.jmptab_exclude ? 1 : 0,
         opt.close_jmptab_items ? 1 : 0);
     // ★ BUG-24 / P1（S2）的读数：被表区间挡下的 leader / `call` 返回 EA。
-    std::printf("lift-gen: jump-table ranges excluded from decoding (S2/P1) %s - leaders blocked by a range=%llu (root exceptions=%llu) - "
+    if (!quiet()) std::printf("lift-gen: jump-table ranges excluded from decoding (S2/P1) %s - leaders blocked by a range=%llu (root exceptions=%llu) - "
                 "call return EAs inside a range=%llu\n",
                 opt.jmptab_exclude ? "on" : "off",
                 static_cast<unsigned long long>(run.data_range_leaders),
@@ -4512,14 +4538,14 @@ int main(int argc, char** argv) {
     printSoftSamples("soft-root/inside table range (jmptab)", soft_jumptab.table_range);
     // ★ D21（第四类）：**跳表入口**的账 —— 独立一行，且必须能读出"只加 entry、0 新块"这一点。
     //   判据的输入面是"可执行节里 4 字节对齐的 dword"站点数；强过滤器是"值必须已经是块首"。
-    std::printf(
+    if (!quiet()) std::printf(
         "lift-gen: jump-table entries (D21) added=%zu (entries only; 0 new blocks / 0 new instructions) - executable-section 4-byte aligned "
         "dword sites=%llu (value==an existing block start=%llu, distinct targets=%llu) - already in entry set=%zu - orphan promotions=%zu\n",
         jump_table.added.size(), static_cast<unsigned long long>(jump_table.sites),
         static_cast<unsigned long long>(jump_table.block_hits),
         static_cast<unsigned long long>(jump_table.distinct), jump_table.skipped.size(),
         jump_table.unclaimed.size());
-    std::fprintf(stderr,
+    if (!quiet()) std::fprintf(stderr,
                  "lift-gen: [jump-table entries D21] added=%zu (entries only, 0 new blocks) - executable-section 4-byte aligned dword "
                  "sites=%llu (value==an existing block start=%llu, distinct targets=%llu) - already in entry set=%zu - orphan promotions=%zu\n",
                  jump_table.added.size(), static_cast<unsigned long long>(jump_table.sites),
@@ -4529,9 +4555,9 @@ int main(int argc, char** argv) {
     printSoftSamples("jump-table entry/added (D21)", jump_table.added);
     printSoftSamples("jump-table entry/orphan-promoted (D21)", jump_table.unclaimed);
     // ★ G3：入口集收敛护栏 —— 没有块、退出入口集的入口 EA（⛔ 不静默）。
-    std::printf("lift-gen: entry-set convergence guard: entry EAs without a block=%zu (=> dropped from the entry set, edges to them emit ret i32)\n",
+    if (!quiet()) std::printf("lift-gen: entry-set convergence guard: entry EAs without a block=%zu (=> dropped from the entry set, edges to them emit ret i32)\n",
                 unbuildable.size());
-    if (!unbuildable.empty()) {
+    if (!quiet() && !unbuildable.empty()) {
         std::fprintf(stderr, "lift-gen: [entry set/no block] %zu site(s), samples (3):", unbuildable.size());
         std::size_t n = 0;
         for (const std::uint32_t ea : unbuildable) {
@@ -4543,7 +4569,7 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "\n");
     }
-    if (opt.verbose) {
+    if (!quiet() && opt.verbose) {
         for (const GenComponent& comp : components) {
             std::uint64_t ib = 0;
             for (const auto& kv : comp.blocks) ib += kv.second.insns.size();

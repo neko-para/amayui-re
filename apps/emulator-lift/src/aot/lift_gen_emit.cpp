@@ -5907,7 +5907,7 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     text += "；跨函数 jcc 尾巴调用=" + std::to_string(stats->s7_jcc_tail);
     text += "（D2：按**臂**计）";
     text += "；tail call 站点合计=" + std::to_string(stats->s7_tail_calls) + "\n";
-    std::fprintf(stderr,
+    if (!ir_target.quiet) std::fprintf(stderr,
                  "lift-gen: [S7 结构翻译] ret 站点 宿主ret=%llu 回派发器=%llu · call 站点 宿主call=%llu "
                  "lift_dyn=%llu shim派发=%llu 其余派发=%llu · 跨函数 jmp 尾巴调用=%llu lift_dyn=%llu "
                  "派发=%llu · 跨函数 jcc 尾巴调用（臂）=%llu · tail call 合计=%llu\n",
@@ -6043,7 +6043,7 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     text += "）；屏障（lift_one）站点=" + std::to_string(stats->lift_one_sites);
     text += "；融合漏判（应恒 0）=" + std::to_string(stats->flags_fuse_missed) + "\n";
     // 同一条读数也打到 stderr（要求：⛔ 不静默；`.ll` 头部之外也要能看见）。
-    std::fprintf(stderr,
+    if (!ir_target.quiet) std::fprintf(stderr,
                  "lift-gen: [EFLAGS 活性 S3-c] 块=%llu 零 flags 块=%llu need_in=ALL=%llu "
                  "need_out=ALL=%llu escape=%llu（ret=%llu 间接=%llu 无块=%llu）静态边落空=%llu · "
                  "物化站点=%llu（真的发 IR=%llu）· 块尾位数 cf/pf/af/zf/sf/of=%llu/%llu/%llu/%llu/%llu/%llu · "

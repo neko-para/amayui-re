@@ -622,6 +622,11 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             list(APPEND LIFT_AOT_GEN_STEP2 --note-write)
         endif()
     endif()
+    # ★ `--quiet` 只加在**这一条** AOT 生成命令上：静音非错误的进度 / 对账打印（`lift-gen: …` 读数、
+    #   `[S7 downgrade]` 每单元一行、提升进度、样例…），错误 / 守卫失败（stderr）与 `--closure-gate`
+    #   的汇总行照打。⛔ `--jmptab-audit` 的 CTest（`lift-jmptab-dispatch`）与 golden 生成命令**不加**：
+    #   它们要的就是完整输出。
+    list(APPEND LIFT_AOT_GEN_STEP2 --quiet)
     add_custom_command(
         OUTPUT ${LIFT_AOT_GEN_OUTS} "${LIFT_AOT_DIR}/lift_pin.h"
                "${LIFT_AOT_DIR}/lift_table.inc"
