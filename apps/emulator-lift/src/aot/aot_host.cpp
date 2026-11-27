@@ -414,11 +414,10 @@ const GpuRaster* AotHost::gpuRaster() const {
 void AotHost::printReadout(std::FILE* out, bool region_log, bool detail) const {
     if (out == nullptr) return;
 
-    // ---- 启动细节（**只给 `--log-level info` 及以上**；缺省 warn ⇒ 一行都不打）----
+    // ---- 启动 readout（**只给 `--log-level info` 及以上**；缺省 warn ⇒ 一行都不打）----
     //   ★ 这些是"这台机器怎么装配"的**展开**（PE 头 / 节表 / 导入模块表 / guest 地址空间 /
-    //     服务面），一次 run 里不变 ⇒ 默认档只留"这一次 run 发生了什么"的骨架
-    //     （`pin` 在下面，任何档都打）。⛔ 判据面（`stop` / `frames` / `plugin` / `skip-logo` /
-    //     `recovery` …）不在这个门里。
+    //     服务面 / `pin`），一次 run 里不变 ⇒ 默认档一行都不打（2026-11-27 用户判据：默认档只留
+    //     出错 / 警告 + 插件日志 + 收口那 1 行 `stop`）。
     if (detail) {
         // ---- 镜像身份（一行）+ 节表 ----
         std::fprintf(out, "exe       : %s\n", exe_path_.c_str());
@@ -506,19 +505,20 @@ void AotHost::printReadout(std::FILE* out, bool region_log, bool detail) const {
                      //   在收口的 `audio     :` 一行）。缺省档两者同为 `off` ⇒ 默认档读数逐字不变。
                      cpu_.audio != nullptr ? audioModeName(audio_.configuredMode()) : "no");
         std::fprintf(out, "owner     : cpu.machine=nullptr（AOT 有意没有 Machine）+ cpu.host=this\n");
-    }
 
-    // ---- 派发表（构建期生成物的真源是 lift-gen --table）----
-    //   ★ **任何档都打**：`pin` 是 D1 的判据面（sha256 / entry / 计数），⛔ 不在 `detail` 门里。
-    std::fprintf(out,
-                 "pin       : generated=%s sha256=%s entry=%08X roots=%llu entries=%llu funcs=%llu "
-                 "checked=%s\n",
-                 generatedPresent() ? "yes" : "NO（构建期缺 clang / 执行源 / closure.txt）",
-                 generatedPresent() ? pinnedSha256() : "(none)", pinnedEntry(),
-                 static_cast<unsigned long long>(pinnedRoots()),
-                 static_cast<unsigned long long>(pinnedEntries()),
-                 static_cast<unsigned long long>(pinnedFunctions()),
-                 pin_checked_ ? "yes" : "skipped");
+        // ---- 派发表（构建期生成物的真源是 lift-gen --table）----
+        //   ★ 也是**开发者读数**（2026-11-27 用户判据：默认档只留出错 / 警告）⇒ 归 `detail`。
+        //     `pin` 核对**失败**是硬错（启动期 exit 2 + stderr），不靠这一行回答。
+        std::fprintf(out,
+                     "pin       : generated=%s sha256=%s entry=%08X roots=%llu entries=%llu funcs=%llu "
+                     "checked=%s\n",
+                     generatedPresent() ? "yes" : "NO（构建期缺 clang / 执行源 / closure.txt）",
+                     generatedPresent() ? pinnedSha256() : "(none)", pinnedEntry(),
+                     static_cast<unsigned long long>(pinnedRoots()),
+                     static_cast<unsigned long long>(pinnedEntries()),
+                     static_cast<unsigned long long>(pinnedFunctions()),
+                     pin_checked_ ? "yes" : "skipped");
+    }
 
 
     // ---- guest 区域表（"谁占了哪一段"的机械读数；复用既有的 dumpRegions）----
@@ -532,124 +532,158 @@ void AotHost::printReadout(std::FILE* out, bool region_log, bool detail) const {
     }
 }
 
-void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
+void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out, bool detail) const {
     if (out == nullptr) return;
-    const DispatchStats ds = dispatchStats();
+
+    // ===== 默认档（`detail == false`）：只留**出错 / 警告（可操作）** + 1 行"怎么结束的" =====
+    //   ⛔ 不是"少打几行"：insns / frames / 派发 / 派发表 / arena / present / recovery /
+    //   window / skip-logo / synthetic / intrinsics / audio 这些**开发者读数一行都不打**
+    //   （2026-11-27 用户判据：默认档只留出错 / 警告与插件自己的日志；开发者读数走 `--log-level info`）。
+    //   下面两条是**可操作的警告**（不是 readout）：
+    //     · WndProc 不在派发表 ⇒ 第一条消息就会停（用户会看到"输入没反应"而不是一条错）；
+    //     · `--skip-logo` 命中但写不进去 ⇒ 开关给了却没生效。
+    // ★ **唯一**在默认档也打的收口行：**这一跑是怎么结束的**（停因 / EA / `detail`）。
+    //   为什么留这 1 行（用户判据允许"最多留 1 行怎么结束的"）：exit code 只说"成功 / 失败"，
+    //   而玩家需要区分"正常关窗 / 到了 --time-limit / 崩在某个 EA"——那是可操作的信息，
+    //   且一次 run 只有一行。其余收口 readout 全部只在 `--log-level info`。
     std::fprintf(out, "stop      : %s @ eip=%08X（%s）%s%s\n", aotStopName(r.reason), r.ea,
                  r.ok() ? "正常结局" : "非正常结局", r.detail.empty() ? "" : " — ", r.detail.c_str());
-    std::fprintf(out, "insns     : %llu（`lift_tick` 记账；与解释器同一份 `X86::insns` 语义）\n",
-                 static_cast<unsigned long long>(r.insns));
-    std::fprintf(out, "frames    : %llu（present 计数；本臂 --max-frames=%u）\n",
-                 static_cast<unsigned long long>(r.frames), cpu_.shim.max_frames);
-    std::fprintf(out, "dispatch  : total=%llu（lifted=%llu shim=%llu）\n",
-                 static_cast<unsigned long long>(r.dispatches),
-                 static_cast<unsigned long long>(r.lifted_calls),
-                 static_cast<unsigned long long>(r.shim_calls));
-    // ★ `comparisons` / `avg_cmp` 只在 `--profile` 开档时记账（`DispatchStats::comparisons_armed`）：
-    //   缺省档打 `n/a`，⛔ 不打 `0`（那是"查找 0 次比较"的假读数）。`lookups/hits/misses` 不变
-    //   （语义指纹里的 `table misses` 就取这几个数）。
-    char cmp_buf[96];
-    if (ds.comparisons_armed) {
-        const double avg_cmp =
-            ds.lookups != 0 ? static_cast<double>(ds.comparisons) / static_cast<double>(ds.lookups)
-                            : 0.0;
-        std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=%llu avg_cmp=%.2f",
-                      static_cast<unsigned long long>(ds.comparisons), avg_cmp);
+    if (!detail) {
+        const std::uint32_t primary = windows_.primaryWindow();
+        const HostWindow* win = primary != 0 ? windows_.find(primary) : nullptr;
+        const std::uint32_t proc = win != nullptr ? win->proc : 0u;
+        if (primary != 0 && proc != 0) {
+            std::uint64_t cmp = 0;
+            if (lookup(proc, &cmp) == nullptr) {
+                std::fprintf(out, "window    : ⚠ guest WndProc=%08X 不在派发表里 ⇒ 第一条消息会停\n",
+                             proc);
+            }
+        }
+        if (skip_logo_ && skip_logo_checked_ && !skip_logo_applied_) {
+            std::fprintf(out,
+                         "skip-logo : ⚠ NOT applied（钩子 @ 004BAA33 命中，但对象/字段不可写；对象=0x%08X）\n",
+                         skip_logo_object_);
+        }
     } else {
-        std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=n/a avg_cmp=n/a（缺省档未记）");
+        const DispatchStats ds = dispatchStats();
+        std::fprintf(out, "insns     : %llu（`lift_tick` 记账；与解释器同一份 `X86::insns` 语义）\n",
+                     static_cast<unsigned long long>(r.insns));
+        std::fprintf(out, "frames    : %llu（present 计数；本臂 --max-frames=%u）\n",
+                     static_cast<unsigned long long>(r.frames), cpu_.shim.max_frames);
+        std::fprintf(out, "dispatch  : total=%llu（lifted=%llu shim=%llu）\n",
+                     static_cast<unsigned long long>(r.dispatches),
+                     static_cast<unsigned long long>(r.lifted_calls),
+                     static_cast<unsigned long long>(r.shim_calls));
+        // ★ `comparisons` / `avg_cmp` 只在 `--profile` 开档时记账（`DispatchStats::comparisons_armed`）：
+        //   缺省档打 `n/a`，⛔ 不打 `0`（那是"查找 0 次比较"的假读数）。`lookups/hits/misses` 不变
+        //   （语义指纹里的 `table misses` 就取这几个数）。
+        char cmp_buf[96];
+        if (ds.comparisons_armed) {
+            const double avg_cmp =
+                ds.lookups != 0 ? static_cast<double>(ds.comparisons) / static_cast<double>(ds.lookups)
+                                : 0.0;
+            std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=%llu avg_cmp=%.2f",
+                          static_cast<unsigned long long>(ds.comparisons), avg_cmp);
+        } else {
+            std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=n/a avg_cmp=n/a（缺省档未记）");
+        }
+        std::fprintf(out, "table     : entries=%zu lookups=%llu hits=%llu misses=%llu %s\n", tableSize(),
+                     static_cast<unsigned long long>(ds.lookups),
+                     static_cast<unsigned long long>(ds.hits),
+                     static_cast<unsigned long long>(ds.misses), cmp_buf);
+        std::fprintf(out, "region    : arena in_use=%u peak=%u surfaces=%zu heap_blocks=%zu\n",
+                     surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.surfaceCount(),
+                     heap_.blockCount());
+        // ---- 呈现读数（可测性口径；与解释器 `present-tail` / `d3d9.cpp:845-863` 同一组字段名）----
+        //   ★ `lastHash` 是**最后一次 Present 的 guest 后缓冲哈希**（`arena.hash(surface)`）；逐帧读数由
+        //     `run()` 在每次 Present 之后打印（`[frame] n=… hash=…`）。`[present-readback]` Phase A 起它
+        //     **惰性**：`run()` 收口在打印前补算一次（`captureLastFrameHash`）⇒ `0x0` = **没算**（⛔ 不是旧值）。
+        //   ★ `sinkFailures` 与解释器同口径（提交失败**不改** guest 的 Present 结果）。
+        //   ★ `freezeFailures` / `freezeNs`（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ` 的 F1）：**一次性**读数，
+        //     只在这一行出现（⛔ 不加周期性输出，`AGENTS.md` §12.8 第 3 条）。`freezeNs` = **最近一次**
+        //     `present()` 冻像素副本的墙钟（`PresentBreakdown::freeze_ns`；缺省/没开控制层 = 0）。
+        //     这两个字段只回答"冻结这条路有没有真的走通、花了多少"，⛔ 不参与任何语义判据。
+        std::fprintf(out,
+                     "present   : sink=%s frames=%llu lastHash=0x%016llX sinkFailures=%llu "
+                     "freezeFailures=%llu freezeNs=%llu%s\n",
+                     presenter_.sink() != nullptr ? presenter_.sink()->describe().c_str() : "headless(no-sink)",
+                     static_cast<unsigned long long>(r.frames),
+                     static_cast<unsigned long long>(presenter_.lastHash()),
+                     static_cast<unsigned long long>(presenter_.sinkFailures()),
+                     static_cast<unsigned long long>(presenter_.freezeFailures()),
+                     static_cast<unsigned long long>(presentBreakdown().freeze_ns),
+                     presenter_.sinkFailures() == 0 ? "" : "（最后一次错误见 stderr）");
+        // ★ 默认档就改写 guest 寄存器的那个钩子（T2 §1.2 #14 / `machine.cpp:1369`）的实际结局：
+        //   "命中了并置 0" 与 "根本没走到" 是两件事，⛔ 不许只写一行模糊的 `bypassed`。
+        if (recovery_bypass_applied_) {
+            std::fprintf(out,
+                         "recovery  : applied @ 004BA718 (EAX %u -> 0)（--accept-recovery-dialog 默认绕过）\n",
+                         recovery_bypass_prior_eax_);
+        } else if (recovery_bypass_checked_) {
+            std::fprintf(out, "recovery  : 命中但未应用（EAX=%u）\n", recovery_bypass_prior_eax_);
+        } else {
+            std::fprintf(out, "recovery  : 未命中（本轮没走到 004BA718）\n");
+        }
+        // ★ guest 窗口 → 它的 WndProc EA，以及**它在不在派发表里**（人类手动测试的第一道门槛）：
+        //   所有 SDL 输入（键 / 鼠标 / 关窗）最终都经 `DispatchMessageA` → `GuestCallStack::start(proc)`
+        //   ⇒ 下一个块边界 EA 就是 `wndproc`。它不在表里 ⇒ **第一条被派发的消息**就会响亮停
+        //   （不是"输入没反应"，而是 `decode-error` + 点名的 EA）。headless 也一样建 guest 窗口。
+        {
+            const std::uint32_t primary = windows_.primaryWindow();
+            const HostWindow* win = primary != 0 ? windows_.find(primary) : nullptr;
+            const std::uint32_t proc = win != nullptr ? win->proc : 0u;
+            if (primary != 0) {
+                std::uint64_t cmp = 0;
+                const bool in_table = proc != 0 && lookup(proc, &cmp) != nullptr;
+                std::fprintf(out,
+                             "window    : guest primary=%08X class=\"%s\" wndproc=%08X in-dispatch-table=%s\n",
+                             primary, win != nullptr ? win->class_name.c_str() : "?", proc,
+                             proc == 0 ? "n/a（没有 WndProc）" : (in_table ? "yes" : "NO ⇒ 第一条消息会停"));
+            } else {
+                std::fprintf(out, "window    : guest 还没有窗口（primary=0）\n");
+            }
+        }
+        // ★ `--skip-logo` 的实际结局（**三种形态必须能机械区分**，口径照 `machine.cpp:2733-2742`）：
+        //   未要求这个开关时**不打**这一行（与解释器同口径：没有 `skip-logo :` 行 = 本轮没开）。
+        if (skip_logo_) {
+            if (skip_logo_applied_) {
+                std::fprintf(out,
+                             "skip-logo : applied @ T_Command=0x%08X (+0x%05X=0；写前 %u；钩子 EA=004BAA33)\n",
+                             skip_logo_object_, kSkipLogoFieldOffset, skip_logo_prior_value_);
+            } else if (skip_logo_checked_) {
+                std::fprintf(out,
+                             "skip-logo : NOT applied（钩子 @ 004BAA33 命中，但对象/字段不可写；对象=0x%08X）\n",
+                             skip_logo_object_);
+            } else {
+                std::fprintf(out, "skip-logo : 未命中（run 在 004BAA33 之前结束）\n");
+            }
+        }
+        // ---- 三个合成 EA 的命中数（0 = 本轮根本没撞到；⛔ 不拿"实现了"冒充"跑过了"）----
+        std::fprintf(out,
+                     "synthetic : 定时器回调=%llu 续延=%llu SEH 派发(raise=%llu handler=%llu unhandled=%llu)\n",
+                     static_cast<unsigned long long>(timerFires_),
+                     static_cast<unsigned long long>(callResumes_),
+                     static_cast<unsigned long long>(seh_.raiseCount()),
+                     static_cast<unsigned long long>(seh_.handlerCalls()),
+                     static_cast<unsigned long long>(seh_.unhandledCount()));
     }
-    std::fprintf(out, "table     : entries=%zu lookups=%llu hits=%llu misses=%llu %s\n", tableSize(),
-                 static_cast<unsigned long long>(ds.lookups),
-                 static_cast<unsigned long long>(ds.hits),
-                 static_cast<unsigned long long>(ds.misses), cmp_buf);
-    std::fprintf(out, "region    : arena in_use=%u peak=%u surfaces=%zu heap_blocks=%zu\n",
-                 surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.surfaceCount(),
-                 heap_.blockCount());
-    // ---- 呈现读数（可测性口径；与解释器 `present-tail` / `d3d9.cpp:845-863` 同一组字段名）----
-    //   ★ `lastHash` 是**最后一次 Present 的 guest 后缓冲哈希**（`arena.hash(surface)`）；逐帧读数由
-    //     `run()` 在每次 Present 之后打印（`[frame] n=… hash=…`）。`[present-readback]` Phase A 起它
-    //     **惰性**：`run()` 收口在打印前补算一次（`captureLastFrameHash`）⇒ `0x0` = **没算**（⛔ 不是旧值）。
-    //   ★ `sinkFailures` 与解释器同口径（提交失败**不改** guest 的 Present 结果）。
-    //   ★ `freezeFailures` / `freezeNs`（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ` 的 F1）：**一次性**读数，
-    //     只在这一行出现（⛔ 不加周期性输出，`AGENTS.md` §12.8 第 3 条）。`freezeNs` = **最近一次**
-    //     `present()` 冻像素副本的墙钟（`PresentBreakdown::freeze_ns`；缺省/没开控制层 = 0）。
-    //     这两个字段只回答"冻结这条路有没有真的走通、花了多少"，⛔ 不参与任何语义判据。
-    std::fprintf(out,
-                 "present   : sink=%s frames=%llu lastHash=0x%016llX sinkFailures=%llu "
-                 "freezeFailures=%llu freezeNs=%llu%s\n",
-                 presenter_.sink() != nullptr ? presenter_.sink()->describe().c_str() : "headless(no-sink)",
-                 static_cast<unsigned long long>(r.frames),
-                 static_cast<unsigned long long>(presenter_.lastHash()),
-                 static_cast<unsigned long long>(presenter_.sinkFailures()),
-                 static_cast<unsigned long long>(presenter_.freezeFailures()),
-                 static_cast<unsigned long long>(presentBreakdown().freeze_ns),
-                 presenter_.sinkFailures() == 0 ? "" : "（最后一次错误见 stderr）");
+
     // ★ `--dump-frame` 写盘失败的**一次性停机读数**（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）：
-    //   **只在 > 0 时打** ⇒ 健康路径的缺省 stdout 逐字不变；第 1 次失败已由 `present.cpp` 打默认级别
-    //   warn（之后只计数）。惰性回读之后，"本帧没回读却要 dump"（needs 门漏了）也记进这个计数。
+    //   **只在 > 0 时打**（这是**错误**，⛔ 不受 `detail` 影响）；第 1 次失败已由 `present.cpp` 打
+    //   默认级别 warn（之后只计数）。惰性回读之后，"本帧没回读却要 dump"（needs 门漏了）也记进这个计数。
     if (presenter_.dumpFailures() != 0) {
         std::fprintf(out, "dump      : dumpFailures=%llu（--dump-frame 写盘失败次数；第一次已 warn，见 stderr）\n",
                      static_cast<unsigned long long>(presenter_.dumpFailures()));
     }
-    // ★ 默认档就改写 guest 寄存器的那个钩子（T2 §1.2 #14 / `machine.cpp:1369`）的实际结局：
-    //   "命中了并置 0" 与 "根本没走到" 是两件事，⛔ 不许只写一行模糊的 `bypassed`。
-    if (recovery_bypass_applied_) {
-        std::fprintf(out, "recovery  : applied @ 004BA718 (EAX %u -> 0)（--accept-recovery-dialog 默认绕过）\n",
-                     recovery_bypass_prior_eax_);
-    } else if (recovery_bypass_checked_) {
-        std::fprintf(out, "recovery  : 命中但未应用（EAX=%u）\n", recovery_bypass_prior_eax_);
-    } else {
-        std::fprintf(out, "recovery  : 未命中（本轮没走到 004BA718）\n");
-    }
-    // ★ guest 窗口 → 它的 WndProc EA，以及**它在不在派发表里**（人类手动测试的第一道门槛）：
-    //   所有 SDL 输入（键 / 鼠标 / 关窗）最终都经 `DispatchMessageA` → `GuestCallStack::start(proc)`
-    //   ⇒ 下一个块边界 EA 就是 `wndproc`。它不在表里 ⇒ **第一条被派发的消息**就会响亮停
-    //   （不是"输入没反应"，而是 `decode-error` + 点名的 EA）。headless 也一样建 guest 窗口。
-    {
-        const std::uint32_t primary = windows_.primaryWindow();
-        const HostWindow* win = primary != 0 ? windows_.find(primary) : nullptr;
-        const std::uint32_t proc = win != nullptr ? win->proc : 0u;
-        if (primary != 0) {
-            std::uint64_t cmp = 0;
-            const bool in_table = proc != 0 && lookup(proc, &cmp) != nullptr;
-            std::fprintf(out,
-                         "window    : guest primary=%08X class=\"%s\" wndproc=%08X in-dispatch-table=%s\n",
-                         primary, win != nullptr ? win->class_name.c_str() : "?", proc,
-                         proc == 0 ? "n/a（没有 WndProc）" : (in_table ? "yes" : "NO ⇒ 第一条消息会停"));
-        } else {
-            std::fprintf(out, "window    : guest 还没有窗口（primary=0）\n");
-        }
-    }
-    // ★ `--skip-logo` 的实际结局（**三种形态必须能机械区分**，口径照 `machine.cpp:2733-2742`）：
-    //   未要求这个开关时**不打**这一行（与解释器同口径：没有 `skip-logo :` 行 = 本轮没开）。
-    if (skip_logo_) {
-        if (skip_logo_applied_) {
-            std::fprintf(out,
-                         "skip-logo : applied @ T_Command=0x%08X (+0x%05X=0；写前 %u；钩子 EA=004BAA33)\n",
-                         skip_logo_object_, kSkipLogoFieldOffset, skip_logo_prior_value_);
-        } else if (skip_logo_checked_) {
-            std::fprintf(out,
-                         "skip-logo : NOT applied（钩子 @ 004BAA33 命中，但对象/字段不可写；对象=0x%08X）\n",
-                         skip_logo_object_);
-        } else {
-            std::fprintf(out, "skip-logo : 未命中（run 在 004BAA33 之前结束）\n");
-        }
-    }
-    // ---- 三个合成 EA 的命中数（0 = 本轮根本没撞到；⛔ 不拿"实现了"冒充"跑过了"）----
-    std::fprintf(out,
-                 "synthetic : 定时器回调=%llu 续延=%llu SEH 派发(raise=%llu handler=%llu unhandled=%llu)\n",
-                 static_cast<unsigned long long>(timerFires_), static_cast<unsigned long long>(callResumes_),
-                 static_cast<unsigned long long>(seh_.raiseCount()),
-                 static_cast<unsigned long long>(seh_.handlerCalls()),
-                 static_cast<unsigned long long>(seh_.unhandledCount()));
     // ---- S2 的**机械判据**：音频**被请求**时打一行与解释器 `machine.cpp:2955` 同形的 `audio     :`
     //   （`mode` / `device=ok|none` / `muted` / fills / pushed / underruns / …）。
     //   ★ 门是 `audioRequested()`（不是 `enabled()`）：`--audio sdl` 打不开设备时 `enabled()` 为假、
     //     但这一跑**要过**音频 ⇒ 摘要仍要如实写 `mode=off device=none muted=1`（⛔ 不许把
-    //     "没有输出"静默成"没要音频"）。缺省档（不给任何音频 flag）两门同为假 ⇒ **一行都不打**
-    //     ⇒ 默认档 stdout 与改动前逐字相同（`AGENTS.md` §12.8 第 3 条 / 本单最硬的一条）。
+    //     "没有输出"静默成"没要音频"）。缺省档（不给任何音频 flag）门为假 ⇒ **一行都不打**。
+    //   ★ 音频读数是**开发者读数**（2026-11-27 用户判据）⇒ 还要 `--log-level info`；只给
+    //     `--audio sdl` 的默认档一行都不打。判据面见 CTest `aot-audio-wiring`（带 `--log-level info`）。
     //   ★ 一次性输出（不是周期性）：落点与 `--profile` 块同处"stdout 末尾"的前一刻。
-    if (audio_.audioRequested()) {
+    if (detail && audio_.audioRequested()) {
         audio_.dumpSummary(out);
         // ---- S3 泵的读数（同样受 `audioRequested()` 门；`--audio sdl` 打不开设备时它照打，
         //   `calls=0 fills=0` = 没有输出、泵没跑 —— 与"跑过但没喂到"是两回事）----
@@ -678,15 +712,11 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     // ★ Phase-0 四行（`tokenhold / holdhist / waithist / shimmax`）：**只读计量**，与解释器
     //   `Machine::dumpRunSummary` 调的是**同一个** `dumpTokenPhase0`（唯一实现 = 唯一格式）。
     //   开关由 `AotHost::run` 里的 `guestToken().arm(opts.profile)` 决定（`--profile` ∪ `LIFT_AUDIO_TRACE`）
-    //   ⇒ 缺省档 `phase0Enabled()==false` ⇒ **一行不加**（默认档 stdout 逐字不变）。
+    //   ⇒ **显式 opt-in**：不受 `detail` 影响（用户点名要的读数，⛔ 不静默收掉）。
     //    ★ 行首那一条 `token     : violations=… max-concurrent=…` 与解释器 `Machine::dumpRunSummary`
     //      （`machine.cpp:2732`）**同形**：同一个计数器、同一组字段、`first=` 只在非 0 时出现。
     //      为什么放在 Phase-0 四行**前面**：`token` 是不变式的总账、四行是它的分解 ⇒ 先总账后分项；
     //      位置本身不带语义（两处都在同一个 `if` 里）。
-    //    ⛔ 为什么必须受 `phase0Enabled()` 保护（而不是像解释器那样无条件打）：AOT 的**缺省档 stdout
-    //      必须逐字不变**（`AGENTS.md` §12.8 第 3 条；音频 S0–S4 那轮的最硬判据）。`--profile`（或
-    //      `LIFT_AUDIO_TRACE`）是这条读数唯一的开档口，与紧邻的 Phase-0 四行同一个闸门
-    //      ⇒ 缺省档一行不加、开档档一行不少。
     if (guestToken().phase0Enabled()) {
         const GuestToken& token = guestToken();
         std::fprintf(out, "token     : violations=%llu max-concurrent=%u%s%s\n",
@@ -696,22 +726,23 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                                              : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
         dumpTokenPhase0(out, shims_.all());
     }
-    // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
+    // ---- `--profile` 的整块读数（**关档时一行都不打**；开档 = 显式 opt-in ⇒ 不受 `detail` 影响）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。
     printProfile(out);
     // ★ `--profile-slow-frames`：**一次性**慢帧表（run 结束时打一次；⛔ 不每帧打）。
-    //   关档时 `printSlowFrames` 第一行就返回 ⇒ 默认档 / 只给 `--profile` 的档逐字不变。
+    //   关档时 `printSlowFrames` 第一行就返回 ⇒ 不开档一行都不打。
     printSlowFrames(out);
     // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：`_memcpy` 画像 + `rep_bulk` 命中/decline。
-    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打（stdout 逐字不变）。
+    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打。
     memcpy_diag::print(out);
     // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：库函数候选的 per-function 计数（每窗口一块）。
-    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打（stdout 逐字不变）。
+    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打。
     call_diag::print(out);
     // ★ 构建期库内建（v1：`_memcpy`）的**一次性**计数（⛔ 不周期打）。表为空 ⇒ 一行都不打；
     //   表非空但一条都没走（例如这轮没进到那个 EA）⇒ 三个 0 也打（否则"没生效"与"没调用"分不清）。
-    if (pinnedIntrinsicCount() != 0) {
+    //   ★ 开发者读数 ⇒ 只给 `--log-level info`（与启动那条 `intrinsics: … table=` 同一个门）。
+    if (detail && pinnedIntrinsicCount() != 0) {
         const lift::IntrinsicCounters c = lift::intrinsicCounters();
         std::fprintf(out, "intrinsics: fast=%llu decline=%llu disabled=%llu\n",
                      static_cast<unsigned long long>(c.fast),

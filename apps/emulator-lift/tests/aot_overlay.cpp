@@ -396,7 +396,10 @@ int main(int argc, char** argv) {
     common.push_back(age_exe.native());
     common.push_back(argFromAscii("--game-dir"));
     common.push_back(game_dir.native());
-    for (const char* a : {"--skip-logo", "--present", "window", "--present-hidden", "--time-limit", "60"}) {
+    for (const char* a : {"--skip-logo", "--present", "window", "--present-hidden", "--time-limit", "60",
+                          // ★ 收口 readout（`present   : … lastHash=0x…`）是**开发者读数**，默认档不打
+                          //   （2026-11-27 用户判据）⇒ 要读它必须显式开 info。⛔ 判据没放宽。
+                          "--log-level", "info"}) {
         common.push_back(argFromAscii(a));
     }
 
@@ -503,7 +506,10 @@ int main(int argc, char** argv) {
         args.push_back(age_exe.native());
         args.push_back(argFromAscii("--game-dir"));
         args.push_back(game_dir.native());
-        for (const char* a : {"--skip-logo", "--present", "headless", "--time-limit", "60", "--max-frames", "1"}) {
+        for (const char* a : {"--skip-logo", "--present", "headless", "--time-limit", "60", "--max-frames", "1",
+                              // ★ `--plugin id=hud ⇒ …` 路径回显只在 `--log-level info`（2026-11-27）⇒
+                              //   要判"预设真的解析了 hud"必须显式开 info。⛔ 判据没放宽。
+                              "--log-level", "info"}) {
             args.push_back(argFromAscii(a));
         }
         args.push_back(argFromAscii("--appdata"));

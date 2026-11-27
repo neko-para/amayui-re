@@ -806,8 +806,13 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 mem_.wr32(object + kSkipLogoFieldOffset, 0);
                 skip_logo_applied_ = true;
                 // ★ latch 命中读数（A 的判据就是这一行）：命中 EA / 写入的 guest EA / 写入的值。
-                std::printf("[skip-logo] hit @ %08X：T_Command=0x%08X ⇒ 写 [0x%08X] = 0（写前 %u）\n",
-                            kSkipLogoHookEa, object, object + kSkipLogoFieldOffset, skip_logo_prior_value_);
+                //   ★ 开发者读数 ⇒ 只给 `--log-level info`（默认档只留出错 / 警告；收口的
+                //     `skip-logo : applied …` 在同一道门里）。
+                if (lift::logConfig().level >= lift::LogLevel::Info) {
+                    std::printf("[skip-logo] hit @ %08X：T_Command=0x%08X ⇒ 写 [0x%08X] = 0（写前 %u）\n",
+                                kSkipLogoHookEa, object, object + kSkipLogoFieldOffset,
+                                skip_logo_prior_value_);
+                }
                 if (skip_logo_prior_value_ != 1) {
                     std::fprintf(stderr,
                                  "[skip-logo] ⚠ 初值不是 1（读到 %u）：写 0 仍执行，但钩子/字段可能已漂\n",

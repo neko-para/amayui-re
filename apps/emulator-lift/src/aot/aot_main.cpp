@@ -90,228 +90,60 @@ std::uint64_t presentFrameCount(void* ctx) {
 
 void usage() {
     std::printf(
-        "emulator-lift-aot —— Shape A：**执行**构建期 lift 出来的代码（⛔ 不构造 Machine）\n"
-        "  --exe <path>        执行源（缺省：env LIFT_AGE_EXE / AMAYUI_AGE_EXE → 仓库内\n"
-        "                      corpus/assets/age/AGE.EXE__dumped.sectfix.EXE；口径与 emulator-lift 相同）\n"
-        "                      ★ 必须与构建期 pin 的 sha256 + entry 一致（D1）⇒ 不一致 exit 2\n"
-        "  --game-dir <path>   guest 文件系统的唯一根（缺省 env AMAYUI_GAME_DIR / AMAYUI_INSTALL）\n"
-        "  --guest-root <path> guest 眼里的安装根文本（缺省同 emulator-lift：E:\\Games\\Eushully\\天結）\n"
-        "  --appdata <path>    伪造 AppData 的宿主目录（特殊目录映射；缺省 = 不用 AppData）\n"
-        "  --vfs-cache-mb N    ★ 只读安装树**内容缓存**的字节预算（MiB；缺省 256，0 = 关）。\n"
-        "                      只在有 `--appdata` 时生效（那时安装树按合同只读）；只对\n"
-        "                      \"纯读 + OPEN_EXISTING + 解析结果在安装树之下\"的打开生效。\n"
-        "                      小文件整块进堆、大文件只读 mmap；每次命中用一次 stat 校验 size+mtime。\n"
-        "  --vfs-dir-index 0|1 ★ 安装树**目录索引**（缺省 1；0 = 关，供 A/B 与守卫）。\n"
-        "                      只在有 `--appdata` 时生效（那时安装树按合同只读）；⛔ 不是语义开关 ——\n"
-        "                      开 / 关两档的解析结论（ok / host / error）必须逐字节相同。\n"
-        "  --max-frames N      Present 到第 N 帧后停（0 = 不限；缺省 0）\n"
-        "  --max-insns N       guest 指令数绝对上限（0 = 不限）\n"
-        "  --until EA          跑到该 EA（块边界）后停（hex，缺省关）\n"
-        "  --time-limit SEC    墙钟上限（每 4096 条查一次；0 = 不限）\n"
-        "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
-        "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
-        "  --audio off|sdl     音频后端（缺省 off：不开设备 / 不跑混音；判据只有一份 =\n"
-        "                      runtime/audio_policy.h）。sdl = 真设备（打不开 ⇒ **没有音频输出**：\n"
-        "                      不跑混音、摘要 device=none；⛔ 没有第二个档位可退）\n"
-        "  --audio-dump <path> 把 48k/16/2ch 交付缓冲写成 WAV（缺省不给 = 不写）；它**不是档位**：\n"
-        "                      给了它而 --audio off ⇒ 走设备无关的 dump 路径（档位仍写 off、\n"
-        "                      device=none，虚拟时钟）\n"
-        "                      文件 = 44 字节头 + 这一跑**真交付**的字节（没有真交付 ⇒ 只有 44 字节头，\n"
-        "                      data=0；有没有 PCM 看摘要的 fills / fill_bytes / pushed）\n"
-        "                      ★ **abort() 之后 dump 不可信**：heap / handles / shims 的 std::abort()\n"
-        "                      路径跳过收口的 end() ⇒ 头里两个长度字段不回填（文件大小照旧，字段是 0）\n"
-        "  --input-plan <file> 组装输入配方（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
-        "                      文件格式 = **唯一一份配方语法**（`runtime/recipe.h`；解释器臂的\n"
-        "                      `--interaction-graph` 已退役 ⇒ 本臂是**唯一**的配方入口；\n"
-        "                      ⛔ 没有\"本入口不认\"的指令）：\n"
-        "                        await script <名字> [timeout <ms>]\n"
-        "                                              电平门：当前引擎脚本身份 == 名字即通过\n"
-        "                                              （ASCII 大小写不敏感、两侧都忽略 .bin）；\n"
-        "                                              行尾 `timeout` = **这个门**的守卫（最多等多久）\n"
-        "                        await position <名字> <FROM> <TO> [timeout <ms>]\n"
-        "                                              电平门：script 匹配 **且** FROM <= pos < TO\n"
-        "                                              （半开区间；FROM/TO 是带 `0x` 前缀的 hex；\n"
-        "                                              pos = 脚本体内绝对字节偏移，与清单 label_%%08x\n"
-        "                                              同一坐标系；不满足就继续等，不报错/不超时）\n"
-        "                        wait <ms>             宿主单调时钟毫秒（正整数；非阻塞；**固定时长**）\n"
-        "                                              ⛔ 不带 timeout（它没有可等待的东西）\n"
-        "                        click <x> <y> [left|right]\n"
-        "                                              x/y = **1280×720 参考系**，投递前按客户区缩放；\n"
-        "                                              按钮词裸写，省略 = left（不收 =left；⛔ 不带 timeout）\n"
-        "                        mouse_move <x> <y>\n"
-        "                                              只写光标（同 click 的第一段；同一参考系 / 缩放）\n"
-        "                        mouse_down [left|right]\n"
-        "                                              用**当前设备光标位置**按下（⛔ 不带 x/y）；必须有一条\n"
-        "                                              更早的 mouse_move；轻闸门 = 它之后完成过一次位置读点，\n"
-        "                                              或 kPressFallbackMs 墙钟兜底（不成立就不消费该步）\n"
-        "                        mouse_up [left|right]\n"
-        "                                              用**当前设备位置**抬起（可与 down 不同点 ⇒ 拖拽不回跳）\n"
-        "                        profile_begin|end <label>\n"
-        "                                              区间读数（本臂没有分项 profiler ⇒ begin/end 各一行\n"
-        "                                              宿主墙钟 + 读点数，可与 --profile 对齐）\n"
-        "                        quit                  投 WM_QUIT 结束本次运行（后续指令不再推进）\n"
-        "                      ★ `timeout <ms>` 只能写在上面两条 `await …` 的**行尾**：单独一行\n"
-        "                      （旧的\"守上一条指令\"写法）或挂在 wait/click/mouse_move/mouse_down/\n"
-        "                      mouse_up/profile_*/quit 上 ⇒ exit 2；\n"
-        "                      推进只发生在 **guest 读点**（flush-before-read），⛔ 没有帧精度保证；\n"
-        "                      旧指令（`await always` / `await presents <n>` / `key`）/ 图语法 ⇒ exit 2；\n"
-        "                      跑完打一行 `input-plan: steps=… fired=… pending=…` 摘要（一次性）；\n"
-        "                      ★ **完成度是判据**：pending != 0 或某个**门**的 timeout 到期 ⇒ stderr 点名\n"
-        "                      `文件:行` + 门/动作 并 **exit 5**（⛔ 不许只警告仍 exit 0）；\n"
-        "                      ★ `wait` 没有守卫（固定时长）⇒ 卡住由 --time-limit / --max-frames 报。\n"
-        "                      解析失败 ⇒ exit 2 + 行号\n"
-        "  --input-plan-trace  **opt-in**（缺省关）：每条 step **成立 / 施加**时打一行\n"
-        "                      `plan:<文件>:<行> applied kind=… script=… pos=… frame=… state_seq=… reads=…`，\n"
-        "                      click 的抬起再打一行（`reason=keylevel|wallclock` ⇒ guest 到底有没有机会\n"
-        "                      看到按下）；`frame` = 已 Present 帧数，`state_seq` 只有开 --control-root\n"
-        "                      才有（否则 `-`）。⛔ 不每帧 / 不每块打；缺省档一条都不打\n"
-        "                      （缺 --input-plan 时本参数无输出，⛔ 不报错）\n"
+        "emulator-lift-aot —— 执行构建期 lift 出来的 AGE.EXE 代码\n"
+        "  --exe <path>            执行源 PE（缺省：env LIFT_AGE_EXE / AMAYUI_AGE_EXE → 仓库内入库件；\n"
+        "                          须与构建期 pin 一致）\n"
+        "  --game-dir <path>       guest 文件系统根（缺省 env AMAYUI_GAME_DIR / AMAYUI_INSTALL）\n"
+        "  --guest-root <path>     guest 眼里的安装根文本（缺省 E:\\Games\\Eushully\\天結）\n"
+        "  --appdata <path>        AppData 的宿主目录（缺省 = 不用 AppData）\n"
+        "  --vfs-cache-mb N        只读安装树内容缓存 MiB（缺省 256；0 = 关；需 --appdata）\n"
+        "  --vfs-dir-index 0|1     安装树目录索引（缺省 1；需 --appdata）\n"
+        "  --max-frames N          Present N 帧后停（缺省 0 = 不限）\n"
+        "  --max-insns N           guest 指令数上限（缺省 0 = 不限）\n"
+        "  --until EA              跑到 EA（块边界）后停（hex；缺省关）\n"
+        "  --time-limit SEC        墙钟上限（缺省 0 = 不限）\n"
+        "  --skip-logo             把 T_Command + 0x5EB5C 写 0（一次性；缺省关）\n"
+        "  --audio off|sdl         音频后端（缺省 off）\n"
+        "  --audio-dump <path>     把交付缓冲写成 WAV（缺省不写；与 --audio 档位无关）\n"
+        "  --input-plan <file>     输入配方（语法见 docs/03-emulator/input-plan.md；缺省不注入）\n"
+        "  --input-plan-trace      每条配方 step 成立 / 施加时打一行（缺省关；需 --input-plan）\n"
         "%s"
-        "  --log-level <L>     日志级别：quiet|error|warn|info|debug|trace（**缺省 warn**）。\n"
-        "                      缺省档只打**这一次 run 的骨架**（形状 / pin / stop / frames / insns /\n"
-        "                      dispatch / table / present / plugin / skip-logo / recovery …）；\n"
-        "                      **info** 及以上额外打**启动细节**（exe / PE 头与节表 / 导入模块表 /\n"
-        "                      shim 装配 / 栈 / 堆 / TEB / argv / cpu 初值 / 服务面 / vfs / probe）。\n"
-        "                      ★ `[audio] mode=… feeder=… lead=…` 与 `LIFT_AUDIO_TRACE` 的\n"
-        "                      `play state=…` 也都是 **info** 级 ⇒ 要看它们就给 `--log-level info`。\n"
-        "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
-        "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
-        "                      归因 + 机器频率校准；采样率 = dispatch 1/4096、lift_one 1/1024、\n"
-        "                      shim 1/64（每个 shim 各自的调用序号；也写在输出头）。★ 采样本身会\n"
-        "                      轻微影响时序 ⇒ 性能结论请用**关档**跑（⛔ 不拿 --profile 的墙钟当结论）；\n"
-        "                      六项判据开/关一致\n"
-        "  --profile-slow-frames <ms>\n"
-        "                      **必须与 --profile 同时给**（否则 exit 2）；**缺省 0 = 关**。>0 ⇒ 每帧\n"
-        "                      结束时若该帧宿主墙钟 ≥ <ms>，就把**这一帧**的 shim 时间按名字分桶\n"
-        "                      （含调用次数）存下来，run 结束时打**一张**表：\n"
-        "                        frame / wall_ms / guest insns / top-8 shim（名字 + ms + 次数）\n"
-        "                      有界：慢帧最多 32 条、每帧最多 8 个名字，超出只报数（⛔ 不静默）。\n"
-        "                      ★ wall_ms = 该帧 `frame-ms` 的 t_ms 差（同一把尺）；shim 时间复用窗口\n"
-        "                      profile 那条精确取时，**只统计主线程**（音频 feeder 的调用不计）。\n"
-        "                      诊断档 ⇒ 多出来的取时会轻微影响时序，⛔ 不进任何性能判据\n"
-        "  --frame-log         每次 Present 打一行 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`（**缺省关**）：\n"
-        "                      逐帧 hash 是画面序列读数（在动 / 卡住同一帧），不是判据；末帧 hash 看摘要\n"
-        "                      `present :` 行。`--profile` 档也会打这一条（已有 profile 存档的可比面）\n"
-        "  --region-log        启动 readout 末尾打 guest 区域表（`regions   :` 一行 + 每段一行，共 28 行；\n"
-        "                      **缺省关**）：那是**静态布局快照**（谁占了哪一段），一次 run 里不变，\n"
-        "                      属噪音 ⇒ 缺省档不打。它与 `--log-level info` 的**启动细节**是两个门：\n"
-        "                      `info` 打 exe / PE 头与节表 / 导入模块表 / 地址与服务面，本开关只加区域表；\n"
-        "                      判据行（pin / stop / frames / plugin / skip-logo / recovery）⛔ 都不受它们影响\n"
-        "  --no-intrinsics      **只给 A/B 与诊断**：关掉构建期库内建闸门（缺省 = 开）。IR 里的闸门块 /\n"
-        "                      快路径仍在（构建期决定），闸门返回 false ⇒ 回退原 lifted 函数体；\n"
-        "                      ⛔ 不是运行期 override（不替换任何执行来源）\n"
+        "  --log-level <L>         日志级别：quiet|error|warn|info|debug|trace（缺省 warn）\n"
+        "  --dump-frame <path>     每次 Present 导出 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
+        "  --profile               采样式内部 profile（缺省关）\n"
+        "  --profile-slow-frames <ms>  慢帧的 shim 分桶（缺省 0 = 关；必须与 --profile 同用）\n"
+        "  --frame-log             每次 Present 打一行帧号 + guest 后缓冲哈希（缺省关）\n"
+        "  --region-log            启动 readout 末尾追加 guest 区域表（缺省关；需 --log-level info）\n"
+        "  --no-intrinsics         关掉构建期库内建闸门（缺省 = 开；只给 A/B 与诊断）\n"
         "\n"
-        "★ 控制层（停住 / 继续 / 采样 / 截图 / 移光标 / 投递一条 click / typed global 读写 / 收口；\n"
-        "  **缺省完全不启动** ⇒ 不给 --control-root 时行为与逐字节输出都不变）：\n"
-        "  --control-root <dir>  端点文件目录（**必须显式给**）；起一个只绑 127.0.0.1 的 WS 端点，\n"
-        "                        写 `<dir>/ctl.<pid>.<nonce8>.json`（url / pid / port / nonce / token /\n"
-        "                        session / exe_sha256 / shape / started_utc），正常退出删\n"
-        "  --control-port N      端口（0 = 由系统给，缺省 0）；被占用 ⇒ **exit 2 并点名端口**（⛔ 不换端口）\n"
-        "  --control-idle-timeout S   暂停态且无命令超过 S 秒 ⇒ 端点自己 quit（缺省 300）\n"
-        "  --control-orphan-timeout S 客户端断了但端点还暂停 ⇒ 自行 quit（缺省 10；⛔ 不抱着 GPU 停着）\n"
-        "  --control-predicate-timeout S  resume --for-ms/--for frames 等不到谓词 ⇒ 回 timeout（缺省 30；\n"
-        "                             客户端据此 exit 3；谓词当场取消，⛔ 之后不会再「自己停住」）\n"
-        "                        能力面（本轮）= pause / resume / sample / screenshot / move / click /\n"
-        "                        global-get / global-set / quit；\n"
-        "                        协议 schema = emu-ctl/2\n"
+        "★ 控制层（缺省不启动；需显式 --control-root）：\n"
+        "  --control-root <dir>      端点文件目录\n"
+        "  --control-port N          端口（缺省 0 = 系统分配）\n"
+        "  --control-idle-timeout S  暂停且无命令 S 秒后自行 quit（缺省 300）\n"
+        "  --control-orphan-timeout S  客户端断开且仍暂停 S 秒后自行 quit（缺省 10）\n"
+        "  --control-predicate-timeout S  resume --for-ms/--for frames 等不到谓词的超时秒数（缺省 30）\n"
         "\n"
-        "★ 呈现档位（口径与 emulator-lift 相同；缺省 headless）：\n"
-        "  --present headless|window|auto\n"
-        "                      headless = **隐藏**窗口 + GPU device（不是\"没有窗口\"：3D 的唯一光栅\n"
-        "                      实现是 GPU，没有它一个像素都不画）；window = 可见窗口；\n"
-        "                      auto = 可见窗口打不开 ⇒ 退到隐藏窗口\n"
-        "  --present-driver LIST     SDL 渲染驱动列表（只对 window/auto 生效）\n"
-        "  --present-vsync 0|1       垂直同步（缺省 0）\n"
-        "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
-        "  --overlay                 左上角调试 HUD（游戏内小窗 / 帧读数；只进窗口像素与\n"
-        "                            --present-screenshot，⛔ 不进 --dump-frame / arena.hash）。\n"
-        "                            ★ **S2 起是预设**：等价于 `--plugin hud` + 要求窗口（hud 是\n"
-        "                            保留 id；`--present headless` 仍拒绝）。与 `--plugin` 同给时\n"
-        "                            **插件赢**（不装载 hud，一次 stderr 说清）。\n"
-        "                            HUD 由**随发行分发的脚本** `scripts/ui/hud.js` 经 QuickJS 同步\n"
-        "                            产出 display list（脚本外置：改脚本不用重编）；文本走宿主字体\n"
-        "                            （支持中文）；字体缺失 / 脚本加载失败 ⇒ 拒绝启动（R5）\n"
-        "  --ui-input=consume|pass   注入点击（--input-plan / 控制层）是否也过叠层的命中路由：\n"
-        "                            consume（缺省）= 命中即吞（down 吞 ⇒ up 吞，guest 收不到该\n"
-        "                            点击的任何消息）；pass = 逐位与没有 UI 相同。也接受\n"
-        "                            `--ui-input consume|pass`。只在 --overlay / 有 render 的插件\n"
-        "                            时生效；窗口参数（--present headless 拒绝）；非法值 exit 2\n"
-        "  --plugin <id|path>        用这份 **ES module** 当插件：`export default { render?, start?,\n"
-        "                            onTrigger?, initialState? }`（宿主只读 default 导出）。\n"
-        "                            `start/onTrigger` 是 Run 的回调链（写只经 ctx.edit / ctx.input）；\n"
-        "                            `render` 可选：**窗口档**同一个插件实例被接进叠层 host\n"
-        "                            （ctx.draw 的 display list 每帧上屏；⛔ 不跑第二套 UI 运行时）\n"
-        "                            ⇒ 有 render 时装，不需要 --overlay；⛔ 不隐含 --overlay\n"
-        "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
-        "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
-        "                            ★ **id 语法**：`^[A-Za-z0-9_-]{1,64}$`（文件名 stem）。\n"
-        "                              含 `.` / `/` / `\\` 的写法一律当**路径**（所以 `x.js` 天然是路径，\n"
-        "                              行为与旧版逐字相同：cwd 相对 / 绝对 / 装载失败 exit 2）。\n"
-        "                              ★ 显式空串（`--plugin \"\"`）⇒ exit 2：空串不是 id、也不是可装载\n"
-        "                              路径；⛔ 不静默当成\"没有插件\"。\n"
-        "                            ★ **id 只查两处非递归根**（⛔ 不查 `lib/`、⛔ 不递归子目录）：\n"
-        "                              ① `<exe 目录>/scripts/plugins/<id>.js`（发行）\n"
-        "                              ② 编译期 `LIFT_PLUGIN_DIR/<id>.js`（开发；= 源码 scripts/plugins）\n"
-        "                              两处都命中 ⇒ exit 2 并列出全部候选；都不在 ⇒ exit 2 并列出搜过的\n"
-        "                              目录与每个候选路径。命中 ⇒ 打一行 `--plugin id=<id> ⇒ <绝对路径>`\n"
-        "                              并用绝对路径装载（一次性，⛔ 不周期）。\n"
-        "                            ★ **保留 id `hud`**（S2）：先于普通根解析为\n"
-        "                              `<exe 目录>/scripts/ui/hud.js` → 编译期 `LIFT_UI_SCRIPT_DIR/hud.js`\n"
-        "                              （`--overlay` 与 `--plugin hud` 同一条）；用户插件根里出现 `hud.js`\n"
-        "                              ⇒ exit 2（⛔ 不静默被内置件遮住）。`--plugin hud` **不隐含开窗**。\n"
-        "  --plugin-param k=v        给插件的只读参数（`ctx.params`；可重复，**重复 key ⇒ exit 2**）\n"
-        "                            ★ 内建插件优先读 `<--appdata>/plugin-config.json`（ctx.config）；\n"
-        "                            **没有 appdata 或没有该 key** 才回退到这里（文件坏 ⇒ exit 2）\n"
-        "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
-        "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
-        "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
-        "                      guest 画面恒为 1280×720 ⇒ 放大由宿主完成（选哪个滤波器见\n"
-        "                      `--scale-filter`，缺省 linear = 与真机 150%% DPI 同档的平滑放大）\n"
-        "                      ⇒ ⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass。缺省 1.0\n"
-        "                      = 1280×720，逐字节不变。auto = 按显示 DPI（SDL 的 display content\n"
-        "                      scale）取，取不到 ⇒ 回 1.0 并打一行 readout；启动固定打一行\n"
-        "                      `scale: …（window WxH，image 1280x720；filter=…；…）`\n"
-        "                      （缺省 1.0 也打，一次性；s<1 说\"缩小\"）。★ `--present headless`\n"
-        "                      对 `--scale` **无副作用**：接受但不生效（隐藏离屏窗口仍是\n"
-        "                      1280×720，也不查 DPI）。非 auto 且非正数 / NaN / 垃圾 ⇒ exit 2\n"
-        "                      并点名本参数\n"
-        "  --scale-filter nearest|linear\n"
-        "                      放大时的采样滤波器（缺省 **linear**）：linear = 与真机 150%% DPI\n"
-        "                      同档的平滑放大 / nearest = 硬边（1.5× 这类非整数倍率会有锯齿；\n"
-        "                      像素党 / A/B 对照用，与换滤波器之前逐字节相同）。★ 只影响宿主\n"
-        "                      呈现的那次放大：⛔ 不改帧尺寸、⛔ 不改 guest 像素、⛔ 不改游戏内容\n"
-        "                      的纹理采样；清晰度仍由源分辨率（image 1280×720）决定。\n"
-        "                      未知值（含大小写不符）⇒ exit 2 并点名本参数\n"
-        "  --baseline-lift <N> 宿主基线补偿**默认字号的值**像素（0..64；0 = 关；缺省 = 编译期\n"
-        "                      `kBaselineLift`）。★ 宿主视觉策略（⛔ 不是引擎语义）：≤16px 按表给 1，\n"
-        "                      同一字号下所有字形位移完全一致（⛔ 不做逐字型夹取）。\n"
-        "  --baseline-lift-by-size <0|1>\n"
-        "                      1（缺省）= 按像素字号查表；0 = 旧行为（全字号恒 `--baseline-lift`，\n"
-        "                      A/B 对照用）。`--baseline-lift 0` 恒关。\n"
+        "★ 呈现（缺省 headless）：\n"
+        "  --present headless|window|auto   headless = 隐藏窗口；auto = 可见窗口打不开则隐藏\n"
+        "  --present-driver LIST      SDL 渲染驱动列表（只对 window/auto）\n"
+        "  --present-vsync 0|1        垂直同步（缺省 0）\n"
+        "  --present-hidden           强制隐藏窗口（需 --present window/auto）\n"
+        "  --present-screenshot <path>  每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
+        "  --present-screenshot-frame N 只回读第 N 帧（1 起；0 = 每帧）\n"
+        "  --overlay                  左上角调试 HUD（等价于 --plugin hud + 要求窗口）\n"
         "%s"
-        "  env LIFT_FAULT_DUMP=<spec>\n"
-        "                      **opt-in**（缺省不设 = fault 文本一条 dump 行都不多）：guest fault 时按\n"
-        "                      spec dump 内存。每段 = `EA:LEN`（EA 纯 hex，0x 可省；LEN 十进制，\n"
-        "                      0x 前缀 = hex）或 `EA:*LEN`（先读 EA 处 4 字节当 guest 指针再 dump；\n"
-        "                      `EA:4*LEN` 同义）或 `EA:*<delta>:LEN`（跟随并把指针加有符号 delta，\n"
-        "                      |delta| ≤ 1 MiB，如 `*-8:16` 从 ptr-8 起 dump），逗号分隔。上限 =\n"
-        "                      8 段 / 每段 1..256 B / 总 ≤1024 B / spec ≤1024 字符，超限 ⇒ **exit 2**\n"
-        "                      （⛔ 不静默截断）。\n"
-        "                      例：LIFT_FAULT_DUMP=0x1005AB58:64,0x10050000:*32,0x1005AB58:*-8:16\n"
-        "  env LIFT_WATCH=<spec>\n"
-        "                      **opt-in**（缺省不设 = 一条 watch 行都不打，零输出）：观察 guest 侧\n"
-        "                      写入（`lift_note_write`）与 shim 侧写入（writeBytes / fillBytes /\n"
-        "                      wr8..wr64）。每段 = `EA:LEN`（EA 纯 hex，0x 可省；LEN 十进制 1..16）\n"
-        "                      或 `EA:LEN>follow`（仅 LEN=4：命中后把**下一次写**开头读到的指针 P 的\n"
-        "                      [P-8,P+8) 加进观察集 —— 用来点名\"谁在 P-8 写了那 16 字节\"），\n"
-        "                      逗号分隔。上限 = 8 段 / spec ≤1024 字符，超限 ⇒ **exit 2**（⛔ 不静默\n"
-        "                      截断）。命中打一行 `watch      : WRITE 0x<EA> n=<N> block=lift_cc_<EA>`\n"
-        "                      （guest）或 `... shim=<名字>`（shim 侧；名字由 shim 调用点设，未设 ⇒ `?`）。\n"
-        "                      例：LIFT_WATCH=0x1005AB58:4>follow\n"
-        "  --help              这份说明\n"
+        "  --ui-input=consume|pass    注入点击是否也过叠层命中路由（缺省 consume；也收 --ui-input consume|pass）\n"
+        "  --plugin <id|path>         用这份 ES module 当插件（与 --input-plan / --control-root 互斥）\n"
+        "  --plugin-param k=v         给插件的只读参数（可重复；重复 key ⇒ exit 2）\n"
+        "  --scale auto|数值          窗口客户区 = round(1280×s)×round(720×s)（缺省 1.0；headless 下不生效）\n"
+        "  --scale-filter nearest|linear  放大滤波器（缺省 linear）\n"
+        "  --baseline-lift <N>        基线补偿的默认字号像素（0..64；缺省 = 编译期 kBaselineLift）\n"
+        "  --baseline-lift-by-size 0|1  1 = 按字号查表（缺省）；0 = 全字号固定 --baseline-lift\n"
         "\n"
-        "★ 执行模型：入口 EA → 构建期生成的派发表（`lift_cc_<EA>`）；shim 桩 EA → `lift_shim`；\n"
-        "  两者都不是 ⇒ **响亮停机并打印 EA**（⛔ 不设\"返回哨兵 = 结束\"的约定）。\n",
+        "★ env（缺省不设 = 不做）：\n"
+        "  LIFT_FAULT_DUMP=<spec>   guest fault 时 dump 内存（spec 见 docs/03-emulator/measurement.md）\n"
+        "  LIFT_WATCH=<spec>        观察 guest / shim 写入（spec 见 docs/03-emulator/measurement.md）\n"
+        "  --help                   这份说明\n",
         lift::kAotSoundHelp, lift::kCursorWarpHelp);
 }
 
@@ -602,7 +434,7 @@ int main(int argc, char** argv) {
             //   AOT 臂过去没有这个开关，于是 `[audio] mode=…`（Info）与 `LIFT_AUDIO_TRACE` 的
             //   `play state=` 在 AOT 上永远看不见 —— 那会让音频验收的"读数面"假绿。值域 =
             //   `runtime/log.h` 的 `logParseLevel`（唯一一份），⛔ 不在这里另写一份字符串表。
-            //   ★ 2026-11-27 起它同时是**启动细节的唯一门**（见下面 `startup_detail` 的定义）。
+            //   ★ 2026-11-27 起它同时是**启动细节的唯一门**（见下面 `readout_detail` 的定义）。
             std::string level;
             if (!needValue("--log-level", &level)) return 2;
             if (!lift::logSetLevel(level.c_str())) {
@@ -828,14 +660,15 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    // ★ **启动细节的唯一门**（`--log-level info` 及以上；缺省 warn ⇒ 关）。
-    //   为什么用 `--log-level` 而不是新开 `--startup-detail`：那会与 `--log-level` 语义重叠
+    // ★ **开发者读数的唯一门**（`--log-level info` 及以上；缺省 warn ⇒ 关）。
+    //   为什么用 `--log-level` 而不是新开 `--readout`：那会与 `--log-level` 语义重叠
     //   （同一件事两个开关，且两者可以给出互相矛盾的"我现在要不要细节"）。`info` 本来就是
-    //   "比 warn 多"的档；启动细节（PE 头 / 节表 / 导入模块表 / guest 地址空间 / 服务面 /
-    //   vfs / probe）是**静态装配展开**，一次 run 里不变 ⇒ 默认档只留"这一次 run 发生了什么"的骨架。
-    //   ⛔ 判据面（`pin` / `stop` / `frames` / `insns` / `dispatch` / `table` / `present` /
-    //   `plugin` / `skip-logo` / `recovery`）不在这个门里。
-    const bool startup_detail = lift::logConfig().level >= lift::LogLevel::Info;
+    //   "比 warn 多"的档；启动 readout（形状 / exe / PE 头与节表 / 导入模块表 / guest 地址空间 /
+    //   vfs / 服务面 / probe / pin）与收口 readout（insns / frames / dispatch / table / region /
+    //   present / recovery / window / skip-logo / synthetic / intrinsics / audio）都是**开发者读数**
+    //   ⇒ 默认档只留"出错 / 警告（可操作）"、插件自己的日志，以及收口那 **1 行** `stop      :`
+    //   （"这一跑怎么结束的"；判据允许的唯一一行）。
+    const bool readout_detail = lift::logConfig().level >= lift::LogLevel::Info;
 
     // ★ S1：`--audio` 的值域判据**只有一份**（`runtime/audio_policy.h` 的 `parseAudioMode`）。
     //   ⛔ 不放宽成"认不出就当 off"：非法值仍 exit 2，并**点名合法值域**（人照它改）。
@@ -981,10 +814,14 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (resolved.kind == lift::plugin::PluginSpecKind::Id) {
-            // ★ 一次性（⛔ 不周期）。打印的是**绝对路径**（解析结果，不重拼字符串）。
+            // ★ 一次性（⛔ 不周期）**开发者读数**：路径回显只在 `--log-level info` 时打。
+            //   默认档一个字都不打（解析成功是正常路径，不是警告）；解析失败仍是 exit 2 +
+            //   列出全部候选（那才是可操作的信息）。
             //   `--overlay` 预设也走这一行（与普通 id 同形；用户口径 2026-11-25）。
-            std::fprintf(stderr, "emulator-lift-aot: --plugin id=%s ⇒ %s\n", resolved.id.c_str(),
-                         resolved.path.c_str());
+            if (readout_detail) {
+                std::fprintf(stderr, "emulator-lift-aot: --plugin id=%s ⇒ %s\n", resolved.id.c_str(),
+                             resolved.path.c_str());
+            }
             plugin_path = resolved.path;
         }
     }
@@ -1012,13 +849,11 @@ int main(int argc, char** argv) {
     // ★ `overlay` 的唯一合成点：显式 `--overlay`（S3 起没有第二个 CLI 入口：`--ui` 已删）。
     overlay = overlay_flag;
 
-    // ---- `--sound`：**接受** + 一条一次性说明（⛔ 不 exit 2、⛔ 不静默）----
-    //   ★ 文案与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`：`--sound` 现在**真的**
-    //     进 `AudioEngine` 的静音门（`configure(…, sound)`，见下面的 configureAudio）⇒ 那条话
-    //     必须与代码同形（⛔ 不许再说"本臂没有音频管线"）。
-    //   ★ 打印点**只有这里**（parse 之后、GPU bring-up 之前）⇒ 一次，且命令行一给就能判
-    //     （守卫 `cli-aot-flags` 因此不需要 GPU）。
-    if (sound) std::fputs(lift::kAotSoundNotice, stderr);
+    // ---- `--sound`：**接受**（⛔ 不 exit 2、⛔ 不改档位），默认档**一个字都不打** ----
+    //   ★ 解释性文字（档位 / 读数在哪看 / WAV 口径 / 跟踪单号）只在 `--help`（`kAotSoundHelp`，
+    //     `runtime/present_flags.h`）；运行期只在出错 / 警告时说话（用户的默认档判据）。
+    //   ★ 硬事实仍由 `--sound` 自己成立：`configureAudio(…, sound)` ⇒ `AudioEngine` 的静音门
+    //     （见下面 configureAudio 的调用点），判据是 CTest `aot-audio-wiring` 的 `muted=` 读数。
 
     // ---- `LIFT_FAULT_DUMP`：**解析在启动期**（早于 `AotHost::init` / 音频线程；fault 上下文只允许
     //   fprintf + committed() + memcpy）----
@@ -1419,7 +1254,7 @@ int main(int argc, char** argv) {
                      "   （构建仍然成功，但**不能执行**）。⛔ 不静默跑成空壳：只打 bring-up 读数后 exit 1。\n"
                      "   修：装上 clang（`clang --version`）并确认执行源在场后重新 configure / build。\n\n");
         std::printf("emulator-lift-aot: Shape A —— bring-up 读数（**没有生成物，未执行任何 guest 指令**）\n");
-        host.printReadout(stdout, run_opts.region_log, startup_detail);
+        host.printReadout(stdout, run_opts.region_log, readout_detail);
         std::fflush(stdout);
         return 1;
     }
@@ -1432,8 +1267,12 @@ int main(int argc, char** argv) {
     {
         const char* shape = LIFT_AOT_SHAPE;
         const bool lto = std::strstr(shape, "-lto") != nullptr;
-        std::printf("emulator-lift-aot: AOT 形状 LIFT_AOT_SHAPE=\"%s\"（split=%d · -O2%s）\n", shape,
-                    static_cast<int>(LIFT_AOT_SPLIT), lto ? " · LTO" : "");
+        // ★ 形状是**构建形状回显**（开发者读数）⇒ 只给 `--log-level info`。默认档不打。
+        if (readout_detail) {
+            std::printf("emulator-lift-aot: AOT 形状 LIFT_AOT_SHAPE=\"%s\"（split=%d · -O2%s）\n", shape,
+                        static_cast<int>(LIFT_AOT_SPLIT), lto ? " · LTO" : "");
+        }
+        // ⚠ 非判据档是**警告**（在这上面得出的性能结论无效）⇒ 任何档都打。
         if (std::strstr(shape, "-NOT-A-JUDGE") != nullptr) {
             std::printf("⚠ 非判据档（⛔ 性能结论不可用）\n");
         }
@@ -1442,7 +1281,7 @@ int main(int argc, char** argv) {
     // ---- 宿主诊断配置：帧导出 / 帧数上限（口径同已退役解释器臂 `main.cpp`；不进 guest 语义）----
     host.cpu().shim.frame_dump = frame_dump;
     host.cpu().shim.max_frames = run_opts.max_frames;
-    if (!frame_dump.empty()) {
+    if (!frame_dump.empty() && readout_detail) {
         std::printf("frame-dump: %s（每次 Present 导出 guest 后缓冲 BMP；{frame} = 4 位帧号）\n",
                     frame_dump.c_str());
     }
@@ -1455,7 +1294,7 @@ int main(int argc, char** argv) {
     //        ⛔ 不装 ⇒ `user32_window.cpp:589` 的 `shimAbort` → `std::abort()`（不可归因停机）。
     bool present_window_active = false;
     if (present_mode != "headless") {
-        if (!sdl_display->isGpuRenderer()) {
+        if (!sdl_display->isGpuRenderer() && readout_detail) {
             std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
                         sdl_display->rendererName());
         }
@@ -1517,20 +1356,24 @@ int main(int argc, char** argv) {
         present_window_active = true;
     }
 
-    std::printf("emulator-lift-aot: Shape A —— bring-up 完成，开始执行（派发表 %zu 项）\n",
-                lift::aot::tableSize());
-    // ★ 启动回声：两行都是**读数**（⛔ 不写死）：
+    // ★ 启动回声：三行都是**开发者读数**（启动骨架 / 后端名 / sink 描述）⇒ 只给
+    //   `--log-level info`。默认档不打（玩家看得见窗口；看不见才是问题，而那是错误的判据面）。
     //   · `raster` = 真正的光栅后端名（GPU 是唯一实现）；
     //   · `present` = sink 的 `describe()`，其中 `window=visible|hidden` 是"这轮看得见吗"的机械判据
     //     （取自 `SDL_GetWindowFlags`；headless 也建隐藏窗口 ⇒ 这一行**两个档位都打**）。
-    std::printf("raster    : %s%s\n", host.gpuRaster() != nullptr ? host.gpuRaster()->rasterName() : "(nullptr)",
-                present_mode == "headless" ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）" : "");
-    std::printf("present   : %s\n", sdl_display->describe().c_str());
+    if (readout_detail) {
+        std::printf("emulator-lift-aot: Shape A —— bring-up 完成，开始执行（派发表 %zu 项）\n",
+                    lift::aot::tableSize());
+        std::printf("raster    : %s%s\n",
+                    host.gpuRaster() != nullptr ? host.gpuRaster()->rasterName() : "(nullptr)",
+                    present_mode == "headless" ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）" : "");
+        std::printf("present   : %s\n", sdl_display->describe().c_str());
+    }
     // ★ C5/C8 的**启动细节**（2026-11-27 默认档清理）：这一行是**配置回显** —— "这一趟路径解析
     //   的两层记忆是开还是关"（读数**从 Vfs 自己的状态取**，⛔ 不抄 CLI 变量），一次 run 里不变
-    //   ⇒ 只在 `--log-level info` 及以上打；默认档只留"这一次 run 发生了什么"的骨架。
+    //   ⇒ 只在 `--log-level info` 及以上打。
     //   `dir-index` 的 on/off 是**开关**；它是否真的生效还要看写覆盖层（`--appdata`）。
-    if (startup_detail) {
+    if (readout_detail) {
         const lift::Vfs& vfs = host.vfs();
         std::printf("vfs-paths : dir-index=%s resolve-cache=%s（安装树目录索引 / 正解析缓存；"
                     "A/B: --vfs-dir-index 0）\n",
@@ -1540,20 +1383,19 @@ int main(int argc, char** argv) {
     //   与 `describe()` 里的 `cursor-warp=on|off`（sink 自己的开关）分工不同 —— 这一行回答
     //   "这轮真的会不会挪宿主光标"（含"开关开着但窗口是隐藏的"这种静默失效）。
     //   ★ 判据与四个状态名只有一份（`runtime/present_flags.h`），与解释器臂逐字相同。
-    //   ★ 2026-11-27：这行归**启动细节**（`--log-level info`）；默认档的同一事实仍由上面
-    //     `present   : …` 的 `cursor-warp=on|off`（与收口摘要的 `present   : …`）给出。
-    if (startup_detail) {
+    //   ★ 2026-11-27：这行归**开发者读数**（`--log-level info`）。
+    if (readout_detail) {
         const lift::CursorWarpState st =
             lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), sdl_display->windowHidden());
         std::printf("cursor-warp: %s\n", lift::cursorWarpStateName(st));
     }
-    // ★ `--scale` 的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收；缺省 1.0 也打）。
+    // ★ `--scale` 的**一次性**启动 readout（开发者读数 ⇒ 只给 `--log-level info`）。
     //   · 窗口档：事实来自 sink —— 窗口**建完之后** `SDL_GetWindowSize` 回读的客户区尺寸
     //     （⛔ 不是把请求值抄回来；窗口管理器可能约束尺寸）；
     //   · headless：`--scale` **接受但不生效**（隐藏离屏窗口仍 1280×720、也不查 DPI）⇒ 把
     //     `applied` 置 false，由 `runtime/window_scale.h` 的**同一份**文案打出"不生效"。
     //   · `auto` 取不到 display content scale ⇒ 同一行里写明"SDL 返回 0 ⇒ 回 1.0"（⛔ 不静默）。
-    {
+    if (readout_detail) {
         lift::ScaleReport scale_report = sdl_display->scaleReport();
         if (present_mode == "headless") {
             scale_report.applied = false;
@@ -1565,13 +1407,12 @@ int main(int argc, char** argv) {
         }
         std::printf("%s\n", lift::scaleReadoutLine(scale_report).c_str());
     }
-    host.printReadout(stdout, run_opts.region_log, startup_detail);
-    // ★ 构建期库内建的**启动细节**（2026-11-27 默认档清理）：这一趟的二进制到底带了哪几个内建 EA
+    host.printReadout(stdout, run_opts.region_log, readout_detail);
+    // ★ 构建期库内建的**启动 readout**（2026-11-27 默认档清理）：这一趟的二进制到底带了哪几个内建 EA
     //   （来自 `lift_pin.h` 的已校验列表，⛔ 不在运行期读表文件）是**构建形状回显**，一次 run 里不变
-    //   ⇒ 只在 `--log-level info` 及以上打。收口的 `intrinsics: fast=/decline=/disabled=` 计数
-    //   （本文件末尾）仍然默认打 —— 那才是"这一次 run 发生了什么"。
+    //   ⇒ 只在 `--log-level info` 及以上打（收口的 `intrinsics: fast=/decline=/disabled=` 计数同理）。
     //   `--no-intrinsics` 只关闸门；IR 里的闸门块 / 快路径是构建期决定的 ⇒ 这里如实说 "off"。
-    if (startup_detail) {
+    if (readout_detail) {
         const std::size_t ni = lift::aot::pinnedIntrinsicCount();
         std::string line = "intrinsics: ";
         if (ni == 0) {
@@ -1690,7 +1531,7 @@ int main(int argc, char** argv) {
         std::printf("%s\n", plugin_host->readout().c_str());
         std::fflush(stdout);
     }
-    host.printRunSummary(r, stdout);
+    host.printRunSummary(r, stdout, readout_detail);
     if (r.reason == lift::aot::AotStop::DecodeError) {
         // ★ "EA 不在表里 / 不是 shim" 这一类**必须**在 stderr 上也响亮一次（stdout 的摘要可能被管道吞）。
         std::fprintf(stderr, "emulator-lift-aot: ⛔ 停在一个派发表里没有的 EA：%s\n", r.detail.c_str());

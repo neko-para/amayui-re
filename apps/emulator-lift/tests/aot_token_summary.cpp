@@ -241,7 +241,11 @@ int main(int argc, char** argv) {
         const std::vector<std::string> args = {"--present", "headless", "--audio", "off",
                                                "--exe", exec_pe.string(), "--max-frames", "1",
                                                "--game-dir", game_dir.string(), "--appdata", appdata.string(),
-                                               "--time-limit", "120"};
+                                               "--time-limit", "120",
+                                               // ★ `frames    : 1` 是收口 readout ⇒ 默认档不打
+                                               //   （2026-11-27 用户判据）⇒ 本用例显式开 info。
+                                               //   ⛔ 判据没放宽：仍按原文判 `frames    : 1`。
+                                               "--log-level", "info"};
         const fs::path out = root / "default.out";
         const fs::path err = root / "default.err";
         const int code = runChild(aot_exe, args, root, out, err);

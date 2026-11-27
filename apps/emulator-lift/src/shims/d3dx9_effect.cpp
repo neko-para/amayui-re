@@ -1001,7 +1001,7 @@ bool effectCapsGuardImpl(X86& cpu, std::uint32_t caps_ea,
     //   镜像（AOT 启动前核对 sha256，AGENTS §12.5）⇒ 这里只跳过"不可计算"，⛔ 不是"缺了也算过"。
     if (cpu.image == nullptr || cpu.image->bytes.empty()) {
         static bool printed_no_image = false;
-        if (!printed_no_image) {
+        if (!printed_no_image && lift::logConfig().level >= lift::LogLevel::Info) {
             printed_no_image = true;
             std::printf("caps      : PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X ⇒ 等级 %u；"
                         "镜像未装配（cpu.image 无字节）⇒ required 不可算、纯夹具跳过等式"
@@ -1033,10 +1033,10 @@ bool effectCapsGuardImpl(X86& cpu, std::uint32_t caps_ea,
     for (const EffectProgramKey& k : implemented.vertex) {
         if (!effectProgramKeyIn(required_vertex, k)) extra.push_back(k);
     }
-    // ★ 一次性 readout（§12.8：一次性输出不许收）⇒ "哪些 effect 会被用"默认可见。
-    //   用 `std::printf` 而不是 `fxLog`：后者是 Info 级，默认 `Warn` 档看不见。
+    // ★ 一次性 readout（**开发者读数** ⇒ 只给 `--log-level info`；2026-11-27 用户判据）。
+    //   硬等式**不成立**是错误面（下面 `effectCapsGuardTrap` 响亮报），不靠这一行回答。
     static bool printed = false;
-    if (!printed) {
+    if (!printed && lift::logConfig().level >= lift::LogLevel::Info) {
         printed = true;
         std::printf("caps      : PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X ⇒ 等级 %u ⇒ "
                     "会建 %s；required = %zu pixel + %zu vertex（%s），implemented = %zu + %zu ⇒ %s\n",

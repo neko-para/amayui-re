@@ -3,8 +3,8 @@
 // 判据（红了意味着什么）—— 全部读**引擎自己打出来的读数**，⛔ 无一读"手写的说明文本"：
 //   ① 只给 `--sound`（不给 `--audio` / `--audio-dump`）⇒ 收口摘要里**没有** `audio     :` 一行，
 //      也没有 `audio-pump:` 一行（档位 = off ⇒ `AudioEngine::enabled()` 为假 ⇒ 那两行不打）。
-//      红了 ⇒ `present_flags.h` 的 `kAotSoundNotice` 又会指着一行**不存在**的东西
-//      （洞 4：它曾写"读数：收口时 stdout 的 audio 一行"，而只给 `--sound` 时那一行不存在）。
+//      红了 ⇒ 音频读到了一条**不存在**的路径（洞 4：旧通告曾写"收口时 stdout 的 audio 一行"，
+//      而只给 `--sound` 时那一行不存在；★ 2026-11-27 起那条运行期通告已删，口径只在 `--help`）。
 //   ② `--sound --audio-dump <path>` ⇒ 有那一行，且 `muted=0`。★ `muted=` 是
 //      `AudioEngine::dumpSummary` 从**引擎状态**打出来的，不是通知文本里的字面量。
 //   ③ 对照组 `--audio-dump <path>`（**不给** `--sound`）⇒ 同一行 `muted=1`。
@@ -101,8 +101,11 @@ std::uint32_t readLe32(const std::string& b, std::size_t off) {    if (b.size() 
 
 // 一次 run 的公共 argv（`--exe` 由调用方拼在前面；`--appdata` 每次一个全新空目录）。
 // ★ `--max-frames 5`：判据只要"跑到收口"，5 帧足够（本机 1–2 s）。
+// ★ `--log-level info`：`audio     :` / `audio-pump:` 两行是**开发者读数**，默认档（warn）不打
+//   （2026-11-27 用户判据）⇒ 要读它们必须显式开 info。⛔ 判据本身没放宽：仍按原文读这两行。
 const std::vector<std::string> kCommonArgs = {"--max-frames", "5",       "--skip-logo", "--present",
-                                              "headless",     "--time-limit", "60"};
+                                              "headless",     "--time-limit", "60",
+                                              "--log-level",  "info"};
 
 }  // namespace
 

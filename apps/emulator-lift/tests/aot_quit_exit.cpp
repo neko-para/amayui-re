@@ -182,7 +182,11 @@ int main(int argc, char** argv) {
 
     const std::vector<std::string> common = {
         "--present", "headless", "--skip-logo", "--audio", "off", "--game-dir",
-        game_dir.string(), "--appdata", appdata.string(), "--time-limit", "120"};
+        game_dir.string(), "--appdata", appdata.string(), "--time-limit", "120",
+        // ★ 判据行（`misses=0` 在收口 readout 里）在默认档**不打**（2026-11-27 用户判据：
+        //   默认档只留出错 / 警告 + 插件日志 + 1 行 `stop`）⇒ 本用例显式开 `--log-level info`
+        //   才能读到它。⛔ 判据本身没放宽：`stop` / `misses=0` 仍按原文判。
+        "--log-level", "info"};
 
     // ---- ① + ② 正例：TITLE → Quit ⇒ exit 0，且没有响亮错 ----
     g_current_case = "aot-quit/exit-zero";

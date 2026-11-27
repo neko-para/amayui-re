@@ -9,16 +9,13 @@
 //   ③ 错拼 `--cursor-wrap`（wrap ≠ warp）**仍然**是 `未知参数` + exit 2。
 //      红了 ⇒ 参数解析退化成"接受任何参数"，② 的绿就没有意义（§12.5 的 `--native-overrides`
 //      那条纪律：⛔ 不许靠"什么都收"让守卫变绿）。
-//   ④ `--sound` ⇒ **被接受**（不是 `未知参数`）并打**一条**一次性说明：这条说明必须**与代码一致**
-//      —— ⛔ 不许再说"本臂没有音频管线 / 不会有声音"（那是接线前的形状）。且这条说明在这份 stderr
-//      里**恰好一次**。红了 ⇒ 要么"指定了就跑不起来"（另一种"无法指定"），要么静默接受。
-//      ★ **洞 6**：这里⛔ **不**再断言"说明文本里含 `muted=0`"——那是**自证式断言**（只断言自己
+//   ④ `--sound` ⇒ **被接受**（不是 `未知参数`），且默认档**一个字都不打**（2026-11-27 用户裁决：
+//      旧 `--sound 已接受 …` 运行期通告属于"说明书" ⇒ 从默认输出删除，口径只在 `--help`）。
+//      ⛔ 不许再说"本臂没有音频管线 / 不会有声音"（那是接线前的形状）。
+//      ★ **洞 6**：这里⛔ **不**断言任何"说明文本里含 `muted=0`"——那是**自证式断言**（只断言自己
 //        打的那句话，`--sound` 的接线丢了它照绿）。真正的判据落在**引擎状态**上：
 //        `aot-audio-wiring`（真 run，读收口摘要的 `audio     : … muted=0|1`，含 `muted=1` 的对照组）。
-//      ★ **洞 4**：这段说明里"读数"那句必须限定"**仅** `--audio sdl` 或 `--audio-dump` 时
-//        才有 `audio     :` 一行"（只给 `--sound` 时档位是 off ⇒ 没有那一行）。行为判据同样在
-//        `aot-audio-wiring` 的①（那条 run 里那一行**不存在**）。
-//   ⑤ 缺省档（**不给** `--sound`）这条说明**不出现**（同一份 stderr 面的对照组）。
+//   ⑤ 缺省档（**不给** `--sound`）那条通告同样**不出现**（同一份 stderr 面的对照组）。
 //   ⑥ **S1 参数面**：`--audio sdl` **被接受**（旧文案"本臂只有 off"必须消失）；
 //      **`--audio virtual` 必须被拒**：exit 2、stderr 是 `--audio` 的非法值文案、**点名
 //      `off / sdl`**（⛔ 不许再把这个档位收回来）。该档已于 2026-11-22 整档移除：它看起来像
@@ -26,9 +23,9 @@
 //      非法值 `--audio bogus` 同样 exit 2 并点名合法值域（⛔ 不放宽成"认不出就当 off"）；
 //      `--audio-dump` 缺值 ⇒ exit 2 并点名这个 flag（⛔ 不静默当成"没有 dump"）。
 //      红了 ⇒ 用户要么无法指定后端 / dump，要么非法值（含已移除的 `virtual`）被静默吞掉。
-//   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）；且它的说明**声明**了
-//      「abort 之后 dump 不可信」（洞 7：`std::abort()` 路径跳过 `AudioEngine::end()` ⇒ WAV 两个
-//      长度字段不回填。⛔ 不改 abort 语义，只声明）。
+//   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）。
+//      ★ 2026-11-27：help 只写"参数名 + 取值 + 缺省 + 1 句组合约束"⇒ 「abort 之后 dump 不可信」
+//        这条口径**搬进 `docs/03-emulator/audio.md`**，不在 help 里（判据不再是 help 文本）。
 //   ⑧ `--profile-slow-frames <ms>`（按帧的 shim 分桶）：`--help` 里有它；**缺 `--profile` ⇒ exit 2
 //      并点名两者**（含值 0 = 显式关那一档）；负数 / 小数 / 带单位 / 垃圾 / 缺值 ⇒ exit 2 且点名；
 //      `--profile --profile-slow-frames 50` **被接受**。
@@ -95,8 +92,9 @@ std::string normalizedSeparators(const std::string& text) {
     return out;
 }
 
-// ★ ④ 用来认"那条一次性说明"的**唯一**标记：说明的开头。⛔ 不用泛词（`--sound` 会命中 help /
-//   其它文案）—— 标记必须只属于这句话，否则"恰好一次"这条断言会变成恒真。
+// ★ ④ 用来认"那条被用户否决的运行期通告"的**唯一**标记：它的开头。
+//   2026-11-27 起它是**负向**判据（`--sound` 默认档一个字都不打）⇒ 出现即红。
+//   ⛔ 不用泛词（`--sound` 会命中 help / 其它文案）—— 标记必须只属于那句话。
 const char* const kSoundNoticeMarker = "--sound 已接受";
 
 /** 本文件的公共 spawn 选项：cwd 指到临时目录；超时沿用原值 30 s（这几条都在建窗口之前返回）。 */
@@ -138,24 +136,13 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("--audio off|sdl") != std::string::npos);
         LIFT_CHECK(r.out.find("--audio off|virtual|sdl") == std::string::npos);
         LIFT_CHECK(r.out.find("--audio-dump") != std::string::npos);
-        // ★ 洞 7：`--audio-dump` 的说明必须**声明**「abort 之后 dump 不可信」（不改 abort 语义，只声明）。
-        //   红了 ⇒ 那条已知的失效方式（`std::abort()` 跳过 `end()` ⇒ WAV 长度字段不回填）又变成
-        //   "只有读过代码的人知道"。
-        LIFT_CHECK(r.out.find("abort") != std::string::npos);
-        LIFT_CHECK(r.out.find("不可信") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
+        //   ★ 2026-11-27：配方语法（`mouse_move` / `mouse_down` / `mouse_up` …）搬进
+        //     `docs/03-emulator/input-plan.md`（help 只留参数名 / 值 / 缺省）⇒ 这里只判**入口在**。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
         // ★ 诊断档 `--input-plan-trace` 也必须在 help 里（否则"配方 click 不被消费"只能靠猜；
-        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。解析期判据另在 `input-plan-read-points`
-        //   （⛔ 不靠这一条当唯一判据）。
+        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。
         LIFT_CHECK(r.out.find("--input-plan-trace") != std::string::npos);
-        // ★ S6：三条鼠标原语必须在 help 里（否则用户不知道"拖拽"能在配方里表达；
-        //   词表与 `runtime/recipe.cpp` 的 `instructionList` 是**同一组**指令）。
-        //   解析期判据另在 `input-plan-read-points` 的 `input-plan/parse-errors` /
-        //   `input-plan/mouse-primitives`（⛔ 不靠这一条当唯一判据）。
-        LIFT_CHECK(r.out.find("mouse_move") != std::string::npos);
-        LIFT_CHECK(r.out.find("mouse_down") != std::string::npos);
-        LIFT_CHECK(r.out.find("mouse_up") != std::string::npos);
         // ★ S9：`--ui-input` 的**两个合法值**与"两种写法都收"必须写在 help 里（D2；否则用户
         //   不知道"注入点击可以被叠层吞 / 怎么关掉"）。值域本身的机械判据另在
         //   `overlay/ui-input-parse`（pure），⛔ 不靠这一条当唯一判据。
@@ -164,7 +151,7 @@ int main(int argc, char** argv) {
         // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
         //   而 wipe 剖面的最大缺口正是它 —— 见 `docs/03-emulator/wipe-profile.md`）。
         LIFT_CHECK(r.out.find("--profile-slow-frames") != std::string::npos);
-        // ★ `--scale` 必须在 help 里，且说明里写明 `auto` 与 headless 的两条口径
+        // ★ `--scale` 必须在 help 里，且说明里写明 `auto` 与 headless 的不生效口径
         //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
         LIFT_CHECK(r.out.find("headless") != std::string::npos);
@@ -173,22 +160,12 @@ int main(int argc, char** argv) {
         //   判据另在 pure 用例 `window-scale/parse-filter`，⛔ 不靠这一条当唯一判据。
         LIFT_CHECK(r.out.find("--scale-filter nearest|linear") != std::string::npos);
         // ★ C2a：`--plugin` / `--plugin-param` 必须在 help 里（否则用户不知道 AOT 臂有插件面；
-        //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。装载面的判据另在 `plugin-runtime`
-        //   （pure），⛔ 不靠这一条当唯一判据）。
-        //   ★ S1：`--plugin` 收 **id 与 path 两种 spec** ⇒ help 必须写 `<id|path>`，并把
-        //   id 的两处**非递归**搜索根写出来（否则"为什么 `--plugin save` 找不到 lib/save.js"
-        //   只能靠读源码）。红了 ⇒ help 与解析器分叉。
+        //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。装载面的判据另在 `plugin-runtime`）。
+        //   ★ 2026-11-27：id 搜索根 / 保留 id `hud` / `export default` 这些细节搬进
+        //     `docs/03-emulator/plugin-runtime.md` ⇒ help 只判**入口与值形状**在。
         LIFT_CHECK(r.out.find("--plugin <id|path>") != std::string::npos);
-        LIFT_CHECK(r.out.find("scripts/plugins") != std::string::npos);
-        LIFT_CHECK(r.out.find("LIFT_PLUGIN_DIR") != std::string::npos);
-        LIFT_CHECK(r.out.find("不查 `lib/`") != std::string::npos);
         LIFT_CHECK(r.out.find("--plugin-param k=v") != std::string::npos);
-        LIFT_CHECK(r.out.find("export default") != std::string::npos);
-        // ★ S2：`hud` 是**保留 id**（`--overlay` = `--plugin hud` 预设）⇒ help 必须写出来
-        //   （否则"为什么用户插件根里的 hud.js 会让启动 exit 2"只能靠读源码）。
-        LIFT_CHECK(r.out.find("保留 id `hud`") != std::string::npos);
-        LIFT_CHECK(r.out.find("--plugin hud") != std::string::npos);
-        LIFT_CHECK(r.out.find("scripts/ui/hud.js") != std::string::npos);
+        LIFT_CHECK(r.out.find("--plugin hud") != std::string::npos);  // `--overlay` 的组合约束
         // ★ S3：`--ui` 已从 CLI 面删除 ⇒ help **不许**再列它（`--ui-input` 是另一个 flag，仍在）。
         //   删掉这条断言 ⇒ help 与解析器分叉（用户照着 help 写的 `--ui` 会变成未知参数）。
         LIFT_CHECK(r.out.find("--ui <path>") == std::string::npos);
@@ -294,8 +271,10 @@ int main(int argc, char** argv) {
     //   ★ 这条在 `--present` 校验之前完成解析（与 `--plugin` 同一条），所以纯 CLI 可判。
     g_current_case = "overlay-headless-rejected";
     {
+        // ★ `--plugin id=hud ⇒ …` 路径回显只在 `--log-level info`（2026-11-27）⇒ 显式开 info
+        //   才能判"预设真的解析了保留 id"。⛔ 判据没放宽（仍判 `--plugin id=hud` 原文）。
         const ChildResult r =
-            runChild(exe, {"--overlay", "--present", "headless"}, childOptions(root));
+            runChild(exe, {"--overlay", "--present", "headless", "--log-level", "info"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -620,26 +599,25 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("--cursor-wrap") != std::string::npos);
     }
 
-    // ---- ④ `--sound`：**接受** + 一条一次性说明（与代码一致：真的进静音门），⛔ 不是 `未知参数` ----
+    // ---- ④ `--sound`：**接受**（⛔ 不是 `未知参数`），且默认档**一个字都不打** ----
+    //      ★ 2026-11-27 用户裁决：`--sound 已接受 …` 那条运行期通告属于"解释性文字"（= 说明书），
+    //        ⛔ 不进默认输出 ⇒ 原 `sound-accepted-with-once-notice` 的"stderr 恰好出现一次
+    //        `--sound 已接受`"**子断言被删除**（那条合同本身被否决）。口语见 `--help`（kAotSoundHelp）。
+    //      ★ `--sound` 的硬事实由 `aot-audio-wiring` 读收口摘要的 `audio     : … muted=0` 判
+    //        （含 `muted=1` 对照组），⛔ 不拿"自己打的那句文案"当证据。
     //      ★ 不判退出码：`--sound` 之后本臂仍会因"没有执行源 / 没有 GPU"而 exit 2 —— 那与
-    //        `--sound` 无关，判据是"它被接受 + 说了实话"，在 GPU bring-up 之前就已成立。
-    //      ★ **洞 6**：这条用例**不再**拿"说明文本里含 `muted=0`"当证据（自证式断言：接线丢了它照绿）。
-    //        证据 = `aot-audio-wiring` 读收口摘要的 `audio     : … muted=0`（含 `muted=1` 对照组）。
-    //        这里保留的文本判据只有一条**反向**的：⛔ 不许把接线前的谎话写回来。
-    g_current_case = "sound-accepted-with-once-notice";
+    //        `--sound` 无关，判据是"它被接受 + 不出现那句通告"。
+    g_current_case = "sound-accepted-silently";
     {
         const ChildResult r = runChild(exe, {"--sound"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-        LIFT_CHECK(countOccurrences(r.err, kSoundNoticeMarker) == 1u);
+        // ⛔ 被用户否决的那句通告**不许回来**（负向判据，替代原来的"恰好一次"）。
+        LIFT_CHECK(r.err.find(kSoundNoticeMarker) == std::string::npos);
         // 反向判据：⛔ 不许再写回"没有音频管线 / 不会有声音"（接线前的形状）。
         LIFT_CHECK(r.err.find("没有音频管线") == std::string::npos);
         LIFT_CHECK(r.err.find("不会有声音") == std::string::npos);
-        // ③ 跟踪单 id 必须**是真的**（`REQ-` + 26 位 ULID），⛔ 不许把占位符发出去。
-        //    ★ 按**形态**判、不锚具体 id：换单号不该让守卫红，但留着 `TODO(` 必须红。
-        LIFT_CHECK(r.err.find("REQ-") != std::string::npos);
-        LIFT_CHECK(r.err.find("TODO(") == std::string::npos);
     }
 
     // ---- ⑥ S1：`--audio sdl` **被接受**（旧文案"本臂只有 off"必须消失）----
