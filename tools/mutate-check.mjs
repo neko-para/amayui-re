@@ -4589,6 +4589,72 @@ const MUTATIONS = [
       'tick 回调里排的 continuation 落到下一个入口才跑；`plugin/drain-per-entry` 红',
   },
 
+  // ── S2a 复审 F9：`call()` 的 drain（`plugin/drain-per-entry` 的 ① 方向）──────────────
+  //   ★ 之前只有 `runHookEntry` 的 drain 有常驻变异；`call()` 的 drain 只有报告里的一次性
+  //     "修前红" ⇒ "删掉它会不会红"没有自检。这里补上（同一 buildTarget）。
+  //   ★ 判据 = `plugin/drain-per-entry` 的 ①：start 里排的 continuation 必须在**start 的入口末尾**
+  //     跑完 ⇒ 下一个读点的 onTrigger 读到的 `phase` 必须是 2；没 drain ⇒ 读到 1
+  //     （`runHookEntry` / 泵都会在**更晚**才跑它，跨入口看不到）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        if (js_called) {\n' +
+      '            std::string drain_err;\n' +
+      '            if (!drainPendingJobs(impl, &drain_err) && ok) {\n' +
+      '                ok = false;\n' +
+      '                local_err = drain_err.empty() ? (impl.origin + ": microtask drain 失败") : drain_err;\n' +
+      '            }\n' +
+      '            // ★ 终点在 drain **之后**量 ⇒ `js_ns` / `js_cpu_ns` = **入口段**（JS 本体 + microtask），\n',
+    to:
+      '        if (js_called) {\n' +
+      '            std::string drain_err;\n' +
+      '            (void)drain_err;  // 变异：call() 不 drain\n' +
+      '            // ★ 终点在 drain **之后**量 ⇒ `js_ns` / `js_cpu_ns` = **入口段**（JS 本体 + microtask），\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '从 `call()`（start / onTrigger 的入口）删掉 drain ⇒ start 里排的 continuation 落到下一个入口' +
+      '才跑；`plugin/drain-per-entry` 的 ①（phase 必须是 2）红',
+  },
+
+  // ── S2b：timeout 泵必须真的检查 once 的 deadline ────────────────────────────────────────
+  //   ★ 代表这一类错：`pump()` 里把到期判定短路（`now >= deadline` 永远 false）⇒ **没有独立 timer**
+  //     的承诺变成"永远不会超时"：插件 `await ctx.once(..., {timeoutMs})` 会永远挂着，Run 不收口、
+  //     `--time-limit` 之前没有任何症状。
+  //   ★ 红点 = `plugin/once-timeout`（不 fail、hook 表非空）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (now_ns >= kv.second.deadline_ns) expired.push_back(kv.first);\n',
+    to: '        (void)now_ns;  // 变异：泵不检查 once 的 deadline\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '泵里不检查 once 的 deadline（到期集合永远空）⇒ `plugin/once-timeout` 不 fail、临时 hook 不撤；' +
+      '`await ctx.once(..., timeoutMs)` 变成永不结束的等待',
+  },
+
+  // ── S2b：Run 存活必须判 `hasPendingWork` ────────────────────────────────────────────────
+  //   ★ 代表这一类错：`runClosed()` 退回"`runner.done()` 就收口" ⇒ `start` 返回 null 但 task 还在
+  //     `await ctx.once(...)` 的 Run 会被当场收口（releaseRunHooks 撤掉 once 的临时 hook）⇒
+  //     task 永远不 resume、promise 永挂，且**没有报错**。
+  //   ★ 红点 = `plugin/task-keeps-run`（第一拍就 hook 表空 / readout 已经是 done）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
+    from: '    const bool pending = script_ != nullptr && script_->hasPendingWork();\n',
+    to: '    const bool pending = false;  // 变异：runClosed 不判 hasPendingWork\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`runClosed()` 不判 `hasPendingWork`（runner.done 就收口）⇒ `start` 返回 null + task 等 once 的' +
+      ' Run 被当场收口；`plugin/task-keeps-run` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

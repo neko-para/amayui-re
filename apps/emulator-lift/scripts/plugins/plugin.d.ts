@@ -506,8 +506,9 @@ export interface ConfigApi {
  *
  * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`；
  *   2026-11-26 `config` 加回 `RenderCtx`）：
- *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
- *     `profile` / `state` / `params` / `appdata` / `config` / `log` / `fail` / `finish` / `quit` / `now`；
+ *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `hook` / `once` / `task` /
+ *     `ui`（**只写**宿主本地状态）/ `profile` / `state` / `params` / `appdata` / `config` /
+ *     `log` / `fail` / `finish` / `quit` / `now`；
  *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
  *     `run` / `dispatch`（C5）——`ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；
  *     也不安装 `sample` / `screenshot`（永远不做）。
@@ -524,6 +525,26 @@ export interface RunCtx<State = Record<string, unknown>> {
      * ★ 只 `RunCtx` 有（`RenderCtx` 没有：render 不做 guest 写）。
      */
     readonly hook: HookApi;
+    /** **异步等待**一个脚本指令点（S2b）：命中 ⇒ resolve 只读 `InstrTick`（与 `onTick` 同形）。
+     *  · `where` 本切片只收 `{script,pos}`（`{script,lo,hi}` / `{opcode}` 是 S2c）；
+     *  · `opts.timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：到点 = **失败截止**
+     *    （先 reject，让 `catch` 在泵里 drain 到；随后宿主记 timeout 并 **fail Run**）。
+     *    ⛔ 不提供"永不结束的等待"；
+     *  · 每次调用装一条**临时** hook（owner = 本 Run）；命中 / 超时 / Run 收口自动撤；
+     *  · 同一个 Run 可以有多个 `once`（与 `ctx.hook.at` 走同一张 owner 表）。
+     *  ★ 它让 Run **保持存活**（与 task 一样）：等待期间的 Run 不收口。 */
+    once(
+        where: { readonly script: string; readonly pos: number },
+        opts: { readonly timeoutMs: number },
+    ): Promise<InstrTick>;
+    /** **协程**（S2b）：`fn(ctx)` 必须**同步**返回 Promise（否则 TypeError）；返回的 promise 进本
+     *  Run 的 task 账。每个 host→JS 入口末尾（drain 之后）检查 settle：
+     *  fulfilled ⇒ 移除；rejected ⇒ **fail Run**（reason = 拒绝原因）；pending ⇒ 保留。
+     *  · `fn` 收到**当前 RunCtx**（同一个 `now` / `state`）；
+     *  · 只用于 `start` / `onTrigger`（tick / pump / render 里调 ⇒ TypeError：那些入口只读）；
+     *  · 不需要 `await`：登记即返回 `undefined`；task 组合用 Promise 自身的 `await` / `Promise.all`。
+     *  ★ 它让 Run **保持存活**：所有 task settled 之前 Run 不收口（`return []` 也不会）。 */
+    task(fn: (ctx: RunCtx<State>) => Promise<unknown>): void;
     readonly ui: UiApi;
     /** ⚠ **C5**（C2a 里是 `undefined`）。Run 的 status/abort/events/dispatch。 */
     readonly run: RunApi;
@@ -580,6 +601,17 @@ export interface InstrHookStats {
     /** `capture({ptrs})` 的**指针指向的 dword**（语义值；不可读 = 0）。 */
     readonly ptrTargets: number[];
 }
+/** S2a/S2b 的**只读** Tick（S2c 才扩成带 `edit` / `input` / `patch` 的完整 `Tick`）。
+ *  · `opcode` 读不到 ⇒ **缺键**（⛔ 不是 0：0 是真实 opcode）；
+ *  · `log(level, message, data?)` 是宿主的观测出口（一行一条、有界、连续去重；`data` 不进日志行）。
+ *  ★ 它只能来自 `handle.onTick(fn)` 的回调参数或 `ctx.once(...)` 的 resolve；⛔ 不要自己造。 */
+export interface InstrTick {
+    readonly id: number;
+    readonly script: string;
+    readonly pos: number;
+    readonly opcode?: number;
+    log(level: string, message: string, data?: unknown): void;
+}
 export interface InstrHookHandle {
     readonly id: number;
     /** ③ 改：装 / 换覆盖。`opts.maxHits` 只在前 N 次命中写（0/缺省 = 不限）。
@@ -590,6 +622,12 @@ export interface InstrHookHandle {
     stats(): InstrHookStats;
     /** 撤这条 hook（未还原的覆盖会先写回）。 */
     clear(): void;
+    /** ① 触发（S2a）：指令点命中 → 只读回调（每个句柄**恰好一个**；`null` = 撤；重复 = 替换）。
+     *  ★ 回调入口 `inCallback()` 恒 false ⇒ `edit` / `input` / `trigger` / `fail` / `finish` /
+     *    `quit` / `profile.*` / `appdata.stat` / `hook.*` 全部 TypeError；`tick.log` 可用。
+     *  ★ 它让 Run **保持存活**（sync 订阅）：不撤它、也没有 task/once 时，`return []` 之后 Run
+     *    不会收口（`ctx.hook.at` 本身是 v1 观察，**不算**）。 */
+    onTick(fn: ((tick: InstrTick) => void) | null): this;
 }
 /** 脚本指令位置钩子（只 `RunCtx`；`RenderCtx` 没有）。 */
 export interface HookApi {

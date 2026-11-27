@@ -116,6 +116,11 @@ public:
     //   ⛔ 这不是安全边界、guest 也不会坏（写面另有 `*Wired()` 把关），而是"成员表不是画出来的门面"。
     virtual bool inCallback() const = 0;
 
+    // ★ S2b：本 Run 是否**已经**失败。泵 / task settle 用它做"不重复 fail"——`fail()` 会覆盖
+    //   `reason`，后到的那一条会把真正的失败原因（例如 `once timeout`）换成无关文案。
+    //   默认 false（测试替身 / 未来的其它宿主不必被迫实现）。
+    virtual bool failed() const { return false; }
+
     // ---- Edit（立即）----
     // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
     virtual bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
@@ -219,12 +224,16 @@ public:
 // =====================================================================================
 // `PluginScript`：一个**已装载**的插件（ES module 的 default 导出）
 //
-// ★ 三个可选成员：`render` / `start` / `onTrigger`（`start` 与 `onTrigger` 成对；`render` 可单独
-//   存在）。`render` 的面 = 基类 `UiScript`（C2b 起多继承）：`render(builder, readings, err)` 每次
+// ★ 三个可选成员：`render` / `start` / `onTrigger`（`render` 可单独存在；`start` 可单独存在 ——
+//   S2b 的 v2 兼容层第一处放宽：`ctx.task` / `ctx.once` 驱动的插件不需要 `onTrigger`；
+//   `onTrigger` **不能**单独存在（没有 `start` 就永远没人调它）。
+//   `render` 的面 = 基类 `UiScript`（C2b 起多继承）：`render(builder, readings, err)` 每次
 //   render 调 JS `render(RenderCtx)`；没有 `render` 的插件返回 true + 空 list。
 // ★ `start` / `onTrigger` 必须**同步**返回 `Trigger | Trigger[] | null`；返回 Promise / async
 //   ⇒ 明确错误（合同 §4.6 805）。返回值翻译成 `std::vector<Trigger>`：
 //   空 = done（`null` / `[]` / `undefined`）；重复 `name` 由 `TriggerRunner::install` 判 fail。
+//   ★ S2b 的 `start` 单独存在时，返回 `null` 即可：Run 由 task/once（`hasPendingWork`）驱动，
+//   收口发生在所有异步工作 settle 之后。
 // =====================================================================================
 class PluginScript : public UiScript {
 public:
@@ -233,7 +242,7 @@ public:
     ~PluginScript() override = default;
 
     virtual bool hasRender() const = 0;
-    // 有 `start` + `onTrigger`（两者必须成对；`render` 可单独存在）。
+    // 有 `start`（其 `onTrigger` 可缺省；`render` 可单独存在）。
     virtual bool hasRun() const = 0;
 
     // 调 JS `start(ctx)`。false ⇒ `*err` 非空（Run fail，且 `*out` 无意义）。
@@ -246,6 +255,23 @@ public:
     // 上一次**回调**是否被预算（deadline / op_limit）打断 —— 是 false 的 `start`/`onTrigger` 的原因之一。
     // （render 的预算打断由基类的 `overran()` 报；同一个标志位。）
     bool overran() const override = 0;
+
+    // ★ S2b：Run 存活 = **没有待推的异步工作**。三个来源（语言无关的"有没有"）：
+    //   ① `ctx.task` 登记且未 settle 的协程；② 未命中 / 未超时的 `ctx.once`；
+    //   ③ `handle.onTick` 的同步订阅（S2a 的 `hook_handlers`）。
+    //   ⛔ 普通 `ctx.hook.at` **不算**：它是 v1 观察（`hits` 只增），把它当"Run 还活着"会让
+    //   `return []` 永远收不了口（`plugin/hook-release-on-done` 会在当天红）。
+    virtual bool hasPendingWork() const = 0;
+
+    // ★ S2b：**非 tick 入口的 async 泵**（没有独立 timer；唯一实现 = `script_quickjs.cpp` 的 QJS TU）。
+    // 语义：① `ctx.once` 的 deadline 到期 ⇒ reject（先不 fail）；② 用同一 CPU 预算窗 drain 到静止；
+    // ③ drain 之后检查 task settle；④ 若有 timeout ⇒ **现在** fail Run（让 `catch` 先有机会 log）。
+    // 调用点只有两个（⛔ 不要新增第三个泵概念）：
+    //   · `PluginHost::onReadPoint`：`syncRunnerFailure()` 之后、`runClosed()` 之前；
+    //   · `PluginScript::render` 的开头（render 边界；`call_host` 用 persistent 那份）。
+    // ★ 泵入口的 `inCallback()` 保持 false ⇒ 泵里的 continuation 只有 `log` / `read` 这类只读口；
+    //   写类（`edit` / `input` / `trigger` / `fail` / …）仍是 TypeError（S2c 才给 Tick 写能力）。
+    virtual void pump(PluginCallHost& host, const lift::plugin::Budget& budget) = 0;
 
     void shutdown() override = 0;
 
@@ -280,7 +306,8 @@ struct PluginLoadOptions {
 // 装载一个插件（实现 = `ui/script_quickjs.cpp` 的唯一 QJS TU）。
 //   · 失败 ⇒ 返回 nullptr 且 `*err` 非空（形状 `<origin>: <message>\n<stack>`）；
 //   · **只读 ES module 的 default 导出**（⛔ 不读 `globalThis` / 命名导出）；
-//   · `render`/`start`/`onTrigger` 都可选，**至少一个**；有 `start` 就必须有 `onTrigger`（反之亦然）；
+//   · `render`/`start`/`onTrigger` 都可选，**至少一个**；`onTrigger` 不能单独存在（没有 `start`
+//     就永远没人调它）；`start` 可单独存在（S2b 的 v2 兼容层：`ctx.task` / `ctx.once` 驱动）；
 //     类型不是函数 ⇒ 错误（带 `file:line`）。
 //   · `render` 的 JS 契约 = `render(RenderCtx)`（C2b）；装载后由 `UiScript::render` 驱动。
 //   · `setCallHost` 不在装载参数里：宿主在 `init` 之后自己设（`PluginHost::init` 就会）。

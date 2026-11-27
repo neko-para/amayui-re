@@ -70,6 +70,10 @@ const plugin = {
             handle.onTick((tick) => {
                 tick.log("info", "tick-after-run");
             });
+            // ★ S2b：`handle.onTick` 是 **sync 订阅** ⇒ 算"Run 还活着"（`hasPendingWork`）。
+            //   本用例判的是"Run 收口时 hook 表被释放"，不是"订阅能让 Run 一直活着" ⇒ 先撤订阅
+            //   再 `return []`（否则 runner.done 之后 Run 永远不收口，本用例会挂在 hook 表非空）。
+            handle.onTick(null);
         } else {
             throw new Error("instr-tick: unknown mode: " + String(mode));
         }

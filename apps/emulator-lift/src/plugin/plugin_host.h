@@ -237,7 +237,7 @@ public:
     // ---- 读数 / 收口（readout 与用例的唯一入口；⛔ 不是性能判据）----
     bool begun() const { return begun_; }
     bool done() const { return runner_.done(); }
-    bool failed() const { return failed_; }
+    bool failed() const override { return failed_; }
     const std::string& failName() const { return fail_name_; }
     const std::string& failReason() const { return fail_reason_; }
     bool finished() const { return finished_; }

@@ -422,10 +422,12 @@ test('⑦ `instr_hook` 的**代码**里 0 命中 `quickjs`（反向 sink 必须�
   assert.equal(forbiddenHits('// 这里不 include "quickjs.h"\n', ['quickjs']).length, 0, '注释里的 `quickjs` 不许命中');
 });
 
-test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 6）', () => {
-  // ★ S2a：host→JS 的入口清单 = `renderFrame()` / `call()` / `runHookEntry()`（classic `render()`
-  //   是第四条，见下面 ④ 的说明）。**每个入口都必须 drain**：漏一次 ⇒ continuation 落到
-  //   下一个入口才跑（静默语义漂，见 `plugin/drain-per-entry` 的两个方向）。
+test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 9）', () => {
+  // ★ host→JS 的入口清单 = `renderFrame()` / `call()` / `runHookEntry()` / 经典 `render()`。
+  //   （S2a 复审 F6：注释原来写"经典 render 见下面 ④"，而 ④ 是 `src/plugin/**` 的 include 禁令，
+  //   与 render 无关 ⇒ 经典 render 的 drain 当时**没有守卫**，删掉是静默回归。）
+  //   **每个入口都必须 drain**：漏一次 ⇒ continuation 落到下一个入口才跑（静默语义漂，见
+  //   `plugin/drain-per-entry` 的两个方向）。
   // ★ 诚实边界（与 `input-plan-shape` 同口径）：这是**源码谓词** —— 把 `JS_Call` 藏进 helper 能绕过。
   //   补它的是行为用例（`drain-per-entry` 证明"当前入口跑完"）；谓词只负责"下一个入口忘了写
   //   drain / 新入口没登记时**当场**红"。
@@ -449,15 +451,30 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     }
     return null;
   };
+  // ★ 两个同名 `bool render(...)`（经典 `QuickJsScript` 与插件 `QuickJsPluginScript` 的转发）：
+  //   `findIndex` 取**第一个** = 经典那份（在 `class QuickJsPluginScript` 之前）；下面用
+  //   `pluginClassAt` 把这条前提写成断言（否则将来挪动顺序会静默守到一个没有 JS 的转发函数）。
+  const pluginClassAt = lines.findIndex((line) => line.includes('class QuickJsPluginScript'));
+  assert.ok(pluginClassAt > 0, '找不到 `class QuickJsPluginScript`（本守卫会静默变瞎）');
   const entries = [
     { name: 'renderFrame', re: /^\s*bool renderFrame\(UiBuilder& builder,.*\{\s*$/ },
     { name: 'call', re: /^\s*bool call\(PluginCallHost& host,/ },
     { name: 'runHookEntry', re: /^void runHookEntry\(Impl& impl, std::uint32_t handle,.*\{\s*$/ },
+    {
+      name: 'classic-render',
+      re: /^\s*bool render\(UiBuilder& builder, const UiFrameReadings& readings, std::string\* err\) override \{\s*$/,
+    },
   ];
   const missing = [];
   for (const entry of entries) {
     const start = lines.findIndex((line) => entry.re.test(line));
     assert.ok(start >= 0, `找不到 ${entry.name} 的函数定义（改名 / 搬走 ⇒ 本守卫会静默变瞎）`);
+    if (entry.name === 'classic-render') {
+      assert.ok(
+        start < pluginClassAt,
+        `⑧ 选中的 render 不是经典 \`QuickJsScript::render\`（行 ${start + 1}，插件类在行 ${pluginClassAt + 1}）`,
+      );
+    }
     const range = blockRange(start);
     assert.ok(range !== null, `${entry.name} 的花括号没配对上`);
     const body = lines.slice(range[0], range[1] + 1).join('\n');
@@ -471,8 +488,10 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
       missing.join('\n  '),
   );
 
-  // ★ 全文件 `JS_Call(` 白名单：**6 处** = 4 个入口 + 2 个宿主值构造
-  //   （`Object.assign` 造 ctx / 造错误对象）。新增一处必须来这里登记（否则"入口"会悄悄多一个）。
+  // ★ 全文件 `JS_Call(` 白名单：**9 处** = 4 个入口 + 2 个宿主值构造
+  //   （`Object.assign` 造 ctx / 造错误对象）+ 3 个 S2b 异步面
+  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject）。
+  //   新增一处必须来这里登记（否则"入口"会悄悄多一个）。
   const calls = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].includes('JS_Call(')) calls.push({ line: i + 1, text: lines[i].trim() });
@@ -484,11 +503,24 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'runHookEntry';
     if (c.text.includes('ctor.raw()')) return 'error-object';
     if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
+    if (c.text.includes('argv[0], JS_UNDEFINED, 1, args')) return 'task-invoke';
+    if (c.text.includes('entry->second.resolve.raw(), JS_UNDEFINED, 1, args')) return 'once-resolve';
+    if (c.text.includes('reject, JS_UNDEFINED, 1, args')) return 'once-reject';
     return `unregistered@${c.line}: ${c.text}`;
   });
   assert.deepEqual(
     signatures.sort(),
-    ['call', 'classic-render', 'error-object', 'object-assign', 'plugin-renderFrame', 'runHookEntry'],
+    [
+      'call',
+      'classic-render',
+      'error-object',
+      'object-assign',
+      'once-reject',
+      'once-resolve',
+      'plugin-renderFrame',
+      'runHookEntry',
+      'task-invoke',
+    ],
     '`JS_Call(` 的出现点与白名单不符（新增入口 / 宿主值构造必须来登记）：\n  ' +
       calls.map((c, i) => `${c.line}: ${signatures[i]}  ← ${c.text}`).join('\n  '),
   );
