@@ -12,6 +12,7 @@
 #pragma once
 
 #include "runtime/engine_read.h"
+#include "runtime/instr_hook.h"  // InstrLocalView / InstrLocalKind（Tick.local 的读数形状）
 
 namespace lift {
 
@@ -26,6 +27,15 @@ public:
     explicit GuestEngineRead(const lift::GuestMemory& mem) : mem_(mem) {}
 
     bool globalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out, GlobalError* err) override;
+
+    /**
+     * `Tick.local.*` 的**唯一**读实现（按命中现场的 local 视图读 guest；语义值 = DEC）。
+     * ★ 越界 / 未提交 / 指针 0 / **没有 key** ⇒ false（JS 侧 `undefined`；⛔ 不编 0）。
+     * ★ `ptr` = 槽里原样（地址不解码）；`int` / `ptrDword` = `decodeInt(raw, key)`。
+     * 三类读都是 4 字节（`script_globals.h` 的 `kScriptGlobalSlotBytes` 同一口径）。
+     */
+    bool readLocal(const InstrLocalView& view, InstrLocalKind kind, std::uint32_t index,
+                   std::uint32_t* out) const;
 
 private:
     const lift::GuestMemory& mem_;  // 非拥有：生命周期 = 宿主（`AotHost::mem()` / 测试夹具）

@@ -108,11 +108,19 @@ const plugin = {
             return null;
         }
         if (mode === "pump-budget") {
+            // ★ S2c：once **命中**的 continuation 现在在 tick 入口自己的 drain 里跑（每个入口都
+            //   drain 到静止）⇒ 要让"忙等"落在**泵**里，必须用 **timeout 的 catch** 把它推后
+            //   （泵先 reject 到期的一 once，再在同一预算窗 drain 出 catch 的忙等）。
             ctx.task(async (tctx) => {
-                await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
-                tctx.log("info", "pump-budget: resumed (about to spin)");
-                while (true) {
-                    await Promise.resolve();
+                try {
+                    await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 1 });
+                    tctx.log("info", "pump-budget: unexpected resolve");
+                } catch (e) {
+                    tctx.log("info", "pump-budget: caught, about to spin: " +
+                        String(e && e.message ? e.message : e));
+                    while (true) {
+                        await Promise.resolve();
+                    }
                 }
             });
             ctx.log("info", "pump-budget: armed");

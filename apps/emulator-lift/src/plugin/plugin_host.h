@@ -162,6 +162,9 @@ public:
                        const char** code) override;
     // ---- 脚本指令位置钩子（`ctx.hook`；唯一实现 = `runtime/instr_hook.cpp`）----
     std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) override;
+    // ★ S2c：`ctx.at(where, handler)` 的注册口（owner = `run_serial_`，与 `instrHookAdd` 同一份）。
+    std::uint32_t instrHookAddWhere(const lift::InstrHookWhere& where, lift::InstrHookKind kind,
+                                    const char** err) override;
     bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind, std::uint32_t index,
                            std::uint32_t value, std::uint32_t max_hits, const char** err) override;
     bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
@@ -177,6 +180,9 @@ public:
     ui::PluginInputState inputStatus(std::uint64_t id) override;
     bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                     const char** code) override;
+    // ★ S2c：`Tick.local.*` 的转发（唯一实现 = `GuestEngineRead::readLocal`；本头只前向声明它）。
+    bool readLocal(const lift::InstrLocalView& view, lift::InstrLocalKind kind, std::uint32_t index,
+                   std::uint32_t* out) override;
     // ---- AppData（同步只读宿主 I/O；只 RunCtx）----
     bool appDataAvailable() const override { return appdata_.available(); }
     std::string appDataPath() const override { return appdata_.path(); }

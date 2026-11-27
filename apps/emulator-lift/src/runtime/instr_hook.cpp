@@ -39,21 +39,36 @@ struct Frame {
     std::uint32_t id = 0;
     std::uint32_t pos = 0;
     std::uint32_t pc = 0;  // ★ S2a：命中分发要在 PC 上读 opcode（`InstrHit::opcode`）
+    // ★ S2c：opcode 的读闸门（`{opcode}` 订阅存在 / 命中后要 materialize）与读到的值。
+    std::uint32_t opcode = 0;
+    bool opcode_ok = false;
     std::uint32_t int_base = 0;
     std::uint32_t int_count = 0;
     std::uint32_t ptr_base = 0;
     std::uint32_t ptr_count = 0;
     std::uint32_t key = 0;
     bool has_key = false;
+    // ★ S2c：脚本名缓存 —— 一次派发**最多**解析一次（`MarkerSampler::sampleIdentity` + `resolveName`）。
+    //   `{script}` / 未缓存的 `script_id` 匹配都靠它；`InstrHit::script`（= Tick.now.script）也取它。
+    bool name_tried = false;
+    bool name_ok = false;
+    std::string name;
 };
 
 struct Entry {
     std::uint32_t id = 0;
     // ★ S0：归属（`PluginHost` 传本 Run 的序号）⇒ Run 收口能只撤自己那批（见 `instrHookReleaseOwner`）。
     std::uint64_t owner = 0;
+    // ★ S2c：用途 + 形状（去重 / 链 / matching 各读自己那几位；见头文件的三种 kind）。
+    //   ⛔ 不能叫 `kind`：下面还有 **patch** 的 `InstrPatchKind kind`（v1 语义，逐字保留）。
+    InstrHookKind hook_kind = InstrHookKind::V1At;
+    InstrHookForm form = InstrHookForm::Pos;
     std::string script;
     std::uint32_t script_id = 0;  // 0 = 还没解析（首次命中时按名字解析并缓存）
-    std::uint32_t pos = 0;
+    std::uint32_t pos = 0;        // Pos（其余 form 保持 0 —— form 决定哪个字段有意义）
+    std::uint32_t lo = 0;         // Range
+    std::uint32_t hi = 0;         // Range
+    std::uint32_t opcode = 0;     // Opcode
     // ③ 改（缺省关：`at` 只装触发，⛔ 不写）
     bool patch = false;
     InstrPatchKind kind = InstrPatchKind::PtrDword;
@@ -94,6 +109,10 @@ struct State {
     // ★ S0（缺陷 3）：本构建注入的 `lift_instr_hook` 站点数。缺省 1 = "视作可用"
     //   （纯 runtime / 测试夹具没有 AOT 形状；只有 AOT 的初始化路径会把它改成真实值）。
     std::uint32_t injection_sites = 1;
+    // ★ S2c：表里**有没有** `{opcode}` 订阅（probe 的 opcode 读闸门）。
+    //   `recomputeGates()` 在 add / remove / releaseOwner / clear 之后维护；没有 opcode 订阅时
+    //   probe 不必每拍多付一次 `rd32(pc)`（`Want sink` 那一次仍然只在**命中后**才付）。
+    bool has_opcode_entry = false;
 };
 
 State& state() {
@@ -181,6 +200,69 @@ bool resolveScriptName(X86& cpu, std::uint32_t id, std::string* out) {
     if (sample.name_degraded || sample.name.empty()) return false;
     *out = sample.name;
     return true;
+}
+
+/**
+ * ★ S2c：`Frame` 的名字缓存（一次派发**最多**解析一次）。
+ * 为什么需要：`{script}` / `{opcode}` 形态（以及首次命中前的 `{script,pos}`）都要按名字判定；
+ * 而 `sampleIdentity` + `resolveName` 是十几次 guest 读 —— 多条订阅同拍命中时不能各付一次。
+ * 命中缓存（`script_id`）之后只比 id，连这一次都不付。
+ */
+bool frameName(X86& cpu, Frame* f) {
+    if (f->name_tried) return f->name_ok;
+    f->name_tried = true;
+    std::string out;
+    f->name_ok = resolveScriptName(cpu, f->id, &out);
+    if (f->name_ok) f->name = std::move(out);
+    return f->name_ok;
+}
+
+/**
+ * ★ S2c：一条 Entry 是否命中这一拍。`f` **非 const**：名字缓存要写回 `Frame`。
+ * ① form 的**零读**判据先走；② `{opcode}` 才判 opcode（读不到 ⇒ 不命中，⛔ 不编 0）；
+ * ③ 身份：注册时按名字解析一次并缓存 `script_id`，之后只比 id（缓存写回留回 probe 的循环体 ——
+ *   `e` 是 const，这里只判定）。
+ * ★ 四种 form 在 S2c-1 一次写全（纯判定、零额外成本，C++ 用例直接驱动）；**JS 面只放开 Pos**。
+ */
+bool matchEntry(X86& cpu, Frame& f, const Entry& e) {
+    switch (e.form) {
+        case InstrHookForm::Pos:
+            if (f.pos != e.pos) return false;
+            break;
+        case InstrHookForm::Range:
+            if (f.pos < e.lo || f.pos >= e.hi) return false;
+            break;
+        case InstrHookForm::Script:
+            break;  // 没有 pos 判据（整本脚本每一拍都命中）
+        case InstrHookForm::Opcode:
+            break;  // 交给 ②
+    }
+    if (e.form == InstrHookForm::Opcode) {
+        if (!f.opcode_ok) return false;
+        if (f.opcode != e.opcode) return false;
+    }
+    if (!e.script.empty()) {
+        if (e.script_id == 0) {
+            if (!frameName(cpu, &f)) return false;
+            if (f.name != e.script) return false;
+        } else if (e.script_id != f.id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** 维护 `State::has_opcode_entry`（O(n)，n = 订阅数个位数）。add / remove / releaseOwner / clear 之后调。 */
+void recomputeGates() {
+    State& st = state();
+    bool opcode = false;
+    for (const Entry& e : st.entries) {
+        if (e.form == InstrHookForm::Opcode) {
+            opcode = true;
+            break;
+        }
+    }
+    st.has_opcode_entry = opcode;
 }
 
 bool targetAddress(X86& cpu, const Frame& f, const Entry& e, std::uint32_t* addr) {
@@ -289,24 +371,65 @@ void instrHookRemoveSink(void* user) {
 bool instrHookHasSink() { return !state().sinks.empty(); }
 
 std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err) {
+    // ★ S2c：v1 的 `at(script,pos)` = `instrHookAddEx` 的**薄包装**（Pos + V1At）。判据逐字不变：
+    //   v1 的 `duplicate` 只对 `kind == V1At` 生效（见 `instrHookAddEx`）⇒ 别的 shape 不受影响。
+    InstrHookWhere where;
+    where.form = InstrHookForm::Pos;
+    where.script = script;
+    where.pos = pos;
+    return instrHookAddEx(owner, where, InstrHookKind::V1At, err);
+}
+
+std::uint32_t instrHookAddEx(std::uint64_t owner, const InstrHookWhere& where, InstrHookKind kind,
+                             const char** err) {
     auto fail = [err](const char* why) {
         if (err != nullptr) *err = why;
         return 0u;
     };
     // ★ S0（缺陷 3）：注入面不存在 ⇒ **当场拒绝**（⛔ 不返回一个永远 hits=0 的句柄）。
     if (state().injection_sites == 0) return fail("no_injection");
-    if (script.empty()) return fail("script_empty");
-    if (pos == 0) return fail("pos_zero");
-    for (const Entry& e : state().entries) {
-        if (e.pos == pos && e.script == script) return fail("duplicate");
+    // 形状校验：`form` 决定哪几个字段有意义（⛔ 不做"模糊推断"）。
+    switch (where.form) {
+        case InstrHookForm::Pos:
+            if (where.script.empty()) return fail("script_empty");
+            if (where.pos == 0) return fail("pos_zero");
+            break;
+        case InstrHookForm::Range:
+            if (where.script.empty()) return fail("script_empty");
+            if (where.lo >= where.hi) return fail("range_empty");
+            break;
+        case InstrHookForm::Script:
+            // ★ 整本脚本：`script` 空 = "所有脚本的每一拍"，那是**没有过滤**的全局订阅 —— 不是
+            //   一个可用的形状（S2c 的 JS 面也不开放）⇒ 与 `{}` 同一条 `bad_where`。
+            if (where.script.empty()) return fail("bad_where");
+            break;
+        case InstrHookForm::Opcode:
+            break;  // opcode 可带可选 script（`{script, opcode}`）
+        default:
+            return fail("bad_where");
+    }
+    // ★ 去重**只对 v1**：`(script,pos)` 一条是已发布语义（合同 §4.5）；v2 的 Sub / Once 是
+    //   新面，同点多条正是它的用法（多 handler / 链）。
+    if (kind == InstrHookKind::V1At) {
+        for (const Entry& e : state().entries) {
+            if (e.hook_kind == InstrHookKind::V1At && e.pos == where.pos && e.script == where.script) {
+                return fail("duplicate");
+            }
+        }
     }
     Entry entry;
     entry.id = state().next_id++;
     entry.owner = owner;
-    entry.script = script;
-    entry.pos = pos;
+    entry.hook_kind = kind;
+    entry.form = where.form;
+    entry.script = where.script;
+    entry.pos = where.form == InstrHookForm::Pos ? where.pos : 0u;
+    entry.lo = where.lo;
+    entry.hi = where.hi;
+    entry.opcode = where.opcode;
     state().entries.push_back(std::move(entry));
     g_active.store(true, std::memory_order_relaxed);
+    recomputeGates();
     if (err != nullptr) *err = nullptr;
     return state().entries.back().id;
 }
@@ -352,6 +475,11 @@ bool instrHookStats(std::uint32_t handle, InstrHookStatus* out) {
     s.id = e->id;
     s.script = e->script;
     s.pos = e->pos;
+    s.hook_kind = e->hook_kind;
+    s.form = e->form;
+    s.lo = e->lo;
+    s.hi = e->hi;
+    s.opcode = e->opcode;
     s.patch = e->patch;
     s.kind = e->kind;
     s.index = e->index;
@@ -376,6 +504,7 @@ bool instrHookRemove(std::uint32_t handle) {
         if (it->id == handle) {
             st.entries.erase(it);
             if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+            recomputeGates();
             // ★ S2a：**摘完再通知** —— sink 会跑 JS，JS 在 S2c 之后可能改表 ⇒ 不能让它在
             //   遍历 / 谓词里被调（见 `notifyReleased` 的调用纪律）。
             notifyReleased(handle);
@@ -410,6 +539,7 @@ void instrHookReleaseOwner(std::uint64_t owner) {
                                     [owner](const Entry& e) { return e.owner == owner; }),
                      st.entries.end());
     if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+    recomputeGates();
     for (const std::uint32_t id : released) notifyReleased(id);
 }
 
@@ -422,6 +552,7 @@ void instrHookClear() {
     for (const Entry& e : st.entries) released.push_back(e.id);
     st.entries.clear();
     g_active.store(false, std::memory_order_relaxed);
+    recomputeGates();
     for (const std::uint32_t id : released) notifyReleased(id);
 }
 
@@ -443,6 +574,11 @@ std::vector<InstrHookStatus> instrHookList() {
         s.id = e.id;
         s.script = e.script;
         s.pos = e.pos;
+        s.hook_kind = e.hook_kind;
+        s.form = e.form;
+        s.lo = e.lo;
+        s.hi = e.hi;
+        s.opcode = e.opcode;
         s.patch = e.patch;
         s.kind = e.kind;
         s.index = e.index;
@@ -478,21 +614,20 @@ void instrHookProbe(X86& cpu) {
     //   （`erase`），遍历中的 `Entry& e` 立刻悬垂 ⇒ UB 且没有症状。把分发挪到循环结束之后，
     //   就把它从"语义门"变成**结构保证**（S2c 放开写能力也不会踩）。
     const bool want_sink = instrHookHasSink();
+    // ★ S2c：opcode 读闸门 —— 只有表里**存在** `{opcode}` 订阅时才每拍多付一次 `rd32(pc)`
+    //   （`recomputeGates()` 维护；S2c-1 的 JS 面不开这个形态 ⇒ 正常为 false）。命中之后要
+    //   materialize `InstrHit::opcode` 时另读一次（与 S2a 同一次开销，见下）。
+    if (st.has_opcode_entry) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);
+
     std::uint32_t hit_ids[8];
     std::size_t n_hits = 0;
-    std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2a 每条指令 ≤1）
+    std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2c 起可达：同点多条）
 
     for (Entry& e : st.entries) {
-        if (e.pos != f.pos) continue;
-        // ② 身份：首次命中按名字解析并缓存 id；之后只比 id（⛔ 不每次解析名字）。
-        if (e.script_id == 0) {
-            std::string name;
-            if (!resolveScriptName(cpu, f.id, &name)) continue;
-            if (name != e.script) continue;
-            e.script_id = f.id;
-        } else if (e.script_id != f.id) {
-            continue;
-        }
+        // ★ S2c：四种 form 的统一判定（v1 的 Pos 仍是"先比 pos"那一支，代价同阶）。
+        if (!matchEntry(cpu, f, e)) continue;
+        // 身份缓存写回：首次命中按名字解析过（`matchEntry` 里），之后只比 id。
+        if (e.script_id == 0 && !e.script.empty()) e.script_id = f.id;
 
         e.hits += 1;
         e.last_id = f.id;
@@ -536,34 +671,46 @@ void instrHookProbe(X86& cpu) {
     }
     if (!want_sink || (n_hits == 0 && hit_overflow.empty())) return;
 
-    // ★ 只读 opcode：**只有命中且真的有 sink** 才多付这一次 guest 读（`Frame::pc` 由此而来）。
-    //   读不到 ⇒ `opcode_ok = false`（JS 侧**缺键**，⛔ 不编一个 0 冒充真实 opcode）。
-    std::uint32_t opcode = 0;
-    const bool opcode_ok = read32(*cpu.mem, f.pc, &opcode);
+    // ★ 命中之后才付的两次读：
+    //   ① opcode（`InstrHit::opcode`；`{opcode}` 订阅已经读过就复用）—— 读不到 ⇒ 缺键，⛔ 不编 0；
+    //   ② 本次派发的脚本名（`Tick.now.script`）—— `{script,pos}` 命中缓存之后 `matchEntry` 只比 id，
+    //      `Frame::name` 可能还没解析；这里补一次（`Frame` 缓存 ⇒ 每拍最多一次）。
+    if (!f.opcode_ok) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);
+    if (!f.name_ok) (void)frameName(cpu, &f);
 
-    const auto emit = [&](std::uint32_t id) {
-        // 重新查一遍：回调可能改表（S2a 的门不让它改，但别假设 —— 见循环外的理由）。
+    // ★ ④ 物化 InstrHit（**遍历之后**：此时没有任何 `Entry&` 活着；后续 handler 可以安全改表）。
+    const std::size_t total = n_hits + hit_overflow.size();
+    InstrHit small[8];
+    std::vector<InstrHit> big;
+    if (total > 8) big.resize(total);  // 只在 > 8 命中时才分配
+    InstrHit* hits = total > 8 ? big.data() : small;
+    std::size_t n = 0;
+    const auto fill = [&](std::uint32_t id) {
+        // 重新查（S2a 的原写法）：遍历之后表可能已被 patch 路径之外的东西改过。
         Entry* e = find(id);
         if (e == nullptr) return;
-        InstrHit h;
+        InstrHit& h = hits[n++];
         h.handle = e->id;
         h.script_id = f.id;
-        h.script = e->script.c_str();  // 生命周期 = 本次分发（entry 此刻仍在表里）
+        h.script = f.name_ok ? f.name.c_str() : "";  // ★ 这次派发的脚本名（见 InstrHit 头注）
         h.pos = f.pos;
-        h.opcode = opcode;
-        h.opcode_ok = opcode_ok;
+        h.opcode = f.opcode;
+        h.opcode_ok = f.opcode_ok;
         h.hits = e->hits;
         h.int_base = f.int_base;
         h.int_count = f.int_count;
         h.ptr_base = f.ptr_base;
         h.ptr_count = f.ptr_count;
         h.codec_key = f.key;
-        for (const InstrHookSink& s : st.sinks) {  // 注册序
-            if (s.on_hit != nullptr) s.on_hit(s.user, h);
-        }
+        h.codec_ok = f.has_key;
     };
-    for (std::size_t i = 0; i < n_hits; ++i) emit(hit_ids[i]);
-    for (const std::uint32_t id : hit_overflow) emit(id);
+    for (std::size_t i = 0; i < n_hits; ++i) fill(hit_ids[i]);
+    for (const std::uint32_t id : hit_overflow) fill(id);
+    if (n == 0) return;
+    // ★ ⑤ 一次派发**一次** `on_hits`（注册序 = `hits[0..n)`）—— 链需要"这批就是全部"这个事实。
+    for (const InstrHookSink& s : st.sinks) {
+        if (s.on_hits != nullptr) s.on_hits(s.user, hits, n);
+    }
 }
 
 }  // namespace lift

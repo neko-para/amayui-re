@@ -15,13 +15,19 @@
 //      即 `ctx.edit.global.set` 的唯一实现）写同一地址 ⇒ pending 被**主动撤销**：下一拍既不写回、
 //      也不记 `restores` / `restore_conflicts`，地址保持持久写的值。
 //      红了 = 持久写被瞬时覆盖的恢复盖掉（"持久写赢过瞬时覆盖"只在 CAS 下"碰巧"成立）。
-//   ⑥ `instr-hook/sink-hit-fields`（S2a）：命中后 `InstrHookSink::on_hit` 收到的
+//   ⑥ `instr-hook/sink-hit-fields`（S2a）：命中后 `InstrHookSink::on_hits` 收到的
 //      handle / script / pos / opcode / hits / local counts 逐项正确；pos 过滤仍有效；
 //      注销 sink 之后不再分发、但 `stats().hits` 照旧（计数不依赖 sink）。
 //      红了 = 指令点 → ui 的反向通道断了或字段漂（`handle.onTick` 永远不跑 / 参数错）。
 //   ⑦ `instr-hook/sink-release-events`（S2a）：remove / releaseOwner / clear 摘条目时
 //      `on_released` 各发**恰好一次**、按安装顺序、互不重复；不存在的句柄不发。
 //      红了 = ui 层的 JS handler 泄漏（条目没了、JS 值还在）。
+//   ⑧ `instr-hook/sink-hit-batch`（S2c）：同一点 3 条订阅 ⇒ 一次派发 `on_hits` **恰好一次**、
+//      `count == 3`、顺序 = handle 升序、脚本名 = **本次派发名**；另一个 pos 不命中。
+//      红了 = 分发退回逐条（链拿不到"这批就是全部"）或批量只发第一条。
+//   ⑨ `instr-hook/add-ex-shared`（S2c）：`duplicate` **只对 V1At**；Sub / Once 同点可重复；
+//      `{Range}` + `{Pos}` 同拍各命中一次；`range_empty` / `bad_where` 两条形状校验。
+//      红了 = v2 同点多订阅被 v1 去重拒掉（`at-multi-same-pos` 会连带红）或形状校验缺失。
 //
 // ★ 夹具形状：一块假 `GuestMemory`（假 Engine / 帧记录 / 名字表 / int 池 / ptr local）+
 //   一个只填了 `mem` 的 `X86` + 直接调 `instrHookProbe` —— ⛔ 不需要 AOT、不需要游戏安装 / LFS。
@@ -142,6 +148,25 @@ std::uint32_t addHook(std::uint64_t owner, std::uint32_t pos, bool* ok) {
     const std::uint32_t h = L::instrHookAdd(owner, kScript, pos, &err);
     if (ok != nullptr) *ok = (h != 0 && err == nullptr);
     if (h == 0) std::fprintf(stderr, "  instrHookAdd err=%s\n", err != nullptr ? err : "(null)");
+    return h;
+}
+
+// S2c：任意形状的订阅（Pos: a=pos / Range: a=lo,b=hi / Opcode: a=opcode / Script: script only）。
+std::uint32_t addExHook(std::uint64_t owner, L::InstrHookForm form, const std::string& script,
+                        std::uint32_t a, std::uint32_t b, L::InstrHookKind kind, bool* ok) {
+    L::InstrHookWhere where;
+    where.form = form;
+    where.script = script;
+    if (form == L::InstrHookForm::Pos) where.pos = a;
+    if (form == L::InstrHookForm::Range) {
+        where.lo = a;
+        where.hi = b;
+    }
+    if (form == L::InstrHookForm::Opcode) where.opcode = a;
+    const char* err = nullptr;
+    const std::uint32_t h = L::instrHookAddEx(owner, where, kind, &err);
+    if (ok != nullptr) *ok = (h != 0 && err == nullptr);
+    if (h == 0) std::fprintf(stderr, "  instrHookAddEx err=%s\n", err != nullptr ? err : "(null)");
     return h;
 }
 
@@ -332,12 +357,19 @@ struct RecordingSink {
     std::vector<L::InstrHit> hits;
     std::vector<std::uint32_t> released;
     std::vector<std::string> scripts;
+    int batches = 0;         // `on_hits` 被调了几次（一次派发必须一次）
+    std::size_t last_count = 0;  // 最近一次的 count
 };
 
-void recordingOnHit(void* user, const L::InstrHit& hit) {
+void recordingOnHits(void* user, const L::InstrHit* hits, std::size_t count) {
     auto* sink = static_cast<RecordingSink*>(user);
-    sink->hits.push_back(hit);
-    sink->scripts.push_back(hit.script != nullptr ? std::string(hit.script) : std::string("<null>"));
+    sink->batches += 1;
+    sink->last_count = count;
+    for (std::size_t i = 0; i < count; ++i) {
+        sink->hits.push_back(hits[i]);
+        sink->scripts.push_back(hits[i].script != nullptr ? std::string(hits[i].script)
+                                                         : std::string("<null>"));
+    }
 }
 
 void recordingOnReleased(void* user, std::uint32_t handle) {
@@ -351,7 +383,7 @@ void caseSinkHitFields() {
     RecordingSink sink;
     L::InstrHookSink hooks;
     hooks.user = &sink;
-    hooks.on_hit = &recordingOnHit;
+    hooks.on_hits = &recordingOnHits;
     hooks.on_released = &recordingOnReleased;
     L::instrHookAddSink(hooks);
     LIFT_CHECK(L::instrHookHasSink());
@@ -420,7 +452,7 @@ void caseSinkReleaseEvents() {
     RecordingSink sink;
     L::InstrHookSink hooks;
     hooks.user = &sink;
-    hooks.on_hit = &recordingOnHit;
+    hooks.on_hits = &recordingOnHits;
     hooks.on_released = &recordingOnReleased;
     L::instrHookAddSink(hooks);
 
@@ -463,6 +495,176 @@ void caseSinkReleaseEvents() {
     L::instrHookRemoveSink(&sink);
 }
 
+// =====================================================================================
+// ⑧ S2c · `instr-hook/sink-hit-batch`：一次派发**一次** `on_hits`，批次 = 全部命中
+//
+//   红 = 分发退回逐条（链拿不到"这批就是全部"）/ 批量只发第一条 / 顺序不是注册序。
+//   判据：同点 3 条（V1At + Sub + Once）⇒ `batches==1`、`count==3`、handle 升序、脚本名 = 派发名；
+//   另一个 pos ⇒ 不再调用。
+// =====================================================================================
+void caseSinkHitBatch() {
+    lift_test::g_current_case = "instr-hook/sink-hit-batch";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    RecordingSink sink;
+    L::InstrHookSink hooks;
+    hooks.user = &sink;
+    hooks.on_hits = &recordingOnHits;
+    hooks.on_released = &recordingOnReleased;
+    L::instrHookAddSink(hooks);
+
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    LIFT_CHECK(put32(mem, kPcA, kOpcode));
+
+    bool v1_ok = false;
+    bool sub_ok = false;
+    bool once_ok = false;
+    const std::uint32_t v1 = addHook(0x21u, kPosA, &v1_ok);
+    const std::uint32_t sub = addExHook(0x21u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                        L::InstrHookKind::Sub, &sub_ok);
+    const std::uint32_t once = addExHook(0x21u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                         L::InstrHookKind::Once, &once_ok);
+    LIFT_CHECK(v1_ok);
+    LIFT_CHECK(sub_ok);
+    LIFT_CHECK(once_ok);
+    LIFT_CHECK(v1 < sub && sub < once);  // 注册序 = handle 升序（runtime 只 push_back）
+
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 0);
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 1);  // ★ 一次派发**一次**
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.last_count), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 3);
+    if (sink.hits.size() == 3) {
+        LIFT_CHECK_EQ_U32(sink.hits[0].handle, v1);
+        LIFT_CHECK_EQ_U32(sink.hits[1].handle, sub);
+        LIFT_CHECK_EQ_U32(sink.hits[2].handle, once);
+        for (const L::InstrHit& hit : sink.hits) {
+            // ★ `script` = **本次派发的脚本名**（不是"订阅注册名"；`{script,pos}` 下两者相等）。
+            LIFT_CHECK(hit.script != nullptr && std::strcmp(hit.script, kScript) == 0);
+            LIFT_CHECK_EQ_U32(hit.script_id, kScriptId);
+            LIFT_CHECK_EQ_U32(hit.pos, kPosA);
+            LIFT_CHECK(hit.opcode_ok);
+            LIFT_CHECK_EQ_U32(hit.opcode, kOpcode);
+            LIFT_CHECK(hit.codec_ok);
+            LIFT_CHECK_EQ_U32(hit.codec_key, kKey);
+        }
+    }
+    for (const std::uint32_t h : {v1, sub, once}) {
+        L::InstrHookStatus st;
+        LIFT_CHECK(L::instrHookStats(h, &st));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 1);
+    }
+    // 另一个位置 ⇒ 不再调用（pos 过滤没坏）。
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 3);
+    L::instrHookClear();
+    L::instrHookRemoveSink(&sink);
+}
+
+// =====================================================================================
+// ⑨ S2c · `instr-hook/add-ex-shared`：去重只对 V1At；四种 form 的准入
+//
+//   红 = v2 同点多订阅被 v1 的 duplicate 拒掉（`at-multi-same-pos` 连带红）/ 形状校验缺失。
+//   判据：V1At 同点第二条 ⇒ `duplicate`；Sub / Once 各两条都成功且 handle 互异；
+//         `{Range,[0x100,0x108)}` + `{Pos,0x100}` 同拍各命中一次；`lo==hi` ⇒ `range_empty`；
+//         `{Script}` + 空 script ⇒ `bad_where`。
+// =====================================================================================
+void caseAddExShared() {
+    lift_test::g_current_case = "instr-hook/add-ex-shared";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    LIFT_CHECK(put32(mem, kPcA, kOpcode));
+
+    // ---- ① V1At 的 duplicate 逐字保留（v1 已发布语义）----
+    bool a_ok = false;
+    const std::uint32_t v1 = addHook(0x31u, kPosA, &a_ok);
+    LIFT_CHECK(a_ok);
+    L::InstrHookWhere pos_where;
+    pos_where.form = L::InstrHookForm::Pos;
+    pos_where.script = kScript;
+    pos_where.pos = kPosA;
+    const char* err = nullptr;
+    LIFT_CHECK_EQ_U32(L::instrHookAddEx(0x31u, pos_where, L::InstrHookKind::V1At, &err), 0u);
+    LIFT_CHECK(err != nullptr && std::strcmp(err, "duplicate") == 0);
+
+    // ---- ② Sub / Once 同点可重复（各自 handle 互异；去重不看它们）----
+    bool s1_ok = false;
+    bool s2_ok = false;
+    bool o1_ok = false;
+    bool o2_ok = false;
+    const std::uint32_t s1 = addExHook(0x31u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                       L::InstrHookKind::Sub, &s1_ok);
+    const std::uint32_t s2 = addExHook(0x31u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                       L::InstrHookKind::Sub, &s2_ok);
+    const std::uint32_t o1 = addExHook(0x31u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                       L::InstrHookKind::Once, &o1_ok);
+    const std::uint32_t o2 = addExHook(0x31u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                       L::InstrHookKind::Once, &o2_ok);
+    LIFT_CHECK(s1_ok && s2_ok && o1_ok && o2_ok);
+    LIFT_CHECK(s1 != s2);
+    LIFT_CHECK(o1 != o2);
+    LIFT_CHECK(v1 < s1 && o2 > o1);
+
+    // ---- ③ Range + Pos 在同一拍各命中一次；hi 是开区间 ----
+    L::instrHookClear();
+    bool r_ok = false;
+    bool p_ok = false;
+    const std::uint32_t range_h = addExHook(0x32u, L::InstrHookForm::Range, kScript, kPosA,
+                                            kPosA + 8u, L::InstrHookKind::Sub, &r_ok);
+    const std::uint32_t pos_h = addExHook(0x32u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                          L::InstrHookKind::Sub, &p_ok);
+    LIFT_CHECK(r_ok);
+    LIFT_CHECK(p_ok);
+    dispatchAt(mem, cpu, kPosA);
+    L::InstrHookStatus rs;
+    L::InstrHookStatus ps;
+    LIFT_CHECK(L::instrHookStats(range_h, &rs));
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.hits), 1);  // lo 命中
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 1);
+    dispatchAt(mem, cpu, kPosA + 4u);
+    LIFT_CHECK(L::instrHookStats(range_h, &rs));
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.hits), 2);  // 区间内命中
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 1);
+    dispatchAt(mem, cpu, kPosA + 8u);  // = kPosB：hi 是开区间 ⇒ 不命中
+    LIFT_CHECK(L::instrHookStats(range_h, &rs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.hits), 2);
+
+    // ---- ④ 形状校验 ----
+    err = nullptr;
+    L::InstrHookWhere bad;
+    bad.form = L::InstrHookForm::Range;
+    bad.script = kScript;
+    bad.lo = 0x200u;
+    bad.hi = 0x200u;
+    LIFT_CHECK_EQ_U32(L::instrHookAddEx(0x33u, bad, L::InstrHookKind::Sub, &err), 0u);
+    LIFT_CHECK(err != nullptr && std::strcmp(err, "range_empty") == 0);
+    err = nullptr;
+    bad = L::InstrHookWhere{};
+    bad.form = L::InstrHookForm::Script;  // script 空 = "所有脚本每一拍" ⇒ 不是可用形状
+    LIFT_CHECK_EQ_U32(L::instrHookAddEx(0x33u, bad, L::InstrHookKind::Sub, &err), 0u);
+    LIFT_CHECK(err != nullptr && std::strcmp(err, "bad_where") == 0);
+    // 反向自检：`{Script}` 带非空脚本是**合法**的（runtime 面写全，JS 面 S2c-2 才放开）。
+    bool script_ok = false;
+    const std::uint32_t script_h = addExHook(0x33u, L::InstrHookForm::Script, kScript, 0, 0,
+                                             L::InstrHookKind::Sub, &script_ok);
+    LIFT_CHECK(script_ok);
+    dispatchAt(mem, cpu, kPosA + 0x10u);  // 整本脚本：任意 pos 都命中
+    L::InstrHookStatus ss;
+    LIFT_CHECK(L::instrHookStats(script_h, &ss));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ss.hits), 1);
+    L::instrHookClear();
+}
+
 }  // namespace
 
 int main() {
@@ -476,5 +678,8 @@ int main() {
     // ---- S2a（反向 sink：指令点命中 → ui 层；摘条目 → on_released）----
     caseSinkHitFields();
     caseSinkReleaseEvents();
+    // ---- S2c（批量 sink；addEx 的 kind / form 准入）----
+    caseSinkHitBatch();
+    caseAddExShared();
     return lift_test::finish("instr-hook");
 }

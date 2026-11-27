@@ -28,6 +28,9 @@ const OPS = [
     //   render 期（含**存下来的 RunCtx**）调它必须 TypeError —— 否则 render 里能注册 tick
     //   handler（静默越权：那会在下一次探针时跑用户 JS，且不经过任何入口的预算窗）。
     "hook.onTick",
+    // ★ S2c：`ctx.at(where, fn)` 与 `once` / `task` 同一条门（`inCallback()`）⇒ render 里必须
+    //   TypeError。**`off` 故意不进这张表**（它只减、门 = `call_host`；见下面的正向断言）。
+    "at",
 ];
 
 let saved = null;
@@ -53,6 +56,7 @@ const plugin = {
                 else if (op === "hook.stats") savedHook.stats();
                 else if (op === "hook.handle.clear") savedHook.clear();
                 else if (op === "hook.onTick") savedHook.onTick(() => {});
+                else if (op === "at") saved.at({ script: "FIELD.BIN", pos: 0x100 }, () => {});
                 else throw new Error("unknown op: " + op);
             } catch (e) {
                 // 唯一正确的形状：非回调期 ⇒ TypeError（⛔ 不是"接受"、也不是别的错）。
@@ -64,6 +68,16 @@ const plugin = {
             accepted.push(op);
         }
         if (accepted.length !== 0) throw new Error("accepted:" + accepted.join(","));
+        // ★ S2c：`ctx.off` 的门**故意与那 7 条不同**（只减操作，不写 guest、不让 Run 更长）⇒
+        //   render 里调它必须被**接受**：不存在的句柄 ⇒ `false`（幂等），⛔ 不抛 TypeError。
+        //   这是一条**正向**断言：把 `off` 塞进 OPS（或给它 `inCallback()` 门）会让它当场红。
+        let offResult;
+        try {
+            offResult = saved.off(999999);
+        } catch (e) {
+            throw new Error("off rejected in render: " + String(e));
+        }
+        if (offResult !== false) throw new Error("off(999999) returned " + String(offResult));
         // ★ 同一次 render 里，读数面必须仍然可用（F2 的修法不能把 render 的 read/log 一起关掉）。
         if (typeof ctx.read.global.get !== "function") throw new Error("read lost");
         if (typeof ctx.log !== "function") throw new Error("log lost");

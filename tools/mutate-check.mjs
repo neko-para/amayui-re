@@ -4567,7 +4567,7 @@ const MUTATIONS = [
       'sink 永远收不到命中；`instr-hook/sink-hit-fields`（0 条 hit）或 `plugin/point-hit` 红',
   },
 
-  // ── S2a：每个 host→JS 入口都 drain（这里选 `runHookEntry`）──────────────────────────────
+  // ── S2a：每个 host→JS 入口都 drain（这里选 `runInstrHits`；S2c 起它取代 `runHookEntry`）──────
   //   ★ 代表这一类错：新入口（指令点 → JS）忘了 drain。QJS 的 job 队列是 per-runtime、没有
   //     "入口"概念 ⇒ 残留的 continuation 会落到**下一个入口**才跑（那里 `tick` / `ctx` 已经
   //     是另一个节点的），**没有任何症状**。
@@ -4577,16 +4577,17 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
       '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
-      '        //   `plugin-drain-runHookEntry` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
+      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
       '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
-    to: '        const bool drained = true;  // 变异：runHookEntry 不 drain\n',
+    to: '        const bool drained = true;  // 变异：runInstrHits 不 drain\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-plugin-runtime',
     what:
-      '从 `runHookEntry` 删掉 drain（`const bool drained = drainPendingJobs(...)` ⇒ `= true`）⇒ ' +
-      'tick 回调里排的 continuation 落到下一个入口才跑；`plugin/drain-per-entry` 红',
+      '从 `runInstrHits`（一次指令点派发的 host→JS 入口）删掉 drain ' +
+      '（`const bool drained = drainPendingJobs(...)` ⇒ `= true`）⇒ tick 回调里排的 continuation ' +
+      '落到下一个入口才跑；`plugin/drain-per-entry` 红',
   },
 
   // ── S2a 复审 F9：`call()` 的 drain（`plugin/drain-per-entry` 的 ① 方向）──────────────
@@ -4663,8 +4664,11 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();\n',
-    to: '        return !impl_->tasks.empty() || !impl_->hook_handlers.empty();  // 变异：不把 once 当存活来源\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
+      '               !impl_->at_subs.empty();\n',
+    to:
+      '        return !impl_->tasks.empty() || !impl_->hook_handlers.empty() ||\n' +
+      '               !impl_->at_subs.empty();  // 变异：不把 once 当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4681,8 +4685,11 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();\n',
-    to: '        return !impl_->tasks.empty() || !impl_->onces.empty();  // 变异：不把 onTick 订阅当存活来源\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
+      '               !impl_->at_subs.empty();\n',
+    to:
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() ||\n' +
+      '               !impl_->at_subs.empty();  // 变异：不把 onTick 订阅当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4690,6 +4697,114 @@ const MUTATIONS = [
     what:
       '`hasPendingWork` 的 `hook_handlers` 支删掉（不把 `handle.onTick` 订阅当 Run 存活来源）⇒ ' +
       '订阅之后返回 null 的 Run 第一拍就被收口；`plugin/onTick-keeps-run` 红',
+  },
+
+  // ── S2c：`ctx.at` 的链必须由 `next()` 控制（不调 = 截断后续 at 参与者）────────────────────────
+  //   ★ 代表这一类错：`truncated` 永远 false ⇒ 每个 at handler 之后都继续 ⇒ "不调 next 也能继续"。
+  //     它的症状只有**顺序 / 条数**（`order`），`hits` 是匹配数、看不出来 ⇒ 红点在 order。
+  //   ★ 红点 = `plugin/at-next-truncates`（截断那拍读到 order=[1,2]）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '                    if (!impl.chain_step.continued) truncated = true;\n',
+    to: '                    // 变异：不截断（永远继续链）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '删掉"不调 next ⇒ 截断后续 at 参与者"（`if (!impl.chain_step.continued) truncated = true;`）⇒ ' +
+      '同点第二条 at 也会跑；`plugin/at-next-truncates` 的截断拍（order 必须是 [1]）红',
+  },
+
+  // ── S2c：`ctx.at` 订阅是 Run 存活来源（H-1）──────────────────────────────────────────────────
+  //   ★ 代表这一类错：`hasPendingWork` 不算 at_subs ⇒ `start` 返回 null + 一条 at 的 Run
+  //     第一拍就被收口（releaseRunHooks 撤掉订阅）⇒ 插件再也收不到命中，而且没有报错。
+  //   ★ 红点 = `plugin/at-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
+      '               !impl_->at_subs.empty();\n',
+    to:
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();  ' +
+      '// 变异：不把 at 订阅当存活来源\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`hasPendingWork` 去掉 `!impl_->at_subs.empty()`（不把 `ctx.at` 订阅当 Run 存活来源）⇒ ' +
+      '`start` 返回 null 的 Run 第一拍就被收口；`plugin/at-keeps-run` 红',
+  },
+
+  // ── S2c：订阅被撤时 ui 侧的账必须跟着删（否则 handler 泄漏 / 还在跑）────────────────────────
+  //   ★ 代表这一类错：`implOnInstrReleased` 只删 v1 handler / once，不删 `at_subs` ⇒
+  //     `ctx.off(h)` 撤了 Entry 但 handler 还在 `at_subs`（僵尸账：`hasPendingWork` 永远真、
+  //     Run 永不收口；若 handle 被复用还会跑到错的订阅上）。
+  //   ★ 红点 = `plugin/at-off`（撤过之后再撤必须 false、后续派发只跑 h1）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        // ★ S2c：v2 订阅的账（`ctx.hook.clear()` / `handle.clear()` / Run 收口 / `ctx.off` 都走这里）。\n' +
+      '        impl->at_subs.erase(handle);\n',
+    to: '        // 变异：at_subs 不删（Entry 撤了，handler 还留在账上）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`implOnInstrReleased` 不删 `at_subs`（Entry 撤了、ui 侧账还在）⇒ 僵尸订阅算 Run 存活、' +
+      '`ctx.off` 之后 handler 还在；`plugin/at-off` 红',
+  },
+
+  // ── S2c：Tick 的代际（入口末尾 `ticks.clear()` ⇒ 跨入口 local.* 必须 stale）────────────────────
+  //   ★ 代表这一类错：Tick 永不过期 ⇒ 存下来的旧 Tick 仍能读到**这一次入口**的 local 视图
+  //     （在 S2c-2 的写面上这等于"改错一帧"）；`now` 快照本来就可以读，所以判据只能看 local。
+  //   ★ 红点 = `plugin/tick-stale`（local.int 不抛 ⇒ staleOk=0）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '    // ★ 代际结束：Tick 在**本入口（含 drain）**内有效；之后任何 `local.*` 都是 stale。\n' +
+      '    //   变异条目 `plugin-tick-stale` 删的就是这一行（`plugin/tick-stale` 会红）。\n' +
+      '    impl.ticks.clear();\n',
+    to: '    // 变异：Tick 永不过期（跨入口仍能读 local）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`runInstrHits` 末尾不 `impl.ticks.clear()`（Tick 永不 stale）⇒ 捕获的旧 Tick 跨入口仍能读 ' +
+      'local；`plugin/tick-stale` 红',
+  },
+
+  // ── S2c：`duplicate` 只对 v1（`kind == V1At`）生效 ─────────────────────────────────────────────
+  //   ★ 代表这一类错：把 v1 的 `(script,pos)` 去重施加到 v2 的 Sub / Once ⇒ 同点第二条 `ctx.at`
+  //     返回 undefined（S2c 的核心用法当场坏掉）、`once` 与 v1 同点被拒。
+  //   ★ 红点 = `instr-hook/add-ex-shared`（Sub 第二次必须是 `duplicate` 而不是 0）；
+  //     同时 `plugin/at-multi-same-pos` 会红（4 条只装上 1 条）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from:
+      '    if (kind == InstrHookKind::V1At) {\n' +
+      '        for (const Entry& e : state().entries) {\n' +
+      '            if (e.hook_kind == InstrHookKind::V1At && e.pos == where.pos && e.script == where.script) {\n' +
+      '                return fail("duplicate");\n' +
+      '            }\n' +
+      '        }\n' +
+      '    }\n',
+    to:
+      '    for (const Entry& e : state().entries) {  // 变异：对所有 kind 都去重\n' +
+      '        if (e.pos == where.pos && e.script == where.script) {\n' +
+      '            return fail("duplicate");\n' +
+      '        }\n' +
+      '    }\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '`instrHookAddEx` 的去重不看 `kind`（对 Sub / Once 也 `duplicate`）⇒ 同点第二条 `ctx.at` / ' +
+      '`once` 拿不到句柄；`instr-hook/add-ex-shared` 红（`plugin/at-multi-same-pos` 连带红）',
   },
 
 ];

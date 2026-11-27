@@ -17,6 +17,9 @@ const REQUIRED = [
     // ★ S2b：异步面（`once` 返回 Promise<InstrTick>；`task` 登记协程）。
     "once",
     "task",
+    // ★ S2c：同步订阅面（`at` 返回订阅 id；`off` 撤一条、幂等）。
+    "at",
+    "off",
     "ui",
     "profile",
     "state",
@@ -160,6 +163,42 @@ const plugin = {
                 if (!e || e.name !== "TypeError") bad.push("task.non-promise.error:" + String(e));
             }
             if (!threw) bad.push("task.non-promise.accepted");
+        }
+
+        // ---- S2c：同步订阅面 `ctx.at` / `ctx.off` 的形状 ----
+        //   · `at` 返回**订阅 id（number > 0）**；`off` 返回 boolean 且**幂等**（撤过 / 不存在 ⇒ false）。
+        //   · `where` 形状错 ⇒ 当场 TypeError（⛔ 不静默 undefined）；S2c-1 只放开 `{script,pos}`
+        //     ⇒ `{script,lo,hi}` / `{script}` / `{opcode}` 在这一片**明确拒绝**（S2c-2 才打开）。
+        if (typeof ctx.at !== "function") bad.push("missing:at");
+        if (typeof ctx.off !== "function") bad.push("missing:off");
+        if (typeof ctx.at === "function" && typeof ctx.off === "function") {
+            const applied = ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, () => {});
+            if (typeof applied !== "number" || applied <= 0) {
+                bad.push(`at.return:${String(applied)}`);
+            } else {
+                if (ctx.off(applied) !== true) bad.push("off.true");
+                if (ctx.off(applied) !== false) bad.push("off.false");
+                if (ctx.off(999999) !== false) bad.push("off.missing");
+            }
+            const badAt = [
+                () => ctx.at("FIELD.BIN", () => {}),
+                () => ctx.at({}, () => {}),
+                () => ctx.at({ script: "" }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 1, hi: 2 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, 1),
+            ];
+            for (const call of badAt) {
+                let threw = false;
+                try {
+                    call();
+                } catch (e) {
+                    threw = true;
+                    if (!e || e.name !== "TypeError") bad.push("at.bad-arg.error:" + String(e));
+                }
+                if (!threw) bad.push("at.bad-arg.accepted");
+            }
         }
 
         if (bad.length !== 0) {

@@ -145,6 +145,14 @@ public:
     virtual bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                             const char** code) = 0;
 
+    // ---- Tick.local（S2c；**只读 guest**，只 tick 入口用）----
+    // ★ 纯虚：唯一实现者 = `PluginHost`。⛔ 不给默认实现 —— 那会让"没接线"静默退化成 `undefined`
+    //   （与 `readWired()` 的口径冲突：装配错误必须响亮）。
+    // ★ 语义值口径：int / ptrDword = DEC(raw, key)（`value_codec.h`）；ptr = 槽里原样（地址不解码）。
+    //   越界 / 未提交 / 指针 0 / 没有 key ⇒ **false** ⇒ JS 侧 `undefined`（⛔ 不编 0）。
+    virtual bool readLocal(const lift::InstrLocalView& view, lift::InstrLocalKind kind,
+                           std::uint32_t index, std::uint32_t* out) = 0;
+
     // ---- 脚本指令位置钩子（`ctx.hook`；**只 RunCtx**）----
     // ★ 三种能力**彼此独立**（用户裁决 2026-11-26 晚：触发 ≠ 修改）：
     //   ① 触发 `instrHookAdd(script,pos)`（纯观察，不读不写；返回句柄 id）；
@@ -152,6 +160,10 @@ public:
     //   ③ 改   `instrHookSetPatch(handle, …)`（在这条指令读之前覆盖一个 dword，指令后恢复 ⇒ 净变化 0）。
     // ★ 实现 = `runtime/instr_hook.h`（唯一一份）；本接口只是语言无关的那层。
     virtual std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) = 0;
+    // ★ S2c：`ctx.at(where, handler)` 的注册口 —— 每条订阅一条 runtime Entry（各自 handle、
+    //   同一个 owner）。`instrHookAdd` 是它的 v1 薄包装（Pos + V1At，去重只对 V1At）。
+    virtual std::uint32_t instrHookAddWhere(const lift::InstrHookWhere& where, lift::InstrHookKind kind,
+                                            const char** err) = 0;
     virtual bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind,
                                    std::uint32_t index, std::uint32_t value, std::uint32_t max_hits,
                                    const char** err) = 0;

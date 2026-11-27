@@ -422,12 +422,14 @@ test('⑦ `instr_hook` 的**代码**里 0 命中 `quickjs`（反向 sink 必须�
   assert.equal(forbiddenHits('// 这里不 include "quickjs.h"\n', ['quickjs']).length, 0, '注释里的 `quickjs` 不许命中');
 });
 
-test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 9）', () => {
-  // ★ host→JS 的入口清单 = `renderFrame()` / `call()` / `runHookEntry()` / 经典 `render()`。
+test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 10）', () => {
+  // ★ host→JS 的入口清单 = `renderFrame()` / `call()` / `runInstrHits()` / 经典 `render()`。
   //   （S2a 复审 F6：注释原来写"经典 render 见下面 ④"，而 ④ 是 `src/plugin/**` 的 include 禁令，
   //   与 render 无关 ⇒ 经典 render 的 drain 当时**没有守卫**，删掉是静默回归。）
   //   **每个入口都必须 drain**：漏一次 ⇒ continuation 落到下一个入口才跑（静默语义漂，见
   //   `plugin/drain-per-entry` 的两个方向）。
+  //   ★ S2c：一次指令点派发 = 一个入口（`runInstrHits`；取代 S2a 的 `runHookEntry` —— 后者是
+  //     "每 handle 一个入口"，链需要"这批命中就是全部"⇒ 批量 sink + 一个入口）。
   // ★ 诚实边界（与 `input-plan-shape` 同口径）：这是**源码谓词** —— 把 `JS_Call` 藏进 helper 能绕过。
   //   补它的是行为用例（`drain-per-entry` 证明"当前入口跑完"）；谓词只负责"下一个入口忘了写
   //   drain / 新入口没登记时**当场**红"。
@@ -459,7 +461,7 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
   const entries = [
     { name: 'renderFrame', re: /^\s*bool renderFrame\(UiBuilder& builder,.*\{\s*$/ },
     { name: 'call', re: /^\s*bool call\(PluginCallHost& host,/ },
-    { name: 'runHookEntry', re: /^void runHookEntry\(Impl& impl, std::uint32_t handle,.*\{\s*$/ },
+    { name: 'runInstrHits', re: /^void runInstrHits\(Impl& impl, const lift::InstrHit\* hits,.*\{\s*$/ },
     {
       name: 'classic-render',
       re: /^\s*bool render\(UiBuilder& builder, const UiFrameReadings& readings, std::string\* err\) override \{\s*$/,
@@ -488,9 +490,10 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
       missing.join('\n  '),
   );
 
-  // ★ 全文件 `JS_Call(` 白名单：**9 处** = 4 个入口 + 2 个宿主值构造
+  // ★ 全文件 `JS_Call(` 白名单：**10 处** = 4 个入口（`runInstrHits` 的链调用）+ 2 个宿主值构造
   //   （`Object.assign` 造 ctx / 造错误对象）+ 3 个 S2b 异步面
-  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject）。
+  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject）+ 1 个 v1 步
+  //   （`runHookStepV1`：`handle.onTick` 的被动调用，S2c 从旧 `runHookEntry` 抽出来的）。
   //   新增一处必须来这里登记（否则"入口"会悄悄多一个）。
   const calls = [];
   for (let i = 0; i < lines.length; i += 1) {
@@ -500,7 +503,8 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     if (c.text.includes('impl.render.raw(), JS_UNDEFINED, 0, nullptr')) return 'classic-render';
     if (c.text.includes('assign.raw()')) return 'object-assign';
     if (c.text.includes('impl.plugin_render.raw(), JS_UNDEFINED, 1, argv')) return 'plugin-renderFrame';
-    if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'runHookEntry';
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, 2, argv')) return 'runInstrHits';
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'runHookStepV1';
     if (c.text.includes('ctor.raw()')) return 'error-object';
     if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
     if (c.text.includes('argv[0], JS_UNDEFINED, 1, args')) return 'task-invoke';
@@ -518,7 +522,8 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
       'once-reject',
       'once-resolve',
       'plugin-renderFrame',
-      'runHookEntry',
+      'runHookStepV1',
+      'runInstrHits',
       'task-invoke',
     ],
     '`JS_Call(` 的出现点与白名单不符（新增入口 / 宿主值构造必须来登记）：\n  ' +

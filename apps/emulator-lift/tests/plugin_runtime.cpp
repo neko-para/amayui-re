@@ -61,7 +61,7 @@
 //   · `plugin/point-hit-handler-error`    ：handler 抛错 ⇒ **一行** error（带 `hit #N`）+ handler 摘除
 //                                            + Run **不 fail**；第二次命中不再跑 JS，但 entry 仍计数。
 //   · `plugin/point-hit-after-run-end`    ：Run 收口（`return []`）后 hook 表空；再探针**不再跑 JS**。
-//   · `plugin/drain-per-entry`            ：`call()` 与 `runHookEntry()` 的 continuation 都在**本入口**
+//   · `plugin/drain-per-entry`            ：`call()` 与 `runInstrHits()` 的 continuation 都在**本入口**
 //                                            跑完（start 的 phase=2 由下一个读点写出；tick 的 log 在
 //                                            探针返回前出现）—— 漏写 drain ⇒ continuation 落到下一个入口。
 //   · `plugin/drain-budget`               ：`while(true) await Promise.resolve()` 被**同一预算窗**打断
@@ -373,6 +373,8 @@ constexpr std::uint32_t kInstrPos = 0x00000100u;       // label 坐标（与夹�
 constexpr std::uint32_t kInstrOpcode = 114u;           // 只是**值**（⛔ 不是 opcode 语义结论）
 constexpr std::uint32_t kInstrScriptId = 3u;
 constexpr std::uint32_t kInstrPc = kInstrBody + (kInstrPos - lift::kScriptHeaderLen);
+// ★ S2c（`tick.local`）：local-ptr 0 指向的 dword（`ptr(0)` = 这个地址、`ptrDword(0)` = 它的语义值）。
+constexpr std::uint32_t kInstrLocalTarget = 0x004D7000u;
 
 bool installInstrFrame(lift::GuestMemory& mem) {
     const std::uint32_t frame = kFxEngine + lift::kEngineFrameBase;  // = 0x4DD894
@@ -404,6 +406,19 @@ void dispatchInstr(Fixture& f, std::uint32_t pos) {
     lift::X86 cpu;  // 《只填 mem》—— 与 `tests/instr_hook.cpp` 同形
     cpu.mem = &f.mem;
     lift::instrHookProbe(cpu);
+}
+
+// ★ S2c（`tick.local`）：在 `installInstrFrame` **之后**补值（⛔ 不改夹具本身）：
+//   int 槽 0..7 = 语义 7 / 0 / … / 0xFFFFFFFF（int32 口径 = -1）；ptr 0 → kInstrLocalTarget、
+//   ptr 1 = 0（指针 0）；kInstrLocalTarget 里放语义 9。int_count / ptr_count 已由上面摆好（8 / 2）。
+bool installInstrLocalValues(lift::GuestMemory& mem) {
+    const std::uint32_t ints[8] = {7u, 0u, 0u, 0u, 0u, 0u, 0u, 0xFFFFFFFFu};
+    for (std::uint32_t i = 0; i < 8u; ++i) {
+        if (!put32(mem, kInstrIntBase + 4u * i, lift::encodeInt(ints[i], kFxKey))) return false;
+    }
+    if (!put32(mem, kInstrPtrBase, kInstrLocalTarget)) return false;       // ptr 0
+    if (!put32(mem, kInstrPtrBase + 4u, 0u)) return false;                 // ptr 1 = 0
+    return put32(mem, kInstrLocalTarget, lift::encodeInt(9u, kFxKey));      // ptrDword(0) = 9
 }
 
 std::uint64_t instrHits(std::uint32_t handle) {
@@ -2451,7 +2466,7 @@ void casePointHitAfterRunEnd() {
 //   红了 = 某个 host→JS 入口漏了 drain ⇒ continuation 落到**下一个入口**才跑（静默语义漂：
 //   它看到的是下一个读点 / 下一个 tick 的上下文）。两个方向：
 //     ① `call()`（start）：`phase` 的 continuation ⇒ 下一个读点（onTrigger）写出的必须是 2；
-//     ② `runHookEntry`（tick）：tick 里排的 continuation 必须在**探针返回前**打日志。
+//     ② `runInstrHits`（tick）：tick 里排的 continuation 必须在**探针返回前**打日志。
 // =====================================================================================
 constexpr std::uint32_t kDrainOutPhase = 0xb110u;
 
@@ -2482,7 +2497,7 @@ void caseDrainPerEntry() {
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kDrainOutPhase), 2u);
 
-    // ② runHookEntry 入口的 drain：探针返回时那一行 log 必须已经出现（同一入口内）。
+    // ② runInstrHits 入口的 drain：探针返回时那一行 log 必须已经出现（同一入口内）。
     const std::uint64_t base = f.host->logLines();
     dispatchInstr(f, kInstrPos);
     dumpFail(f);
@@ -2569,7 +2584,8 @@ void caseOnceResolve() {
     const std::uint32_t handle = hooks[0].id;
     const std::uint64_t base = f.host->logLines();
 
-    // 命中：resolve + 撤临时 hook（探针本身不 drain；continuation 由下一个泵推进）。
+    // 命中：resolve + 撤临时 hook。★ S2c：探针入口自己的 drain 就把 task 的 continuation
+    //   跑完（每个 host→JS 入口都 drain 到静止）⇒ 下面那次 pump 只是再来一个读点。
     dispatchInstr(f, kInstrPos);
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -2669,9 +2685,9 @@ void caseTaskKeepsRun() {
     LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
     const std::uint64_t base = f.host->logLines();
 
-    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ 撤 hook、enqueue task continuation
+    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ 撤 hook；continuation 在本 tick 入口的 drain 里跑
     LIFT_CHECK(f.host->instrHookList().empty());
-    f.pump();  // 泵：task 续到结尾并 settle ⇒ Run 收口
+    f.pump();  // 泵：再来一个读点 ⇒ Run 收口
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
@@ -2696,15 +2712,15 @@ void casePumpBudget() {
     lift_test::g_current_case = "plugin/pump-budget";
     Fixture f;
     if (!loadS2b(f, "pump-budget")) return;
-    LIFT_CHECK(installInstrFrame(f.mem));
     // 生产值 2 ms + op_limit 不限：判的**只**是泵的 CPU deadline（与 `plugin/drain-budget` 同形）。
     f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();  // start：task 在 await once（不 spin）
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
-    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ 下一次泵的 drain 会续到 while(true)
-    LIFT_CHECK(f.host->instrHookList().empty());
+    // ★ S2c：once **命中**的 continuation 现在在 tick 入口自己的 drain 里跑（每个入口都 drain）；
+    //   想让忙等落在**泵**里，用 **timeout 的 catch**（泵先 reject 到期的一次，再 drain 出 catch）。
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     const std::uint64_t base = f.host->logLines();
     f.pump();  // 不返回 = 泵的 drain 没有 deadline（本用例的红就是挂住）
     dumpFail(f);
@@ -2911,6 +2927,454 @@ void caseRenderAfterFinish() {
     LIFT_CHECK(f.host->readout().find("run=finished") != std::string::npos);
     std::printf("  [%s] logLines=%llu %s\n", lift_test::g_current_case,
                 static_cast<unsigned long long>(f.host->logLines()), f.host->readout().c_str());
+}
+
+// =====================================================================================
+// S2c · `ctx.at(where, (tick, next) => …)` 的同步订阅面（链 / next 截断 / off / Tick / stale）
+//
+// 红 = 同点多订阅被 v1 去重拒掉 / 链不按注册序 / `next()` 截断失效 / `off` 不撤账 /
+//      handler 抛错留下僵尸订阅 / `Tick.now` 与 `Tick.local` 读不到或读错 / stale 不抛。
+// ★ 夹具 = `tests/plugin_fixtures/at-chain.js`（`mode=` 分档；guest 写回只在 onTrigger 里做）。
+// =====================================================================================
+constexpr std::uint32_t kAtOutA = 0xb130;
+constexpr std::uint32_t kAtOutB = 0xb131;
+constexpr std::uint32_t kAtOutC = 0xb132;
+constexpr std::uint32_t kAtOutN = 0xb133;
+constexpr std::uint32_t kAtOutF0 = 0xb134;
+constexpr std::uint32_t kAtOutF1 = 0xb135;
+constexpr std::uint32_t kAtOutF2 = 0xb136;
+constexpr std::uint32_t kAtOutF3 = 0xb137;
+constexpr std::uint32_t kAtOutF4 = 0xb138;
+constexpr std::uint32_t kAtOutF5 = 0xb139;
+constexpr std::uint32_t kAtOutF6 = 0xb13a;
+constexpr std::uint32_t kAtUndef = 0x7ffffffe;  // 夹具的 `undefined` 哨兵（⛔ 不是 0）
+
+bool loadAtChain(Fixture& f, const char* mode,
+                 const std::map<std::string, std::string>& extra = {}) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    std::map<std::string, std::string> params = extra;
+    params["mode"] = mode;
+    const bool loaded = f.load("at-chain.js", params);
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+// `plugin/at-chain-order`：同点两条 at（h1 调 next 两次 = 幂等、h2 不调）
+//   ⇒ 顺序 [1,2]、同一个 Tick 对象、tick.id = hits[0].handle、两条 hits / kind 各对。
+void caseAtChainOrder() {
+    lift_test::g_current_case = "plugin/at-chain-order";
+    Fixture f;
+    if (!loadAtChain(f, "chain-order")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：装两条 at（Run 靠 at 订阅 + armed trigger 活着）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> before = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(before.size()), 2);
+    if (before.size() != 2) return;
+    const std::uint32_t h1 = before[0].id;
+    const std::uint32_t h2 = before[1].id;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(before[0].hits), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(before[1].hits), 0);
+    LIFT_CHECK(h1 < h2);  // 注册序 = handle 升序
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> after = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(after.size()), 2);
+    for (const lift::InstrHookStatus& row : after) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(row.hits), 1);
+        LIFT_CHECK(row.hook_kind == lift::InstrHookKind::Sub);
+        LIFT_CHECK(row.form == lift::InstrHookForm::Pos);
+        LIFT_CHECK_EQ_U32(row.pos, kInstrPos);
+    }
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：写回 order / 同一性 / kind / hits，然后撤两条
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), kAtUndef);  // 只有两条 ⇒ 没有第三个
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // 一次派发一个 Tick 对象
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), h1);   // tick.id = hits[0].handle
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);   // h1 < h2
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 1u);   // h1 kind == "sub"
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 1u);   // h2 kind == "sub"
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 1u);   // h1 hits
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 1u);   // h2 hits
+}
+
+// `plugin/at-next-truncates`：h1 不调 next ⇒ 只跑 h1（h2 的 hits 不涨）；下一拍调 ⇒ [1,2]。
+void caseAtNextTruncates() {
+    lift_test::g_current_case = "plugin/at-next-truncates";
+    Fixture f;
+    if (!loadAtChain(f, "next-truncates")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 2);
+    if (hooks.size() != 2) return;
+    const std::uint32_t h1 = hooks[0].id;
+    const std::uint32_t h2 = hooks[1].id;
+
+    // 截断拍：h1 不调 next ⇒ 只跑 h1（`order=[1]`）。
+    //   ★ `hits` 是 **匹配数**（probe 里 `e.hits += 1`，与 handler 是否跑无关）⇒ 两条都是 1；
+    //     "截断"的唯一读数在 `order`（h2 的 handler 没跑）。
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    {
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 2);
+        if (rows.size() == 2) {
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].hits), 1);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[1].hits), 1);  // 匹配数（不是执行数）
+        }
+    }
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger#1：写回第一拍读数 + allowNext=true
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kAtUndef);  // ★ h2 的 handler 没跑
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // h1 匹配数
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);   // h2 匹配数（同样涨；机制见上）
+
+    // 继续拍：h1 调 next ⇒ [1,2]。
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    {
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 2);
+        if (rows.size() == 2) {
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].hits), 2);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[1].hits), 2);
+        }
+    }
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger#2：写回第二拍读数 + 撤两条
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 2u);  // h2 的匹配数（第二拍）
+}
+
+// `plugin/at-off`：① onTrigger 里 off(h2) ⇒ true；再撤一次 ⇒ false；表少一条。
+//   ② 后续派发只有 h1 跑（h1 调 next ⇒ 若 h2 还在会多一行 log）。
+//   ③ mode=tick-off：handler 里 off(自己) 不抛、**不截断**（h2 照跑）、下一拍不再命中。
+void caseAtOff() {
+    lift_test::g_current_case = "plugin/at-off";
+    {
+        Fixture f;
+        if (!loadAtChain(f, "off")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：两条 at（h1 调 next）
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+
+        f.readings.pos = 0x1000u;
+        f.pump();  // onTrigger：off(h2) 两次 + 写回
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // 第一次 true
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 0u);  // 第二次 false（幂等）
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);  // 表少一条
+
+        // ② 后续派发只有 h1（它调 next；h2 若还在会变成 +2 行）。
+        const std::uint64_t base = f.host->logLines();
+        dispatchInstr(f, kInstrPos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(base + 1));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+        // ★ 撤掉的订阅**不许**留在 ui 侧的账上：`at_subs` 是 `hasPendingWork` 的来源之一，
+        //   僵尸账会让 Run 永远不收口（`implOnInstrReleased` 少一句 erase 就红在这里）。
+        f.readings.pos = 0x1000u;
+        f.pump();  // onTrigger#2：撤 h1 + return [] ⇒ 收口
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->instrHookList().empty());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    }
+    {
+        // ③ tick handler 里撤自己：门 = call_host（不是 inCallback）⇒ 不抛；撤除 ≠ 截断。
+        Fixture f;
+        if (!loadAtChain(f, "tick-off")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：两条 at（h1 会撤自己）
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+        const std::uint64_t base = f.host->logLines();
+
+        dispatchInstr(f, kInstrPos);  // h1: off=self + log；next ⇒ h2 照跑 + log
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(base + 2));
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);  // 自己那条被撤
+
+        dispatchInstr(f, kInstrPos);  // 下一拍：只有 h2
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(base + 3));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    }
+}
+
+// `plugin/at-handler-error`：h1 抛 ⇒ 一行 error（at #N hit #M）+ **撤整条订阅** + 截断；
+//   h2 不跑但 hits 照涨；第二次派发 log 不再增长（h1 已不在），h2 的 hits 继续涨。
+void caseAtHandlerError() {
+    lift_test::g_current_case = "plugin/at-handler-error";
+    Fixture f;
+    if (!loadAtChain(f, "handler-error")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 2);
+    if (hooks.size() != 2) return;
+    const std::uint32_t h1 = hooks[0].id;
+    const std::uint32_t h2 = hooks[1].id;
+    const std::uint64_t base = f.host->logLines();
+
+    dispatchInstr(f, kInstrPos);  // h1 抛 "boom"
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());  // 观察者挂掉不 fail Run
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                      static_cast<std::int64_t>(base + 1));  // 恰好一行
+    {
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);  // 整条订阅被撤
+        if (rows.size() == 1) {
+            LIFT_CHECK_EQ_U32(rows[0].id, h2);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].hits), 1);  // runtime 计数照涨
+        }
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h1)), 0);  // h1 已经不在了
+
+    dispatchInstr(f, kInstrPos);  // 第二次：h1 不再跑（log 不涨），h2 的 hits 涨
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                      static_cast<std::int64_t>(base + 1));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h2)), 2);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：写回读数 + 撤 h2（让 Run 收口）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // 表里只剩 h2
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 2u);   // h2 hits
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);   // h1 不在表里
+    LIFT_CHECK(f.host->instrHookList().empty());
+}
+
+// `plugin/tick-now`：`tick.now.{script,pos,opcode?}` 是本拍快照；平铺 deprecated 字段相等；
+//   读不到 opcode（pc 在未提交页）⇒ `now` 里**缺键**（⛔ 不编 0）。
+void caseTickNow() {
+    lift_test::g_current_case = "plugin/tick-now";
+    {
+        Fixture f;
+        if (!loadAtChain(f, "now")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+        if (hooks.size() != 1) return;
+        const std::uint32_t handle = hooks[0].id;
+
+        dispatchInstr(f, kInstrPos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        f.readings.pos = 0x1000u;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // now.script == "FIELD.BIN"
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kInstrPos);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);  // now 里有 opcode
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), kInstrOpcode);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), kInstrPos);  // 平铺 pos == now.pos
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);         // 平铺 script
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), kInstrOpcode);// 平铺 opcode
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), handle);      // tick.id
+    }
+    {
+        // 变体：pc 摆在**未提交页** 0x590000 ⇒ pos = 0x3C + 0xB0000；`mem.rd32(pc)` 读不到。
+        constexpr std::uint32_t kNoOpcodePos = lift::kScriptHeaderLen + 0xB0000u;
+        Fixture f;
+        if (!loadAtChain(f, "now", {{"pos", std::to_string(kNoOpcodePos)}})) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        dispatchInstr(f, kNoOpcodePos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        f.readings.pos = 0x1000u;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // 脚本名仍可读
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kNoOpcodePos);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // ("opcode" in now) === false
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), kAtUndef);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), kAtUndef);  // 平铺 opcode 也缺键
+    }
+}
+
+// `plugin/tick-local`：`tick.local.{int,ptr,ptrDword}` 的语义值；越界 / 指针 0 ⇒ undefined。
+void caseTickLocal() {
+    lift_test::g_current_case = "plugin/tick-local";
+    Fixture f;
+    if (!loadAtChain(f, "local")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(installInstrLocalValues(f.mem));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 7u);                  // int(0) 的语义值
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 0xFFFFFFFFu);         // int(7) = 0xFFFFFFFF（int32 = -1）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), kAtUndef);            // int(8) 越界 ⇒ undefined
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), kInstrLocalTarget);   // ptr(0) = 地址原样
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 9u);                 // ptrDword(0) = 语义 9
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), kAtUndef);           // ptr(2) 越界
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), kAtUndef);           // ptrDword(1)：指针 0
+}
+
+// `plugin/tick-stale`：Tick 存进模块变量，下一次 **call() 入口**里 `local.*` ⇒ stale_tick；
+//   `now` 快照仍读旧值（不抛）；`log` 仍可用。
+void caseTickStale() {
+    lift_test::g_current_case = "plugin/tick-stale";
+    Fixture f;
+    if (!loadAtChain(f, "stale")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    dispatchInstr(f, kInstrPos);  // handler 把 Tick 存进模块变量
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::uint64_t base = f.host->logLines();
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger（call 入口）：local.int ⇒ stale；now.pos 是旧值；log 成功
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);       // 抛了、消息含 stale_tick
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kInstrPos);// now 是快照（上一拍的 0x100）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);       // log 仍可用
+    LIFT_CHECK(f.host->logLines() > base);                 // "late log" 真的打出来了
+}
+
+// `plugin/at-multi-same-pos`：同点 4 条（at×2 + v1 onTick + once）⇒ 一条链；
+//   截断只影响 at 参与者；once 的 `.then` 在**同一入口的 drain** 里跑；`duplicate` 只对 v1 生效。
+void caseAtMultiSamePos() {
+    lift_test::g_current_case = "plugin/at-multi-same-pos";
+    Fixture f;
+    if (!loadAtChain(f, "multi-same-pos")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：4 条全都装上（同点不互斥）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 4);
+    if (hooks.size() != 4) return;
+    const std::uint32_t h1 = hooks[0].id;
+    const std::uint32_t h2 = hooks[1].id;
+    const std::uint32_t v1 = hooks[2].id;
+    LIFT_CHECK(hooks[0].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[1].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[2].hook_kind == lift::InstrHookKind::V1At);
+    LIFT_CHECK(hooks[3].hook_kind == lift::InstrHookKind::Once);
+
+    dispatchInstr(f, kInstrPos);  // 一次派发命中 4 条
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    // once 命中即撤；剩下 3 条（h1 / h2 / v1）各 hits == 1。
+    const std::vector<lift::InstrHookStatus> after = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(after.size()), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h1)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h2)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(v1)), 1);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：写回 order / onceRan / kind，然后撤（v1.clear + off at）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // h1
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);  // h2（它不 next，但自己是链尾）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 99u); // v1 onTick（被动，不受截断影响）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 3u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u); // once 的 .then 在同一入口的 drain 里跑了
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 3u); // 表里剩 h1 / h2 / v1
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 1u);
+}
+
+// `plugin/at-keeps-run`：`start` 返回 null + 一条 at ⇒ Run 靠订阅存活；handler 里 off(self)
+//   ⇒ 再一个读点后收口。红了 = `hasPendingWork` 不含 at_subs ⇒ 第一拍就收口、表被清空。
+void caseAtKeepsRun() {
+    lift_test::g_current_case = "plugin/at-keeps-run";
+    Fixture f;
+    if (!loadAtChain(f, "keeps-run")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start 返回 null ⇒ runner done，但 at 订阅让 Run 活着
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+
+    f.pump();  // 再来一个读点：仍活着（只靠 at_subs 这一支）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+
+    dispatchInstr(f, kInstrPos);  // handler：ctx.off(self) ⇒ 订阅没了
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->instrHookList().empty());
+
+    f.pump();  // 没有待推工作 ⇒ 收口
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    LIFT_CHECK(!lift::instrHooksActive());
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
 }
 
 // =====================================================================================
@@ -3850,6 +4314,16 @@ int main() {
     caseOnceHookClear();
     caseTaskFinishThenReject();
     caseRenderAfterFinish();
+    // ---- S2c（`ctx.at` 的同步订阅面 / 链 / next 截断 / off / Tick 只读面 / stale）----
+    caseAtChainOrder();
+    caseAtNextTruncates();
+    caseAtOff();
+    caseAtHandlerError();
+    caseTickNow();
+    caseTickLocal();
+    caseTickStale();
+    caseAtMultiSamePos();
+    caseAtKeepsRun();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);
