@@ -1,123 +1,87 @@
-// 典型用法：HUD 在 A 显示、在 B 隐藏；两个具名 Trigger 并发 armed（第五轮，v5.3.2）。
-// render 每帧用 ctx.draw 发 display list。
+// HUD：位置 → 模块数据 → render 画（v2 的分层）。
 //
-// ⛔ 不写具体坐标 / 文本；所有数值都是占位。
+// 演示什么
+//   · v1 = 两个具名 Trigger（afterPosition）在 onTrigger 里 `ctx.ui.show/hide`，render 每帧 `ctx.draw`；
+//   · v2 = **tick 不碰 UI**：`ctx.at` 的 handler 只改模块数据（要不要显示、画什么），
+//     `render(rctx)` 每帧读这份数据 + `rctx.ui` / `rctx.draw`。
+//   · 为什么这样分：tick handler 的入口不打开 `in_callback_`，RunCtx 的 `ui` / `trigger` / `fail`
+//     在那里都是 TypeError；能做的只有 `tick.log` / `tick.edit` / `tick.input` / `tick.patch`
+//     和存下来的 RunCtx 的只读查询 + `ctx.off`。UI 状态天然属于 render。
+//
+// v2 新写法
+//   · `ctx.at({script,lo,hi}, handler)`：区间 `[lo,hi)`；一条订阅每次命中都进 handler（没有 mode）。
+//   · 模块级数据对象 = per-plugin 状态（v2 不依赖 ctx.state）。
+//   · `render(rctx)` 的鼠标 / hover 用 `rctx.game.mouse()`（这一帧没有读数 ⇒ `undefined`，⛔ 不编 0）。
+//
+// 占位值
+//   · 坐标 / 字号 / 颜色 / 文案全是占位；`lo` / `hi` 是半开区间，真实值必须 `lo < hi`；
+//     `script` 必须是 marker 文件名（含 .BIN）。本文件两个区间都留 0，只为展示形状。
 
-import type {
-    FiredEvent,
-    PluginModule,
-    RenderCtx,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RenderCtx, RunCtx } from "@amayui/lift-plugin";
 
-const HUD_ID = "hud";
-const HUD_HOVER_ID = "hud:hover"; // render 写 UI 状态（hover）
+const HUD_HOVER_ID = "hud:hover"; // render 写的 UI 状态键（模块数据是本文件的主数据面）
 
-const N = {
-    show: "hud:show",
-    hide: "hud:hide",
-} as const;
-
-const ENTER_SCRIPT = "TITLE"; // 占位：进屏脚本
-const ENTER_LO = 0x00000000; // 占位：进屏停点区间
+const ENTER_SCRIPT = "TITLE.BIN"; // 占位：进屏脚本
+const ENTER_LO = 0x00000000; // 占位：进屏停点区间 [lo,hi)
 const ENTER_HI = 0x00000000;
-const LEAVE_SCRIPT = "FIELD"; // 占位：另一个正向位置（离屏的那个已知停点）
+const LEAVE_SCRIPT = "FIELD.BIN"; // 占位：离屏的另一个正向位置
 const LEAVE_LO = 0x00000000;
 const LEAVE_HI = 0x00000000;
 
 const HUD_ANCHOR_X = 0; // 占位
-const HUD_ANCHOR_Y = 0; // 占位
-const HUD_LINE_H = 0; // 占位
-const HUD_PAD = 0; // 占位
-const HUD_MIN_W = 0; // 占位
-const HUD_FONT_SIZE = 0; // 占位
+const HUD_ANCHOR_Y = 0;
+const HUD_LINE_H = 0;
+const HUD_PAD = 0;
+const HUD_MIN_W = 0;
+const HUD_FONT_SIZE = 0;
 const HUD_FILL = ""; // 占位：颜色串
-const HUD_STROKE = ""; // 占位
-const HUD_TEXT_FILL = ""; // 占位
-const HUD_HOVER_FILL = ""; // 占位
+const HUD_STROKE = "";
+const HUD_TEXT_FILL = "";
+const HUD_HOVER_FILL = "";
 
+/** tick handler 只改这份数据；render 每帧读它。 */
 interface HudData {
-    readonly title: string;
-    readonly lines: readonly string[];
+    visible: boolean;
+    title: string;
+    lines: string[];
 }
 
-// Trigger 需要 ctx 才能创建 ⇒ 不能进静态 initialState；首读是 undefined，必须 guard。
-interface HudRunState {
-    show?: Trigger;
-    hide?: Trigger;
-}
+const hud: HudData = { visible: false, title: "", lines: [] }; // 占位：文本由本地化提供
 
-function makeTriggers(ctx: RunCtx<HudRunState>): [Trigger, Trigger] {
-    return [
-        ctx.trigger.afterPosition(ENTER_SCRIPT, ENTER_LO, ENTER_HI, {
-            name: N.show,
-            mode: "reenter",
-        }),
-        ctx.trigger.afterPosition(LEAVE_SCRIPT, LEAVE_LO, LEAVE_HI, {
-            name: N.hide,
-            mode: "reenter",
-        }),
-    ];
-}
+let enterId: number | undefined;
+let leaveId: number | undefined;
 
-function start(ctx: RunCtx<HudRunState>): Trigger[] {
-    const [show, hide] = makeTriggers(ctx);
-    ctx.state.show = show;
-    ctx.state.hide = hide;
-    return [show, hide];
-}
+function start(ctx: RunCtx): void {
+    enterId = ctx.at({ script: ENTER_SCRIPT, lo: ENTER_LO, hi: ENTER_HI }, (tick, next) => {
+        hud.visible = true;
+        hud.title = ""; // 占位：标题
+        hud.lines = []; // 占位：正文行
+        tick.log("debug", "hud: enter @" + String(tick.now.pos));
+        next(); // 继续同点的后续 at handler（没有就只是示范链语义）
+    });
 
-function onTrigger(ctx: RunCtx<HudRunState>, ev: FiredEvent | TimeoutEvent): Trigger[] | null {
-    if (ev.kind === "timeout") {
-        ctx.ui.hide(HUD_ID);
-        ctx.finish(5, `hud: gate timeout (${ev.name})`);
-        return null;
+    leaveId = ctx.at({ script: LEAVE_SCRIPT, lo: LEAVE_LO, hi: LEAVE_HI }, (tick, next) => {
+        hud.visible = false;
+        tick.log("debug", "hud: leave @" + String(tick.now.pos));
+        next();
+    });
+
+    if (enterId === undefined || leaveId === undefined) {
+        ctx.fail("hud", "ctx.at 未装（no_injection）");
     }
-
-    const { show, hide } = ctx.state;
-    if (show === undefined || hide === undefined) {
-        ctx.fail(undefined, "hud: state not initialized");
-        return null;
-    }
-
-    switch (ev.name) {
-        case N.show: {
-            const data: HudData = { title: "", lines: [] }; // 占位：文本由本地化提供
-            ctx.ui.show(HUD_ID, data);
-            break;
-        }
-        case N.hide:
-            ctx.ui.hide(HUD_ID);
-            break;
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
-    }
-
-    // 返回完整的新 armed 集合：两个都是**同一个对象**，边沿/maxFires 继续有效。
-    return [show, hide];
+    ctx.log("info", "hud: subscriptions installed");
 }
 
-// ---------------------------------------------------------------------------
-// render：每帧按 UI 状态画（v5.3.2：1280×720 逻辑系；z 序=调用顺序；每帧清空）
-// ---------------------------------------------------------------------------
-function render(ctx: RenderCtx): void {
-    if (!ctx.ui.visible(HUD_ID)) return;
+function render(rctx: RenderCtx): void {
+    if (!hud.visible) return;
 
-    // get<T> 是调用方断言；宿主不做运行时校验（d.ts:168）。
-    const state = ctx.ui.get<HudData>(HUD_ID);
-    if (state === undefined) return;
+    const style = { size: HUD_FONT_SIZE, fill: HUD_TEXT_FILL };
+    const measuredTitle = rctx.draw.measure(hud.title, style);
+    const width = Math.max(HUD_MIN_W, measuredTitle.width + HUD_PAD * 2);
+    const height = measuredTitle.height + HUD_PAD * 2 + hud.lines.length * HUD_LINE_H;
 
-    const titleStyle = { size: HUD_FONT_SIZE, fill: HUD_TEXT_FILL };
-    const title = ctx.draw.measure(state.title, titleStyle);
-    const width = Math.max(HUD_MIN_W, title.width + HUD_PAD * 2);
-    const height = title.height + HUD_PAD * 2 + state.lines.length * HUD_LINE_H;
-
-    // ★ 这一帧没有鼠标读数 ⇒ `mouse` 是 `undefined`（C2b：host 没有值时**不编 0**）
-    //   ⇒ hover 直接 false，⛔ 不拿 `{x:0,y:0}` 去算命中（那会画出一个假的 hover）。
-    const mouse = ctx.game.mouse();
+    // 这一帧没有鼠标读数 ⇒ `undefined`；没有按键源 ⇒ `buttons` 缺键。两者都按「不在 HUD 上」处理。
+    const mouse = rctx.game.mouse();
     const hover =
         mouse !== undefined &&
         mouse.x >= HUD_ANCHOR_X &&
@@ -125,31 +89,24 @@ function render(ctx: RenderCtx): void {
         mouse.y >= HUD_ANCHOR_Y &&
         mouse.y < HUD_ANCHOR_Y + height;
 
-    // render 也可写 ctx.ui（hover/动画）；只影响 UI 状态，不做 guest 写。
-    ctx.ui.set(HUD_HOVER_ID, hover);
+    rctx.ui.set(HUD_HOVER_ID, hover);
 
-    // 后调用在上：先底框，再标题，再正文。
-    ctx.draw.rect(HUD_ANCHOR_X, HUD_ANCHOR_Y, width, height, {
+    // 后调用在上：先底框、再标题、再正文。
+    rctx.draw.rect(HUD_ANCHOR_X, HUD_ANCHOR_Y, width, height, {
         fill: hover ? HUD_HOVER_FILL : HUD_FILL,
         stroke: HUD_STROKE,
     });
-    ctx.draw.text(HUD_ANCHOR_X + HUD_PAD, HUD_ANCHOR_Y + HUD_PAD, state.title, titleStyle);
-
-    state.lines.forEach((line, i) => {
-        ctx.draw.text(
+    rctx.draw.text(HUD_ANCHOR_X + HUD_PAD, HUD_ANCHOR_Y + HUD_PAD, hud.title, style);
+    hud.lines.forEach((line, i) => {
+        rctx.draw.text(
             HUD_ANCHOR_X + HUD_PAD,
-            HUD_ANCHOR_Y + HUD_PAD + title.height + i * HUD_LINE_H,
+            HUD_ANCHOR_Y + HUD_PAD + measuredTitle.height + i * HUD_LINE_H,
             line,
-            titleStyle,
+            style,
         );
     });
 }
 
-const plugin = {
-    initialState: {},
-    render,
-    start,
-    onTrigger,
-} satisfies PluginModule<HudRunState>;
+const plugin = { render, start } satisfies PluginModule;
 
 export default plugin;

@@ -1,123 +1,111 @@
-// 典型用法：UI 插件在按钮按下时 dispatch 一个子 Run，并在 render 里画它的状态
-// （第五轮，v5.3.2）。
+// 为什么这个例子没有 dispatch（v2）：**dispatch 属控制层，不在插件 API 里**。
 //
-// ⛔ 数值 / 文案全是占位；不写具体坐标。
-// d.ts 语义（原文）："Run 是一次 callback 链的执行实例；一个 endpoint 同时一个 active，
-// 已有 ⇒ busy"；dispatch 同步返回，返回时 start 已跑完。
+// 演示什么
+//   · v1 的「UI 按钮按下时 dispatch 一个子 Run」在 v2 被拆成两件事：
+//       ① 子流程的**内容** = 同一个 Run 里的 `ctx.task` / `ctx.at` / `ctx.once`（组合，不新开 Run）；
+//       ② 「换一个 Run」= 当前 Run 结束（`finish` / `quit` / `fail`，都只能在 Run 回调里），
+//          由控制层（emu-ctl / UI 宿主）dispatch 下一个。
+//   · 插件里 ⛔ 没有 `ctx.run.dispatch`，也 ⛔ 不允许嵌套 Run；`RenderCtx.run` 声明保留、运行期不安装。
+//
+// v2 新写法
+//   · `ctx.task(async (t) => …)`：把一段「子配方」内联进当前 Run，共享同一个 ctx / 生命周期。
+//   · `ctx.at(where, handler)`：进度用订阅表达；要停就 `ctx.off(id)`（只减，不是 abort 一个 Run）。
+//   · `render(rctx)` 只读模块数据 + `rctx.draw` / `rctx.ui`；**tick / task 不碰 UI**。
+//     按钮的点击在 render 里发生 —— 它能做的最多是用存下来的 RunCtx 调 `ctx.off`，
+//     ⛔ 不能 dispatch、不能 `ctx.task`、不能 `finish`（那些门 = Run 回调）。
+//
+// 占位值
+//   · 坐标 / 颜色 / 文案 / 脚本位置全是占位；`script` 真实写法必须是 marker 文件名（含 .BIN）。
 
-import type {
-    DispatchResult,
-    PluginModule,
-    RenderCtx,
-    RunHandle,
-    RunState,
-    RunStatus,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RenderCtx, RunCtx } from "@amayui/lift-plugin";
 
-const CHILD_MODULE = "child-run"; // 占位：子 Run 的 module 名
+const CHILD_POINT = { script: "SAVE.BIN", pos: 0x00000000 } as const; // 占位：子流程等的指令点
+const WATCH_RANGE = { script: "FIELD.BIN", lo: 0x00000000, hi: 0x00000000 } as const; // 占位：进度区间
+
+const CHILD_TIMEOUT_MS = 30_000; // 占位：once 的失败截止
+
 const BUTTON_X = 0; // 占位：按钮矩形
 const BUTTON_Y = 0;
 const BUTTON_W = 0;
 const BUTTON_H = 0;
-const STATUS_X = 0; // 占位：状态文字位置
-const STATUS_Y = 0;
-const PARAMS: Readonly<Record<string, string>> = { slot: "0" }; // 占位
-
 const FONT_SIZE = 0; // 占位
 const BUTTON_FILL = ""; // 占位：颜色串
 const BUTTON_FILL_HOVER = ""; // 占位
 const BUTTON_STROKE = ""; // 占位
 const TEXT_FILL = ""; // 占位
-const IDLE_LABEL = ""; // 占位：空闲文案（本地化提供）
 
-const HOVER_ID = "dispatch:hover";
-const EVENT_SEQ_ID = "dispatch:eventSeq";
+const HOVER_ID = "dispatch:hover"; // render 写的 UI 状态键
 
-// d.ts:244 明确：模块级变量是 per-plugin 状态（render/onTrigger 共享）。
-// 同一 module 被多个 endpoint 装载时是否共享仍没写（P2）。
-let handle: RunHandle | null = null;
+type Phase = "idle" | "waiting" | "done" | "failed";
+
+/** 模块级变量 = per-plugin 状态（render / task / at handler 共享）——v2 不依赖 ctx.state。 */
+const child: { phase: Phase; hits: number } = { phase: "idle", hits: 0 };
+
+/** start 存下来的 RunCtx：render 里只有 `off` 这一个「只减」操作允许跨入口用。 */
+let runCtx: RunCtx | undefined;
+let watchId: number | undefined;
 let mouseWasDown = false;
 
-function hit(x: number, y: number): boolean {
+function inButton(x: number, y: number): boolean {
     return x >= BUTTON_X && x < BUTTON_X + BUTTON_W && y >= BUTTON_Y && y < BUTTON_Y + BUTTON_H;
 }
 
-/** 一个 endpoint 只有一个 active；busy 时不要覆盖已有 handle。 */
-function dispatchOnce(ctx: RenderCtx): void {
-    const r: DispatchResult = ctx.run.dispatch(CHILD_MODULE, PARAMS);
-    if (r.ok) {
-        // DispatchResult 可判别：ok=true ⇒ busy=false 且 handle 必有。
-        handle = r.handle;
-        // v5.3.2：dispatch 同步，返回时 start 已跑完 ⇒ armedNames 现在就绪。
-        const st = ctx.run.status(r.handle);
-        ctx.log("info", "child dispatched", {
-            armedNames: st.armedNames,
-            armedCount: st.armed.length,
-        });
-        return;
-    }
-    if (r.busy) {
-        ctx.log("info", "dispatch busy: a run is already active on this endpoint");
-        return;
-    }
-    ctx.log("warn", "dispatch failed", { code: r.code });
+function start(ctx: RunCtx): void {
+    runCtx = ctx;
+    child.phase = "waiting";
+
+    // 「子流程」= 同一 Run 内的组合，不是第二个 Run。
+    ctx.task(async (t) => {
+        try {
+            const tick = await t.once(CHILD_POINT, { timeoutMs: CHILD_TIMEOUT_MS });
+            child.phase = "done";
+            t.log("info", "composed child: reached " + tick.now.script + " @" + String(tick.now.pos));
+        } catch (err) {
+            child.phase = "failed";
+            // 想让 Run 以这条原因失败：重新抛出即可（task 拒绝 ⇒ 宿主 fail Run）。
+            throw err;
+        }
+    });
+
+    // 进度观察：一条 at 订阅。按钮要「停」的是它，而不是 dispatch 一个子 Run。
+    watchId = ctx.at(WATCH_RANGE, (tick, next) => {
+        child.hits += 1;
+        next(); // 不调 = 截断后面同点的 at handler（本文件没有下一条，写在这里是示范链语义）
+    });
+    if (watchId === undefined) ctx.fail("dispatch", "ctx.at 未装（no_injection）");
+
+    ctx.log("info", "dispatch: composed in one Run; no nested Run / no dispatch");
 }
 
-function statusOf(handleOrNull: RunHandle | null, ctx: RenderCtx): RunStatus | null {
-    return handleOrNull === null ? null : ctx.run.status(handleOrNull);
-}
-
-/** 消化 events(since)：RunEvent.seq 单调；RunEvent.name 仍为可选。 */
-function drainEvents(ctx: RenderCtx): void {
-    const since = ctx.ui.get<number>(EVENT_SEQ_ID) ?? 0;
-    const events = ctx.run.events(since);
-    for (const ev of events) {
-        ctx.log("debug", `child run ${ev.type}`, {
-            handle: ev.handle.id,
-            plugin: ev.plugin,
-            name: ev.name,
-        });
-    }
-    const last = events.at(-1);
-    if (last !== undefined) ctx.ui.set(EVENT_SEQ_ID, last.seq);
-}
-
-function render(ctx: RenderCtx): void {
-    // ★ 两个"没有值"的口都要判（C2b）：`mouse()` 这一帧没有读数 ⇒ `undefined`；
-    //   而 `buttons`（三键电平）在 C2 没有读数源 ⇒ **缺键**（⛔ 不编 false）。
-    //   ⇒ 两者都按"全部抬起"处理，hover 也直接 false（⛔ 不拿 `{x:0,y:0}` 算命中）。
-    const mouse = ctx.game.mouse();
-    const down = mouse !== undefined && mouse.buttons !== undefined && mouse.buttons.left;
-    const hover = mouse !== undefined && hit(mouse.x, mouse.y);
-    // render 没有按下/抬起事件，只有 buttons 电平 ⇒ 自己做一个边沿。
+function render(rctx: RenderCtx): void {
+    // 两个「没有值」的口都要判：这一帧没有鼠标读数 ⇒ `mouse()` undefined；没有按键源 ⇒ `buttons` 缺键。
+    const mouse = rctx.game.mouse();
+    const down = mouse?.buttons?.left ?? false;
+    const hover = mouse !== undefined && inButton(mouse.x, mouse.y);
     const pressed = down && !mouseWasDown && hover;
     mouseWasDown = down;
 
-    if (pressed) dispatchOnce(ctx);
-    drainEvents(ctx);
+    if (pressed) {
+        // ⛔ 这里不是 dispatch。按钮只能撤订阅；「换一个 Run」是控制层的事。
+        log.info("dispatch: button pressed — dispatch 属控制层，插件只做 ctx.off");
+        if (runCtx !== undefined && watchId !== undefined) {
+            runCtx.off(watchId);
+            watchId = undefined;
+        }
+    }
 
-    const status = statusOf(handle, ctx);
-    const label: string | RunState = status === null ? IDLE_LABEL : status.state;
-
-    // render 可写 UI 状态，也可以用 ctx.draw 发本帧 display list。
-    ctx.ui.set(HOVER_ID, hover);
-    ctx.draw.rect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, {
+    rctx.ui.set(HOVER_ID, hover);
+    rctx.draw.rect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, {
         fill: hover ? BUTTON_FILL_HOVER : BUTTON_FILL,
         stroke: BUTTON_STROKE,
     });
-    ctx.draw.text(STATUS_X, STATUS_Y, label, { size: FONT_SIZE, fill: TEXT_FILL });
-
-    // 一个 endpoint 一个 active：current() 给的是"本插件当前 active Run"。
-    const active = ctx.run.current();
-    if (active !== null && active.state !== "done" && active.state !== "failed" && active.state !== "aborted") {
-        ctx.log("debug", "child run still active", {
-            handle: active.handle.id,
-            armedNames: active.armedNames,
-            armedCount: active.armed.length,
-        });
-    }
+    // 状态文字只读模块数据（task / at 写它，render 读它）。
+    rctx.draw.text(BUTTON_X, BUTTON_Y, child.phase + " hits=" + String(child.hits), {
+        size: FONT_SIZE,
+        fill: TEXT_FILL,
+    });
 }
 
-const plugin = { render } satisfies PluginModule;
+const plugin = { render, start } satisfies PluginModule;
 
 export default plugin;

@@ -1,18 +1,31 @@
-// v1 / 2026-11-19 / 合同 — plugin API 合同；后续变更需显式修订版本。
+// 合同 — plugin API 合同；后续变更需显式修订版本。
 // 模块 specifier: "@amayui/lift-plugin"。
 // 插件文件 = ES module；`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
 // 宿主 QJS 装载后读 default 导出；不再读 globalThis.render/start/onTrigger。
 //
-// 核心语义（先读这 8 条）：
+// ★ v2（S2c/S3，2026-11-28）：新插件写 `start(ctx)` 装 `ctx.at` / `ctx.once` / `ctx.task`，
+//   `start` 返回 `void`（不再返回 Trigger 集合）；指令点回调 / `once` 的 resolve 给一个 `Tick`，
+//   写面在 Tick 上（`now` / `local` / `edit` / `input` / `patch` / `log`）。
+//   `ctx.at` / `ctx.once` / `ctx.task` 的门 = **Run 回调**（`start` / `onTrigger`；`ctx.task` 的同步
+//   首段也在 Run 回调里）；tick handler / render / 泵里只读 + `ctx.off`（只减）+ 全局 `log`。
+//   v1 面（`ctx.trigger` / `ctx.hook.at` / `ctx.now` / `handle.onTick` / `onTrigger`）仍可用，但都是
+//   **deprecated 兼容层**（见各成员注释）；examples 已全部按 v2 写（`scripts/plugins/examples/`）。
+//
+// 核心语义（先读这 8 条；第 4 条是 v1）：
 // 1. Edit（ctx.edit）在触发点/安全点立即同步写，不排队；暂停时也可执行。
+//     v2 在 Tick 上：tick.edit 是**同一个宿主方法**（立即持久写）。
 // 2. Input（ctx.input）只入队，在 guest 读点按“一读点最多一条”串行施加；click 只保证 queued。
+//     v2 在 Tick 上：tick.input 是**同一个宿主方法**（入队，下一读点落地）。
 // 3. EngineRead（ctx.read）同步只读、不暂停、便宜；sample/screenshot 不在这里。
 // 4. Trigger（ctx.trigger）具名；start/onTrigger 返回 Trigger|Trigger[]|null；数组=完整替换 armed 集合；
-//    一个读点最多触发一个；null/[]=done；重复 name=fail。
+//    一个读点最多触发一个；null/[]=done；重复 name=fail。**deprecated（v1）**：v2 用 ctx.at / ctx.once。
 // 5. UI（ctx.ui）只改宿主本地状态；onTrigger 不画，render 用 ctx.draw 画；下一次 render 才可见。
+//     v2 分层：tick handler **不碰 UI**（只改插件模块数据），render(rctx) 读数据 + rctx.draw / rctx.ui。
 // 6. render 也可写 ctx.ui（hover/动画），但只影响 UI 状态；render 不做 guest 写。
 // 7. Run（ctx.run）是一次 callback 链的执行实例；一个 endpoint 同时一个 active，已有 ⇒ busy。
+//    ★ v2：**不允许嵌套 Run**；组合用 ctx.task，切换 Run 由控制层做（dispatch 不在插件 API 里）。
 // 8. ctx.finish 结束当前 Run（可映射旧 exit 5）；ctx.quit 请求宿主停机（WM_QUIT/stop_requested）。
+//    ★ 两者都只能在 Run 回调里调；task continuation / 泵 / tick / render 里是 TypeError。
 declare module "@amayui/lift-plugin" {
 export type GlobalKind = "int" | "uint" | "float" | "string";
 export type GlobalValue<K extends GlobalKind = GlobalKind> =
@@ -505,31 +518,42 @@ export interface ConfigApi {
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
  * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`；
- *   2026-11-26 `config` 加回 `RenderCtx`）：
- *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `hook` / `once` / `task` /
- *     `ui`（**只写**宿主本地状态）/ `profile` / `state` / `params` / `appdata` / `config` /
- *     `log` / `fail` / `finish` / `quit` / `now`；
- *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
- *     `run` / `dispatch`（C5）——`ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；
- *     也不安装 `sample` / `screenshot`（永远不做）。
+ *   2026-11-26 `config` 加回 `RenderCtx`；S2b/S2c 追加 `once` / `task` / `at` / `off`）：
+ *   - **v2（推荐）**：`at` / `off` / `once` / `task` + `config` / `appdata` / `read` / `log` /
+ *     `fail` / `finish` / `quit`；
+ *   - **v1 兼容层（deprecated）**：`trigger` / `hook` / `now`（新代码见各成员的 `@deprecated`）；
+ *   - 其它已实现：`edit` / `input` / `read.global.get` / `ui`（**只写**宿主本地状态，v2 里 UI 只归
+ *     render）/ `profile` / `state` / `params`；
+ *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上）/ `run` / `dispatch`（C5）——
+ *     `ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；也不安装 `sample` / `screenshot`（永远不做）。
  */
 export interface RunCtx<State = Record<string, unknown>> {
     readonly edit: EditApi;
     readonly input: InputApi;
     readonly read: ReadApi;
+    /**
+     * **v1 兼容层**：具名 armed 集合（afterScript / afterPosition / afterDelay / atReadPoint）。
+     * @deprecated v2 用 `ctx.at`（同步订阅）/ `ctx.once`（async 等待）/ `ctx.task`（协程）；
+     *   本字段仍按 v1 语义工作（start/onTrigger 返回 Trigger|Trigger[]|null），新插件不要再写。
+     */
     readonly trigger: TriggerApi;
     /**
-     * **脚本指令位置钩子**：`at(script,pos)` 只装"到点"（纯观察），句柄上的 `capture/stats` 读 local、
+     * **脚本指令位置钩子**（v1）：`at(script,pos)` 只装"到点"（纯观察），句柄上的 `capture/stats` 读 local、
      * `patch` 改值（该指令读之前覆盖、下一条脚本指令派发前恢复 ⇒ **净变化 0**，⛔ 不进存档）。
      * ★ 触发 / 读 / 改是**三个独立能力**（用户裁决 2026-11-26 晚）；持久写仍走 `ctx.edit.global.set`。
      * ★ 只 `RunCtx` 有（`RenderCtx` 没有：render 不做 guest 写）。
+     * @deprecated v2 的**触发**面用 `ctx.at`（链 + `next()`）/ `ctx.once`；
+     *   `hook.at` 只剩"读写 local / patch"这一半用途（新代码若要 patch/capture 仍可用它）。
      */
     readonly hook: HookApi;
     /** **异步等待**一个脚本指令点（S2b）：命中 ⇒ resolve 一个 `Tick`（与 `ctx.at` 的 Tick 同形；
      *  `id` = 这条 `once` 自己的临时订阅）。★ S2c-2 起 `local` / `edit` / `input` 在 resolve 的
      *  `.then` 里可用（continuation 在同一入口的 drain 里跑）；`patch` 会回执 `once_tick`
      *  （临时条目已撤）。
-     *  · `where` 本切片只收 `{script,pos}`（`{script,lo,hi}` / `{opcode}` 是 S2c）；
+     *  · `where` 只收 `{script,pos}`（S2c 把 `{script,lo,hi}` / `{script}` / `{opcode}` 扩给了
+     *    `ctx.at`；`ctx.once` 仍是**单点**）。
+     *  · **门 = Run 回调**：要连续等多个点，必须在 `ctx.task` 的**同步首段**（第一个 await 之前）
+     *    把各个 `once` 都注册好，再按顺序 `await`；continuation 里再 `ctx.once` 会 TypeError。
      *  · `opts.timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：到点 = **失败截止**
      *    （先 reject，让 `catch` 在泵里 drain 到；随后宿主记 timeout 并 **fail Run**）。
      *    ⛔ 不提供"永不结束的等待"；
@@ -583,7 +607,9 @@ export interface RunCtx<State = Record<string, unknown>> {
     /** `ctx.log(level, message, data?)`：**一行一条、有界、去重**；`data` 当前**不进日志行**
      *  （结构化数据请先 `String(...)` 再传 message）。 */
     readonly log: LogApi;
-    /** **本读点的读数快照**；每次回调新建、只在本回调内有效（⛔ 不要存进模块变量）。 */
+    /** **本读点的读数快照**；每次回调新建、只在本回调内有效（⛔ 不要存进模块变量）。
+     *  @deprecated v2 用 `Tick.now`（`ctx.at` 的回调参数 / `ctx.once` 的 resolve）；
+     *    本字段是 v1 兼容层，值仍按 v1 语义填。 */
     readonly now: RunNow;
     /** 失败当前 Run；name 是可选的具名状态，reason 是原因。
      *  ★ 终态异常：本回调里**已经提交**的 `ctx.input.*` 会被立刻丢弃（⛔ 不再落地）。 */
@@ -703,7 +729,7 @@ export interface Tick {
      */
     patch(target: InstrHookTarget, value: number): Receipt;
     log(level: string, message: string, data?: unknown): void;
-    // ---- deprecated（S4 删；S2a/S2b 的夹具与 d.ts 曾用平铺字段）----
+    // ---- v1 兼容层（平铺字段；新代码用 `now.*`）----
     /** @deprecated 用 `now.script`。 */
     readonly script: string;
     /** @deprecated 用 `now.pos`。 */
@@ -713,8 +739,8 @@ export interface Tick {
 }
 /** S2a/S2b 的旧名（= v2 `Tick` 的**平铺**视图；保留是因为 `handle.onTick` 的既有调用方与夹具
  *  用平铺字段）。★ 运行时两者是**同一个对象**（`handle.onTick` 拿到的也带 `now` / `local` /
- *  `edit` / `input` / `patch`）；这个别名只描述平铺字段。S4 删这个别名。
- *  @deprecated 用 `Tick`。 */
+ *  `edit` / `input` / `patch`）；这个别名只描述平铺字段。
+ *  @deprecated 用 `Tick`（v1 兼容层，后续删除）。 */
 export interface InstrTick {
     readonly id: number;
     readonly script: string;
@@ -738,7 +764,10 @@ export interface InstrHookHandle {
      *    S2c-2 起**这个 Tick 自己**的 `edit` / `input` / `patch` 可用（门是 `*Attached()`，不是
      *    `in_callback_`）；`tick.log` 也可用。
      *  ★ 它让 Run **保持存活**（sync 订阅）：不撤它、也没有 task/once 时，`return []` 之后 Run
-     *    不会收口（`ctx.hook.at` 本身是 v1 观察，**不算**）。 */
+     *    不会收口（`ctx.hook.at` 本身是 v1 观察，**不算**）。
+     *  @deprecated v2 的订阅面用 `ctx.at`（同点多条 + `next()` 链）/ `ctx.once`；
+     *    `hook.at(...).onTick` 是 v1 兼容层（tick 对象是同一个 `Tick`，但静态类型是平铺的
+     *    `InstrTick`）。 */
     onTick(fn: ((tick: InstrTick) => void) | null): this;
 }
 /** 脚本指令位置钩子（只 `RunCtx`；`RenderCtx` 没有）。 */
@@ -752,86 +781,92 @@ export interface HookApi {
     list(): InstrHookStats[];
     /** 撤掉全部 hook（并把未还原的覆盖按 CAS 结算）。Run 收口 / `quit` 也会自动做。 */
     clear(): void;
-}export interface PluginModule<State = Record<string, unknown>> {
+}
+
+export interface PluginModule<State = Record<string, unknown>> {
     /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。
      *  ★ **浅拷贝**（`Object.assign({}, initialState)`，D-C2-7）：沙箱里没有 `JSON` / `structuredClone`
      *    ⇒ 嵌套对象**不**深拷贝，也不承诺"同 runtime 两个 Run 共享/不共享"（C2 只有一个 Run）。
+     *  ★ v2 不依赖它：逻辑数据放模块变量 / per-Run 数据对象即可。
      */
     initialState?: State;
     /** 可选；有它就每帧跑（C2b：传 `RenderCtx`；没有窗口 ⇒ 永不调用 + 一次性 stderr，D-C2-5）。 */
     render?: (ctx: RenderCtx) => void;
-    start?: (ctx: RunCtx<State>) => Trigger | Trigger[] | null;
+    /**
+     * Run 的入口。★ v2：返回 **`void`** —— 只做注册（`ctx.at` / `ctx.once` / `ctx.task`），
+     * Run 靠这些订阅 / task 存活；不要再返回 Trigger 集合。
+     * v1 兼容：仍接受 `Trigger | Trigger[] | null`（返回数组 = 完整替换 armed 集合）。
+     */
+    start?: (ctx: RunCtx<State>) => Trigger | Trigger[] | null | void;
+    /**
+     * v1 触发回调（armed 集合消费点）。
+     * @deprecated v2 没有 onTrigger：订阅用 `ctx.at`、async 等待用 `ctx.once`、组合用 `ctx.task`；
+     *   本字段是兼容层（只在 start 返回了 Trigger 集合时才会被调用）。
+     */
     onTrigger?: (ctx: RunCtx<State>, ev: FiredEvent | TimeoutEvent) => Trigger | Trigger[] | null;
 }
 
 // ---------------------------------------------------------------------------
-// 典型用法（伪代码；不写具体数值）
+// 典型用法（v2 伪代码；不写具体数值）
 //
-// 加载存档的链（name = 状态名；不用 step 计数器 / ctx.state）：
-//   ★ `script` 是 **marker 文件名（含 `.BIN`）**，宿主做**精确相等** —— 写成裸名 `"TITLE"` /
-//     `"SBUNKI"` 永远不命中 ⇒ 门一直 arm 到 `timeoutMs`（30 s 后归因还会指到"点击没进去"）。
-//   const loadSlot = (slot: number) => ({
-//     start(ctx: RunCtx): Trigger | Trigger[] | null {
-//       ctx.input.click(X, Y);
-//       return ctx.trigger.afterScript("TITLE.BIN", { name: "load:title" });
-//     },
-//     onTrigger(ctx: RunCtx, ev: FiredEvent | TimeoutEvent): Trigger | Trigger[] | null {
-//       switch (ev.name) {
-//         case "load:title":  ctx.input.move(X2, rowY(slot));
-//                             return ctx.trigger.atReadPoint("any", 1, { name: "load:row" });
-//         case "load:row":    ctx.input.click(X2, rowY(slot));
-//                             return ctx.trigger.afterPosition("SBUNKI.BIN", C, D, { name: "load:sbunki" });
-//         case "load:sbunki": ctx.input.click(X3, Y3); return [];
-//         default:            ctx.fail(ev.name, `unknown name: ${ev.name}`); return [];
-//       }
-//     },
+// 加载存档（ctx.task + 顺序 await ctx.once + tick.input.click）：
+//   ★ `script` 是 **marker 文件名（含 `.BIN`）**，宿主做**精确相等**；`pos` 从 1 开始。
+//   function start(ctx: RunCtx): void {
+//     ctx.task(async (t) => {
+//       // ★ once 的门 = Run 回调 ⇒ 全部在第一个 await 之前注册
+//       const title = t.once({ script: "TITLE.BIN", pos: TITLE_POS }, { timeoutMs: 30000 });
+//       const save  = t.once({ script: "SAVE.BIN",  pos: SAVE_POS  }, { timeoutMs: 30000 });
+//       const titleTick = await title;
+//       titleTick.input.click(LOAD_X, LOAD_Y);       // 入队，下一读点落地
+//       const saveTick = await save;
+//       saveTick.input.click(SLOT_X, rowY(slot));
+//     });   // task settle + 没有订阅 ⇒ Run 自然收口（要 exit code 才用 finish，且只能在 Run 回调里）
+//   }
+//
+// 同步订阅（ctx.at；同点多条 = 一条链：next() 继续、不调 = 截断）：
+//   let id: number | undefined;
+//   id = ctx.at({ script: "FIELD.BIN", lo: 0x1000, hi: 0x1100 }, (tick, next) => {
+//     const before = tick.local.int(0) ?? 0;
+//     tick.edit.global.set("int", ID, before | MASK);   // 立即持久写（与 ctx.edit 同一个宿主方法）
+//     if (id !== undefined) ctx.off(id);                // 撤订阅（幂等；tick handler 里也能调）
+//     next();
 //   });
-//   const start = (ctx: RunCtx<MyState>) => loadSlot(Number(ctx.params.slot)).start(ctx);
-//   const onTrigger = (ctx: RunCtx<MyState>, ev: FiredEvent | TimeoutEvent) =>
-//       loadSlot(Number(ctx.params.slot)).onTrigger(ctx, ev);
 //
-// 重新 arm 语义表（四种）：
-//   Once        : 触发后=耗尽；再返回同一对象 ⇒ fail（与 maxFires 耗尽同档）；要重复 ⇒ 新对象。
-//   Reenter     : last_inside 跨 arm 保留；重新 arm 需先有效“外”再“内”，不会立刻再触发；maxFires 续计。
-//   AfterDelay  : 重新 arm 计时从新 arm 开始；maxFires 续计。
-//   AtReadPoint : 重新 arm 从下一个匹配读点重新计数；maxFires 续计。
-//   maxFires 耗尽后再返回同一对象一律 fail；新对象才有新预算/新边沿。
-//
-// 返回语义：数组是**完整的新 armed 集合（替换）**；刚触发的那个不会自动保留；
-// 想保留其它 trigger 就把它们再放进返回数组。`null`/`[]` = done；重复 name = fail。
-// maxFires 属于对象、跨 arm 累计；同一对象重新 arm 续计，耗尽后再返回 = fail；新对象才新预算。
+// Tick（ctx.at 的回调参数 / ctx.once 的 resolve）= { id, now, local, edit, input, patch, log }：
+//   · `now = { script, pos, opcode? }`（值快照；⛔ 不要把 `Tick` 存下来跨入口用 —— `local` / `edit` /
+//     `input` / `patch` 在下一个入口会 `stale_tick` 抛错；`now` / `log` 仍可用）。
+//   · `local.int(i)` / `local.ptr(i)` / `local.ptrDword(i)`：活读；越界 / 指针 0 / 没有 ENC key ⇒ `undefined`。
+//   · `edit` / `input` 与 RunCtx 同形；`patch(target, value)` 是**本拍瞬时覆盖**（下一拍按 CAS 恢复；
+//     `once` 的 Tick 调它回 `once_tick`）。
+//   · tick handler 里 `ctx.fail` / `finish` / `quit` / `trigger` / `hook.*` / `profile` / `config` 都是
+//     TypeError —— 写面只有上面这几个 + `ctx.off`；日志用 `tick.log` / 全局 `log`。
 //
 // 模块装载 + 泛型 state（推荐 satisfies，不用 definePlugin）：
-//   import type { PluginModule, RunCtx, FiredEvent, TimeoutEvent } from "@amayui/lift-plugin";
-//   interface MyState { flags: Record<string, boolean> }
-//   const plugin = {
-//     initialState: { flags: {} } as MyState,
-//     render, start, onTrigger,
-//   } satisfies PluginModule<MyState>;
+//   import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
+//   const plugin = { start, render } satisfies PluginModule;
 //   export default plugin;   // 宿主读 default 导出；不再读命名导出/globalThis
 //
-// read → edit（同一触发点，读旧值/写新值由调用顺序决定）：
-//   const v = ctx.read.global.get("int", ID);
-//   ctx.edit.global.set("int", ID, v | MASK);
+// ---------------------------------------------------------------------------
+// ⚠ **v1 兼容写法（deprecated）**：下面这些语义仍按原样实现（v1 插件不受影响），但新插件不要这样写。
 //
-// HUD 生命周期（进屏 show、另一个正向位置 hide、render 每帧画）：
-//   onTrigger 命中 TITLE 区间 → ctx.ui.show("hud", { mode: "title" });
-//   onTrigger 命中 FIELD 区间 → ctx.ui.set("hud", { mode: "field" });
-//   onTrigger 命中另一个已知位置 B → ctx.ui.hide("hud");
+// 加载存档的链（name = 状态名）：
+//   start 返回第一个 Trigger；onTrigger 按 ev.name 返回下一个（数组 = **完整替换 armed 集合**）；
+//   null / [] = done；一个读点最多触发一个（注册顺序）；重复 name = fail。
+//
+// 重新 arm 语义表（四种；属于 v1 Trigger 对象）：
+//   Once        : 触发后=耗尽；再返回同一对象 ⇒ fail；要重复 ⇒ 新对象。
+//   Reenter     : last_inside 跨 arm 保留；重新 arm 需先有效“外”再“内”；maxFires 续计。
+//   AfterDelay  : 重新 arm 计时从新 arm 开始；maxFires 续计。
+//   AtReadPoint : 重新 arm 从下一个匹配读点重新计数；maxFires 续计。
+//   maxFires 属于对象、跨 arm 累计；耗尽后再返回同一对象 = fail；新对象才新预算。
+//
+// HUD 生命周期（onTrigger 改 UI 状态、render 每帧画）：
+//   onTrigger 命中进屏位置 → ctx.ui.show("hud", { mode: "title" });
+//   onTrigger 命中离屏位置 → ctx.ui.hide("hud");
 //   render: if (ctx.ui.visible("hud")) ctx.draw.text(X, Y, "...");
 //   onTrigger 不 draw；UI 状态是宿主本地；没有“离开区间自动 hide”的负向边沿。
-//
-// 只应在某些屏出现的 UI：用正向 afterPosition/afterScript 的 show/hide，
-// 或插件内自己包 visibleWhen；不要新增核心 visibleWhen DSL。
-//
-// 并发 watch（一个 Run 一次 arm 多个具名 trigger；onTrigger 按 ev.name 分派）：
-//   return [
-//     ctx.trigger.afterPosition("A", A0, A1, { name: "hud:show" }),
-//     ctx.trigger.afterPosition("B", B0, B1, { name: "hud:hide" }),
-//     ctx.trigger.afterPosition("C", C0, C1, { name: "edit:flag" }),
-//   ];
-//   onTrigger: switch (ev.name) { case "hud:show": ...; case "hud:hide": ...; case "edit:flag": ...; }
-//   一个读点最多触发一个（按注册顺序）；其余不自动保留（要保留就放进返回数组）。
+//   ⇒ v2 等价写法：tick handler 只改模块数据，render(rctx) 读数据 + rctx.draw / rctx.ui。
+// ---------------------------------------------------------------------------
 //
 // 注意：sample/screenshot 不在这里——它们是 emu-ctl 的控制面组合命令，插件回调不可调用。
 // ---------------------------------------------------------------------------

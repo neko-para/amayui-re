@@ -1,137 +1,54 @@
-// 并发 watch：一次 arm 三个具名 Trigger，onTrigger 按 ev.name 分派
-// （第五轮，v5.3.2）。
+// 并发 watch（v2）：一个 Run 里用 `ctx.task` 同时等多个 `ctx.once`。
 //
-// 语义（v5.3.2）：
-//   - 返回数组 = **完整的新 armed 集合（替换）**；刚触发的那个不会自动保留；
-//   - 想保留其它 trigger，就把**同一批对象**再放进返回数组；
-//   - null / [] = done；一个读点最多触发一个（注册顺序）；重复 name = fail。
+// 演示什么
+//   · v1 是「一次 arm 多个具名 Trigger + onTrigger 按 ev.name 分派」；v2 没有 armed 集合，
+//     并发 = 在同一个 `ctx.task` 里持有多个 `ctx.once` 的 Promise，用 `Promise.race` / `Promise.all` 组合。
+//   · 不新开 Run（v2 不允许嵌套 Run）：这些等待共享同一个 Run、同一个 RunCtx。
 //
-// 本文件是"全部保留"的版本（三个都持久）；"触发后丢掉一次性 trigger"见 keep-others.ts。
+// v2 新写法
+//   · `ctx.task(async (t) => …)`：`start` 只做注册；async 逻辑写在 task 里，`t` 就是当前 RunCtx。
+//   · `ctx.once({script,pos}, {timeoutMs})`：返回 `Promise<Tick>`；命中后 resolve 一个 Tick，
+//     写面在 Tick 上（`tick.input` / `tick.edit`），不是 `ctx.input` / `ctx.edit`。
+//   · 全局 `log`（插件上下文）：task 的 continuation 里可以直接用。
+//
+// 占位值
+//   · `script` 必须是 **marker 文件名（含 .BIN）**，宿主精确相等；`pos` 从 1 开始；
+//     本文件的 script / pos / timeoutMs 全是占位，⛔ 不是可运行配方。
+//
+// ⚠ `once` 的 `timeoutMs` 是**失败截止**：到点不是「放弃等待」，而是宿主先 reject、随后 fail Run。
+//   ⇒ `Promise.race` 只适合「两个点都必然会出现、只想先知道顺序」的场合；
+//     真要取消一条等待只能结束 Run（once 没有取消 API）。
 
-import type {
-    FiredEvent,
-    PluginModule,
-    RenderCtx,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
 
-const HUD_ID = "hud";
+const TITLE_POINT = { script: "TITLE.BIN", pos: 0x00000000 } as const; // 占位
+const FIELD_POINT = { script: "FIELD.BIN", pos: 0x00000000 } as const; // 占位
 
-const A = { script: "TITLE", lo: 0x00000000, hi: 0x00000000 }; // 占位：hud:show
-const B = { script: "FIELD", lo: 0x00000000, hi: 0x00000000 }; // 占位：hud:hide
-const C = { script: "SC0000", lo: 0x00000000, hi: 0x00000000 }; // 占位：edit:flag
+const GATE_TIMEOUT_MS = 30_000; // 占位：每个 once 自己的失败截止
 
-const N = {
-    show: "hud:show",
-    hide: "hud:hide",
-    flag: "edit:flag",
-} as const;
+function start(ctx: RunCtx): void {
+    ctx.task(async (t) => {
+        // ★ 两个 once 都必须在第一个 await 之前注册：once 的门 = Run 回调（task 的同步首段）。
+        //   在 continuation 里再 `ctx.once(...)` 会 TypeError（那时已经不在 Run 回调里）。
+        const title = t.once(TITLE_POINT, { timeoutMs: GATE_TIMEOUT_MS });
+        const field = t.once(FIELD_POINT, { timeoutMs: GATE_TIMEOUT_MS });
 
-const GLOBAL_ID = 0; // 占位
-const SET_BITS = 0; // 占位
+        // 先到者：用它决定「先看到哪个屏」。
+        const first = await Promise.race([title, field]);
+        log.info("concurrent: first screen = " + first.now.script + " @" + String(first.now.pos));
 
-const HUD_X = 0; // 占位
-const HUD_Y = 0;
-const HUD_W = 0;
-const HUD_H = 0;
-const HUD_FILL = ""; // 占位：颜色串
+        // 两个都到：race 只是先到者；Promise 本身还能继续 await（不会被 race 消费掉）。
+        const [titleTick, fieldTick] = await Promise.all([title, field]);
+        log.info(
+            "concurrent: both seen = " +
+                titleTick.now.script + " / " + fieldTick.now.script,
+        );
 
-// Trigger 需要 ctx 才能创建 ⇒ initialState 只能留空；首读 undefined，必须 guard。
-interface ConcurrentState {
-    show?: Trigger;
-    hide?: Trigger;
-    flag?: Trigger;
-}
-
-function makeTriggers(ctx: RunCtx<ConcurrentState>): [Trigger, Trigger, Trigger] {
-    return [
-        ctx.trigger.afterPosition(A.script, A.lo, A.hi, {
-            name: N.show,
-            mode: "reenter",
-        }),
-        ctx.trigger.afterPosition(B.script, B.lo, B.hi, {
-            name: N.hide,
-            mode: "reenter",
-        }),
-        ctx.trigger.afterPosition(C.script, C.lo, C.hi, {
-            name: N.flag,
-            mode: "reenter",
-        }),
-    ];
-}
-
-function logArmed(ctx: RunCtx<ConcurrentState>): void {
-    // v5.3.2：armedNames 与 armed 一一对应，两者都必填。
-    const cur = ctx.run.current();
-    ctx.log("debug", "concurrent: armed", {
-        names: cur?.armedNames ?? [],
-        count: cur?.armed.length ?? 0,
+        // task 返回（settle）且没有其它订阅 ⇒ Run 自然收口（不需要 finish）。
     });
+    ctx.log("info", "concurrent: task registered");
 }
 
-function start(ctx: RunCtx<ConcurrentState>): Trigger[] {
-    const [show, hide, flag] = makeTriggers(ctx);
-    ctx.state.show = show;
-    ctx.state.hide = hide;
-    ctx.state.flag = flag;
-    return [show, hide, flag];
-}
-
-function onTrigger(
-    ctx: RunCtx<ConcurrentState>,
-    ev: FiredEvent | TimeoutEvent,
-): Trigger[] | null {
-    if (ev.kind === "timeout") {
-        ctx.ui.hide(HUD_ID);
-        ctx.finish(5, `concurrent: gate timeout (${ev.name})`);
-        return null;
-    }
-
-    const { show, hide, flag } = ctx.state;
-    if (show === undefined || hide === undefined || flag === undefined) {
-        ctx.fail(undefined, "concurrent: state not initialized");
-        return null;
-    }
-
-    logArmed(ctx);
-
-    switch (ev.name) {
-        case N.show:
-            ctx.ui.show(HUD_ID, { mode: "title" });
-            break;
-
-        case N.hide:
-            ctx.ui.hide(HUD_ID);
-            break;
-
-        case N.flag: {
-            const before = ctx.read.global.get("int", GLOBAL_ID);
-            ctx.edit.global.set("int", GLOBAL_ID, before | SET_BITS);
-            break;
-        }
-
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
-    }
-
-    // 三个都保留（同一批对象）⇒ 返回完整的新 armed 集合。
-    return [show, hide, flag];
-}
-
-// HUD 本体由 render 画；onTrigger 只改 UI 状态。
-function render(ctx: RenderCtx): void {
-    if (!ctx.ui.visible(HUD_ID)) return;
-    ctx.draw.rect(HUD_X, HUD_Y, HUD_W, HUD_H, { fill: HUD_FILL });
-}
-
-const plugin = {
-    initialState: {},
-    render,
-    start,
-    onTrigger,
-} satisfies PluginModule<ConcurrentState>;
+const plugin = { start } satisfies PluginModule;
 
 export default plugin;

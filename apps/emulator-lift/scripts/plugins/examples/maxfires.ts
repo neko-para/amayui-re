@@ -1,91 +1,47 @@
-// 同一 Trigger 对象跨 arm 累计 maxFires（第五轮，v5.3.2）。
+// 次数上限（v2）：`ctx.at` + 计数 + 到量 `ctx.off`。
 //
-// 语义（v5.3.2）：
-//   - maxFires 属于**对象**、跨 arm 累计；同一对象重新 arm 继续扣预算；
-//   - 耗尽后再返回同一对象 = 宿主 fail；新对象才新预算。
+// 演示什么
+//   · v1 = `afterPosition(..., { maxFires })`：预算属于 Trigger 对象、跨 arm 累计；
+//     耗尽后再返回同一对象 = 宿主 fail。
+//   · v2 没有 maxFires：订阅默认**每次命中都跑**，预算由插件自己数，到量就 `ctx.off(id)` 撤掉。
+//     撤掉之后这条订阅不再是 Run 的存活来源（没有别的订阅 / task 时 Run 会收口）。
 //
-// ⛔ 数值全是占位。
+// v2 新写法
+//   · `ctx.at` 的 handler 在**指令点**跑，`ctx.off` 在那里是允许的（门 = 插件上下文，不是 Run 回调）。
+//   · `tick.log` 是这一拍可用的日志出口（与 `ctx.log` / 全局 `log` 是同一份宿主实现）。
+//   · 计数放模块变量（per-plugin 状态），v2 不依赖 ctx.state。
+//
+// 占位值
+//   · script / 区间 / MAX_FIRES 全是占位；真实 `lo < hi`、`script` 含 .BIN。
 
-import type {
-    FiredEvent,
-    PluginModule,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
 
-const NAME = "maxfires:pos";
-const SCRIPT = "SC0000";
-const POS_LO = 0x00000000;
+const SCRIPT = "SC0000.BIN"; // 占位
+const POS_LO = 0x00000000; // 占位：[lo,hi)
 const POS_HI = 0x00000000;
 
-const MAX_FIRES = 2;
+const MAX_FIRES = 2; // 占位：本文件用 2 让「到量」容易观察
 
-interface MaxState {
-    trigger?: Trigger;
-    fires: number;
-}
+let fires = 0; // 模块变量 = per-plugin 状态
+let subId: number | undefined;
 
-function start(ctx: RunCtx<MaxState>): Trigger {
-    const trigger = ctx.trigger.afterPosition(SCRIPT, POS_LO, POS_HI, {
-        name: NAME,
-        mode: "reenter",
-        maxFires: MAX_FIRES, // 同一对象的预算，跨 arm 累计
-    });
-    ctx.state.trigger = trigger;
-    return trigger;
-}
+function start(ctx: RunCtx): void {
+    subId = ctx.at({ script: SCRIPT, lo: POS_LO, hi: POS_HI }, (tick, next) => {
+        fires += 1;
+        tick.log("info", "maxfires: hit " + String(fires) + "/" + String(MAX_FIRES));
 
-function onTrigger(ctx: RunCtx<MaxState>, ev: FiredEvent | TimeoutEvent): Trigger | null {
-    if (ev.kind === "timeout") {
-        ctx.finish(5, `maxfires: gate timeout (${ev.name})`);
-        return null;
-    }
-
-    const trigger = ctx.state.trigger;
-    if (trigger === undefined) {
-        ctx.fail(undefined, "maxfires: state not initialized");
-        return null;
-    }
-
-    switch (ev.name) {
-        case NAME: {
-            // fires 由 initialState 给 0，首读即有值。
-            ctx.state.fires += 1;
-
-            if (ctx.state.fires < MAX_FIRES) {
-                ctx.log("info", "maxfires: re-arm same object", {
-                    fires: ctx.state.fires,
-                    maxFires: MAX_FIRES,
-                });
-                // 同一对象 ⇒ 预算继续扣，不会重置。
-                return trigger;
-            }
-
-            ctx.log("info", "maxfires: exhausted", {
-                fires: ctx.state.fires,
-                maxFires: MAX_FIRES,
-            });
-
-            // 耗尽后再 `return trigger` **类型上合法**（它仍是 Trigger），
-            // 但宿主会 fail；类型上没有"已耗尽"的标记。插件只能自己记 fires。
-            // 反例（保留说明）：return trigger;
-            //
-            // 想要新预算：重新 afterPosition(..., { maxFires: 2 }) 造一个新对象；
-            // 旧对象此时已被宿主摘掉，同名新对象不会与它重复。
-            return null;
+        if (fires >= MAX_FIRES) {
+            // 到量：撤订阅（v1 的 maxFires 耗尽）。tick handler 里 off 是允许的。
+            if (subId !== undefined) ctx.off(subId);
+            tick.log("info", "maxfires: budget exhausted; subscription removed");
         }
 
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
-    }
+        next(); // 继续同点后续 at handler（没有就只是示范链语义）
+    });
+
+    if (subId === undefined) ctx.fail("maxfires", "ctx.at 未装（no_injection）");
 }
 
-const plugin = {
-    initialState: { fires: 0 },
-    start,
-    onTrigger,
-} satisfies PluginModule<MaxState>;
+const plugin = { start } satisfies PluginModule;
 
 export default plugin;

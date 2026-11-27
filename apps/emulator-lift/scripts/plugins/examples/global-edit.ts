@@ -1,93 +1,57 @@
-// 典型用法：在某个 script.pos 触发时 global read → modify → write（第五轮，v5.3.2）。
+// 读改写 global（v2）：`ctx.at` 命中一条脚本指令，`tick.edit.global.set` **立即持久写**。
 //
-// ⛔ 数值全是占位；不写具体 global id / 掩码。
-// v5.3.2：默认导出 PluginModule；initialState 只放数据；Trigger 对象由 start 建。
+// 演示什么
+//   · v1 = afterPosition Trigger + 在 onTrigger 里 `ctx.read.global.get` / `ctx.edit.global.set`；
+//   · v2 = `ctx.at({script,pos}, handler)`：handler 在**指令点**跑，写面在 Tick 上。
+//   · `tick.edit.global.set` 与 v1 的 `ctx.edit.global.set` 是**同一个宿主方法**：
+//     立即持久写（不排队、不进 input 队列），下一读点就能读到新值。
+//     ⛔ 它不是 `tick.patch` —— patch 是本拍瞬时覆盖、下一拍按 CAS 恢复，净变化 0。
+//
+// v2 新写法
+//   · Tick 没有 read 面；要读旧值就在 start 里存下 RunCtx，用 `ctx.read.global.get`
+//     （read 是只读口，tick 入口仍允许；写类 `ctx.edit` / `ctx.input` 在 tick 里是 TypeError）。
+//   · 写只能走 `tick.edit` / `tick.input` / `tick.patch`。
+//
+// 占位值
+//   · script / pos / global id / 掩码全是占位；`script` 真实写法必须是 marker 文件名（含 .BIN），
+//     `pos` 从 1 开始（0 = 没给，运行期 TypeError）。
 
-import type {
-    FiredEvent,
-    GlobalKind,
-    GlobalValue,
-    PluginModule,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
 
-const NAME = "global:pos"; // 具名状态
-const SCRIPT = "SC0000"; // 占位脚本名
-const POS_LO = 0x00000000; // 占位：触发区间起点（半开）
-const POS_HI = 0x00000000; // 占位：触发区间终点
+const SCRIPT = "SC0000.BIN"; // 占位：marker 文件名
+const POS = 0x00000000; // 占位：label 坐标（真实值从 1 起）
 
-const GLOBAL_ID = 0; // 占位：global 下标
+const GLOBAL_ID = 0; // 占位：global 池下标
 const SET_BITS = 0; // 占位：要置的位
 const CLEAR_BITS = 0; // 占位：要清的位
 
-interface GlobalState {
-    // Trigger 需要 ctx 才能创建 ⇒ 不能放进静态 initialState；只能 start 里写、onTrigger 里 guard。
-    watch?: Trigger;
-}
+/** start 存下来的 RunCtx：只用来读（`ctx.read` 不绑 in_callback，tick 入口仍可用）。 */
+let runCtx: RunCtx | undefined;
+let subId: number | undefined;
 
-/** 泛型 helper：get<K extends GlobalKind> 可用。 */
-function readAs<K extends GlobalKind>(
-    ctx: RunCtx<GlobalState>,
-    kind: K,
-    id: number,
-): GlobalValue<K> {
-    return ctx.read.global.get(kind, id);
-}
+function start(ctx: RunCtx): void {
+    runCtx = ctx;
 
-function makeTrigger(ctx: RunCtx<GlobalState>): Trigger {
-    return ctx.trigger.afterPosition(SCRIPT, POS_LO, POS_HI, {
-        name: NAME,
-        mode: "reenter",
-    });
-}
+    subId = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+        // 读旧值：tick 上没有 read；用存下来的 RunCtx（只读口）。
+        const before = runCtx === undefined ? 0 : runCtx.read.global.get("int", GLOBAL_ID);
+        const after = (before | SET_BITS) & ~CLEAR_BITS;
 
-function start(ctx: RunCtx<GlobalState>): Trigger {
-    // 同一对象存进 state；之后每次 onTrigger 原样返回 = 重新 arm 同一个对象。
-    const watch = makeTrigger(ctx);
-    ctx.state.watch = watch;
-    return watch;
-}
-
-function onTrigger(ctx: RunCtx<GlobalState>, ev: FiredEvent | TimeoutEvent): Trigger | null {
-    if (ev.kind === "timeout") {
-        ctx.finish(5, `global-edit: gate timeout (${ev.name})`);
-        return null;
-    }
-
-    const watch = ctx.state.watch;
-    if (watch === undefined) {
-        ctx.fail(undefined, "global-edit: state not initialized");
-        return null;
-    }
-
-    switch (ev.name) {
-        case NAME: {
-            const before = readAs(ctx, "int", GLOBAL_ID);
-            const after = (before | SET_BITS) & ~CLEAR_BITS;
-
-            const r = ctx.edit.global.set("int", GLOBAL_ID, after);
-            if (!r.applied) {
-                ctx.log("warn", "global write rejected", {
-                    code: r.code,
-                    accepted: r.accepted,
-                    before,
-                    after,
-                });
-            }
-            return watch;
+        // 写新值：立即持久写。回执的 applied 才代表写进去了。
+        const receipt = tick.edit.global.set("int", GLOBAL_ID, after);
+        if (!receipt.applied) {
+            tick.log("warn", "global-edit: write rejected code=" + String(receipt.code));
+        } else {
+            tick.log(
+                "debug",
+                "global-edit: " + String(before) + " -> " + String(after),
+            );
         }
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
-    }
+    });
+
+    if (subId === undefined) ctx.fail("global-edit", "ctx.at 未装（no_injection）");
 }
 
-const plugin = {
-    initialState: {},
-    start,
-    onTrigger,
-} satisfies PluginModule<GlobalState>;
+const plugin = { start } satisfies PluginModule;
 
 export default plugin;
