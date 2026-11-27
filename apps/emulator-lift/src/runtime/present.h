@@ -34,9 +34,6 @@ struct UiHostOps;
 namespace lift {
 
 class FrameSampler;
-// ★ 输入计划（`runtime/input_plan.h`）：只为了在 Present 成功那一刻推 `PlanEventKind::Frame`
-//   （= `presents` 门的刻度）。⛔ 本头不 include 它（present.h 保持轻；`present.cpp` 里 include）。
-class InputPlan;
 // ★ 系统对话框的数据（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free）。
 struct ModalSpec;
 
@@ -341,11 +338,6 @@ public:
     void setFrameSampler(FrameSampler* sampler) { sampler_ = sampler; }
     FrameSampler* frameSampler() const { return sampler_; }
 
-    // ★ `--input-plan` 的 `presents` 门：Present **成功那一次**记账（`++frame_count_` 同一刻）。
-    //   非拥有指针（计划的生命周期 = 调用方；`nullptr` = 没有计划 ⇒ 一次判空）。⛔ 不在这里
-    //   施加任何 step：计划只记账，到期 step 只能由**下一个 guest 读点**消费（`input_plan.h` 铁律 3）。
-    void setInputPlan(InputPlan* plan) { input_plan_ = plan; }
-
     // ★ **冻结最后呈现帧的像素副本**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：唯一产品调用点 =
     //   `aot_run.cpp` 里与 `setPresentGate` 同处同条件（`control_ != nullptr`）。缺省关 ⇒
     //   `present()` 里一次判空、零拷贝。⛔ 不要派生自 `hasPresentGate()`（那样任何新闸门都会
@@ -409,8 +401,6 @@ private:
     // `last_surface_hash_ == 0` = 那一帧在 Present 时**没算** hash（惰性化）⇒ 退回路径不得拿"现算值"
     // 冒充同一帧（warn 一次 + `hash_still_matches=false`）。冻结副本路径不依赖它。
     FrameSampler* sampler_ = nullptr;
-    // ★ `presents` 门的 emit 点（`--input-plan`；nullptr = 没有计划）。只记账，不施加 step。
-    InputPlan* input_plan_ = nullptr;
     const SurfaceArena* last_arena_ = nullptr;
     GuestSurface last_surface_{};
     std::uint64_t last_surface_hash_ = 0;

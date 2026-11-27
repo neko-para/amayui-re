@@ -3,7 +3,7 @@
 // ★ 施加输入**每一处**都走 `PointerCore`（`armMoveAt` / `armClickAt` / `pressDue` / `releaseDue`），
 //   而 core 的每一处又都走 `runtime/input.h` 的既有 `input::*`。⇒ 本文件**没有**第二套坐标映射、
 //   第二套闸门、第二个 `input::` 调用点（`--input-plan` 与本 executor 共用同一份实现）。
-// ★ 本文件也**没有** `InputPlan` / 配方状态的任何痕迹（`tools/test/core-shape.test.mjs` 的禁用词）。
+// ★ 本文件也**没有**配方状态的任何痕迹（`tools/test/core-shape.test.mjs` 的禁用词）。
 #include "runtime/intent_executor.h"
 
 #include <cstddef>
@@ -67,7 +67,7 @@ void IntentExecutor::atPoint(WindowManager& wm, InputPoint point) {
     if (!polling && queue_.depth() == 0 && pending_.empty() && armed_.empty()) return;
 
     const std::uint64_t now = nowMs();
-    // ★ **帧线**（2026-11-22）：与 `InputPlan::presenting()` 同一条计数（宿主**已完成**的 guest 回调数）。
+    // ★ **帧线**（2026-11-22）：与控制层输入队列同一条计数（宿主**已完成**的 guest 回调数）。
     //   装配点注入 `presenter.frameCount()` 的读数函数 ⇒ `frames` 是活的、`callback_boundary=true`；
     //   ⛔ 阈值不在这里 —— 闸门 ②′ 在 `PointerCore::releaseDue`（`kCallbackFramesBeforeRelease` 只有
     //   一份），本类只把读数传进去。没有注入 ⇒ `frames=0` / `callback_boundary=false` = 旧行为。

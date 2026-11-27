@@ -33,10 +33,10 @@
 #include "runtime/font.h"             // `--baseline-lift` / `--baseline-lift-by-size`（任何 FontEngine 之前）
 #include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
 #include "runtime/host_encoding.h"
-#include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
+#include "runtime/control_input.h"     // 控制层 `click` / `move` 的立即队列（guest 读点上施加）
 #include "runtime/log.h"              // `--log-level`（缺省 warn；AOT 臂过去没有这个开关）
 #include "runtime/lift_intrinsics.h"  // `--no-intrinsics` + `kMemcpyFastMaxBytes`（启动 readout）
-#include "runtime/memory.h"           // setGuestFaultTextHook（fault 路径的 `input-plan` 摘要；C）
+#include "runtime/memory.h"           // guest fault 的文本钩子（LIFT_FAULT_DUMP 等）
 #include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -67,24 +67,10 @@ std::string envOr(const char* name) {
     return v ? v : "";
 }
 
-// `--input-plan` 的 fault 摘要钩子（`memory.h` 的 `FaultTextHook`；`ctx` = `lift::InputPlan*`）：
-// ★ guest fault 走 `std::_Exit(3)`，`host.run()` 不会返回 ⇒ 正常收口那一行摘要读不到。
-//   这个钩子让 fault 文本里出现**同一份** `steps/fired/pending` + `outcome`（C 的要求）。
-// ★ 零分配：`printFaultSummary` 只用定长缓冲（fault 在信号上下文里，见 `memory.h`）。
-void faultPlanSummary(void* ctx, std::FILE* out) {
-    auto* plan = static_cast<lift::InputPlan*>(ctx);
-    if (plan != nullptr) plan->printFaultSummary(out);
-}
-
-// `--input-plan-trace` 的 `state_seq` 源：唯一生产者 = 控制层（没开 `--control-root` ⇒ 不装 ⇒ trace 打 `-`）。
-std::uint64_t controlStateSeq(void* ctx) {
-    auto* control = static_cast<lift::Control*>(ctx);
-    return control != nullptr ? control->stateSeq() : 0;
-}
-
-// 插件 `IntentExecutor` 的**帧线**（与 `--input-plan` 同一条）：`presenter.frameCount()` = 已完成
-// guest 回调数（`present.cpp` 在 `++frame_count_` 同一刻推 `PlanEventKind::Frame`）。
-// ★ 它与 `InputPlan::presenting()` 是**同一个计数源** —— ⛔ 不另建第二份帧账、⛔ 不按插件/场景特判。
+// 输入驱动（`ControlInput` / 插件 `IntentExecutor`）的**帧线**：`presenter.frameCount()` = 已完成
+// guest 回调数（`present.cpp` 在 `++frame_count_` 同一刻 +1）。
+// ★ 两个驱动**同一个计数源**（拉取，不再向 presenter 推事件）—— ⛔ 不另建第二份帧账、
+//   ⛔ 不按插件/场景特判。
 std::uint64_t presentFrameCount(void* ctx) {
     auto* host = static_cast<lift::aot::AotHost*>(ctx);
     return host != nullptr ? host->presenter().frameCount() : 0;
@@ -107,8 +93,6 @@ void usage() {
         "  --skip-logo             把 T_Command + 0x5EB5C 写 0（一次性；缺省关）\n"
         "  --audio off|sdl         音频后端（缺省 off）\n"
         "  --audio-dump <path>     把交付缓冲写成 WAV（缺省不写；与 --audio 档位无关）\n"
-        "  --input-plan <file>     输入配方（语法见 docs/03-emulator/input-plan.md；缺省不注入）\n"
-        "  --input-plan-trace      每条配方 step 成立 / 施加时打一行（缺省关；需 --input-plan）\n"
         "%s"
         "  --log-level <L>         日志级别：quiet|error|warn|info|debug|trace（缺省 warn）\n"
         "  --dump-frame <path>     每次 Present 导出 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
@@ -136,7 +120,7 @@ void usage() {
         "  --overlay                  左上角调试 HUD（等价于 --plugin hud + 要求窗口）\n"
         "%s"
         "  --ui-input=consume|pass    注入点击是否也过叠层命中路由（缺省 consume；也收 --ui-input consume|pass）\n"
-        "  --plugin <id|path>         用这份 ES module 当插件（与 --input-plan / --control-root 互斥）\n"
+        "  --plugin <id|path>         用这份 ES module 当插件（与 --control-root 互斥）\n"
         "  --plugin-param k=v         给插件的只读参数（可重复；重复 key ⇒ exit 2）\n"
         "  --scale auto|数值          窗口客户区 = round(1280×s)×round(720×s)（缺省 1.0；headless 下不生效）\n"
         "  --scale-filter nearest|linear  放大滤波器（缺省 linear）\n"
@@ -209,12 +193,6 @@ int main(int argc, char** argv) {
     // ★ C5：`--vfs-dir-index 0|1`（缺省 1 = 开；0 只供 A/B 与守卫，⛔ 不是语义开关）。
     bool vfs_dir_index = true;
     std::string guest_root;
-    // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
-    //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
-    std::string input_plan_path;
-    // ★ `--input-plan-trace`（opt-in，缺省关；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）：只影响
-    //   `InputPlan` 的 step 事件输出（`plan:<文件>:<行> …`），⛔ 不改任何 guest 可见状态。
-    bool input_plan_trace = false;
     // ★ `--user-run`（纯开关，缺省关）：标记「用户本人正在体验」—— 只在宿主侧写一个**机器级**
     //   锁文件（`runtime/experience_lock.h`），⛔ 不改任何模拟语义。读端 / 守卫 =
     //   `tools/experience.mjs`（构建 / 测试 / 变异自检据此让路）。
@@ -264,7 +242,7 @@ int main(int argc, char** argv) {
     std::string hud_fallback_script;
     // ★ `--plugin <id|path>`（C2a；缺省空 = 不装载插件）：ES module 插件。
     //   · ⛔ 不隐含 `overlay`（是否开窗由 `--present` 决定；`--present headless` 也能跑）；
-    //   · 与 `--input-plan` / `--control-root` 互斥 ⇒ 启动即 exit 2（两套输入写预算不能共存）。
+    //   · 与 `--control-root` 互斥 ⇒ 启动即 exit 2（两套输入写预算不能共存）。
     std::string plugin_path;
     // ★ `--plugin-param k=v`（可重复；`ctx.params` 只读；**重复 key ⇒ exit 2**，D-C2-9）。
     std::map<std::string, std::string> plugin_params;
@@ -343,12 +321,6 @@ int main(int argc, char** argv) {
             vfs_dir_index = (v == "1");
         } else if (a == "--guest-root") {
             if (!needValue("--guest-root", &guest_root)) return 2;
-        } else if (a == "--input-plan") {
-            if (!needValue("--input-plan", &input_plan_path)) return 2;
-        } else if (a == "--input-plan-trace") {
-            // ★ 纯开关（不带值）。没有 `--input-plan` 时本参数只是"没有 step 事件可打"——
-            //   ⛔ 不报错、⛔ 不静默改成别的语义（配方是唯一的生产者，见 `InputPlan::setTrace`）。
-            input_plan_trace = true;
         } else if (a == "--user-run") {
             // ★ 纯开关（不带值）。锁在**解析循环之后立刻**写（那时 `game_dir` / `appdata` 才是
             //   解析后的值）；只置一个 bool，⛔ 不影响任何模拟语义、⛔ 不与任何参数互斥。
@@ -745,13 +717,6 @@ int main(int argc, char** argv) {
     //     否则用户会先看到一整屏 readout 再看到拒绝（测绘 §3.1 第 4 条 / D-C2-2）。
     // =====================================================================================
     if (!plugin_path.empty()) {
-        if (!input_plan_path.empty()) {
-            std::fprintf(stderr,
-                         "emulator-lift-aot: --plugin 与 --input-plan 互斥（两套输入写预算不能共存；"
-                         "--plugin %s / --input-plan %s）⇒ exit 2\n",
-                         plugin_path.c_str(), input_plan_path.c_str());
-            return 2;
-        }
         if (control_any) {
             std::fprintf(stderr,
                          "emulator-lift-aot: --plugin 与 --control-root 互斥（控制层的 click/move 也走"
@@ -780,8 +745,8 @@ int main(int argc, char** argv) {
     // S2：`--overlay` = 「装载内置 `hud` + 要求窗口」的**预设**（⛔ 不是第三个装载器）
     //   ★ 触发条件 = **显式 `--overlay`** 且没有 `--plugin`：
     //     · `--overlay --plugin X` ⇒ **插件赢**（⛔ 不解析 hud；取代语在 ⑤' 打）。
-    //   ★ 位置在**互斥检查之后**（`--plugin` 与 `--input-plan` / `--control-root` 的那一组）：
-    //     `--overlay --input-plan` 今天合法 ⇒ 预设不能把它变成"插件 + 输入计划"而 exit 2。
+    //   ★ 位置在**互斥检查之后**（`--plugin` 与 `--control-root` 的那一组）：预设不能把
+    //     `--overlay` 变成"插件 + 控制层"而 exit 2。
     //   ★ 解析结果与普通 id **同形**：一行 `--plugin id=hud ⇒ <绝对路径>`，交给 `initFromFile`。
     // =====================================================================================
     bool overlay_preset_hud = false;
@@ -909,17 +874,6 @@ int main(int argc, char** argv) {
         char watch_err[256] = {};
         if (!lift::initFaultWatchFromEnv(watch_err, sizeof(watch_err))) {
             std::fprintf(stderr, "emulator-lift-aot: %s\n", watch_err);
-            return 2;
-        }
-    }
-
-    // ---- `--input-plan`：**解析在 GPU bring-up 之前**（CLI 判据不需要 GPU）----
-    //   ★ 文件不存在 / 语法错 / 门种类不支持 ⇒ **exit 2 + 点名行号与原因**（⛔ 不许静默忽略）。
-    lift::InputPlan input_plan;
-    if (!input_plan_path.empty()) {
-        std::string plan_err;
-        if (!input_plan.loadFile(input_plan_path, &plan_err)) {
-            std::fprintf(stderr, "emulator-lift-aot: --input-plan 载入失败：%s\n", plan_err.c_str());
             return 2;
         }
     }
@@ -1141,46 +1095,26 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ---- ③'' `--input-plan` 装配（`WindowManager` = 唯一状态源；`presenter` 只为摘要读数留）----
-    //   ★ 两处都只是**非拥有指针**。计划不给**且**控制层不开 ⇒ 两处都不装配 ⇒ 读点只付一条判空、
-    //     输出逐字节不变。
-    //   ★ **M1 起多一个装配条件**：控制层开着就必须装 —— `click` 的施加点是 `InputPlan::atPoint`
-    //     （同一个 `InputPlan`），而"没有任何配方"的运行也必须能投一条点击。
-    //     代价：那种运行里每个输入读点多两次计数器自增（⛔ 不打印、不改 guest 行为）。
-    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那 6 个词 = 0 命中）。
-    //   ★ 身份来源（`await script` 的门）在这里挂：`host.mem()` 只有在 `init()` 之后才可读
-    //     （解析在 bring-up 之前 ⇒ 解析期⛔ 不采身份）。`atPoint()` 签名不变。
-    if (input_plan.armed() || control_any) {
-        input_plan.attachGuestMemory(&host.mem());
-        // ★ 暂停补偿（S1）：配方的每步守卫钟 = 宿主单调毫秒 − 累计暂停毫秒。
-        //   缺省（没有控制层 / 没暂停过）`pausedTotalMs() == 0` ⇒ 与改动前逐位相同。
-        input_plan.attachClock(&host.clock());
-        // ★ `--input-plan-trace`（opt-in）：缺省 `nullptr` ⇒ 一条都不打（默认档输出逐字节不变）。
-        if (input_plan_trace) input_plan.setTrace(stderr);
-        // ★ fault 路径的摘要（C）：只有**有配方**时才装 ⇒ 没有配方的 fault 文本逐字不变。
-        //   位置与其余装配点同处（`guestFault` 在本进程里随时可能发生；run 之前装好）。
-        if (input_plan.armed()) {
-            lift::setGuestFaultTextHook(&input_plan, &faultPlanSummary);
-        }
-        host.cpu().windows->setInputPlan(&input_plan);
-        // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
-        host.presenter().setInputPlan(&input_plan);
-        // ★ **回调边界**（2026-11-21）：`note(Frame)` 这条线在本臂是**活的** ⇒ 抬起还必须在按下之后
-        //   跨过一个完整的 guest 回调（`PointerCore::kCallbackFramesBeforeRelease`；证据见
-        //   `pointer_core.h` 的闸门 ②'）。⛔ 纯夹具 / 插件 executor 没有这条线 ⇒ 不置位 = 旧行为。
-        input_plan.requireCallbackBoundary();
-        // ★ 窗口 profile 的标记钩子（`profile_begin/end` ⇒ 开/收窗 + 打桶表）。
-        //   装配位置与其余 `attach*` 同处：`AotHost` 已在作用域里，钩子只在**有配方**时才有意义。
-        //   ⛔ 不改配方语法：钩子只消费既有的 `profile_begin` / `profile_end` 两步。
-        input_plan.setProfileMarkHook(&host, &lift::aot::AotHost::windowMarkThunk);
-        // ★ `quit` 的**宿主停止请求**（唯一生产者 = 配方里的 `quit`）：run 循环每个块边界读它 ⇒
-        //   本次运行以 `Stopped` 收口（与解释器臂 `Machine::run` 读 `actuator().quitRequested()`
-        //   同一条口径）。⛔ 不等 guest 自己退出（它的停机路径可能不在闭包里）。
-        run_opts.stop_requested = input_plan.quitFlag();
+    // ---- ③'' 控制层输入队列的装配（`WindowManager` = 唯一状态源）----
+    //   ★ **只在 `control_any` 时构造 / 装配** ⇒ 不给 `--control-*` 的运行读点只付一条判空、
+    //     输出逐字节不变（`control_input` 的 `nullptr` = 没有输入队列）。
+    //   ★ `click` / `move` 的施加点是它的 `atPoint`（guest 读点），控制线程与 `serve()` 都不碰 guest。
+    //     代价：控制层运行时每个输入读点多两次计数器自增（⛔ 不打印、不改 guest 行为）。
+    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那几个词 = 0 命中）。
+    //   ★ **回调边界**（闸门 ②′）：帧线是**拉取** `presenter.frameCount()`（Present 完成计数）
+    //     ⇒ 抬起必须在按下之后跨过一个完整 guest 回调。⛔ 缺了这条线 = 抬起永不放行
+    //     （`frames` 恒 0），所以装配点必须同时 `setFrameSource` + `requireCallbackBoundary`。
+    lift::ControlInput control_input;
+    if (control_any) {
+        // ★ 暂停补偿：守卫钟 = 宿主单调毫秒 − 累计暂停毫秒（暂停不该把兜底窗口走掉）。
+        control_input.attachClock(&host.clock());
+        control_input.setFrameSource(&host, &presentFrameCount);
+        control_input.requireCallbackBoundary();
+        host.cpu().windows->setControlInput(&control_input);
     }
 
     // ---- ③''' `--plugin` 装配（C2a）：编译 + 沙箱 → guest 内存 → 读点观察者 → 停止请求 ----
-    //   ★ 位置与 `--input-plan` 的装配同一处（`init()` / `prepare()` 之后、`run()` 之前）：
+    //   ★ 位置与控制层输入队列的装配同一处（`init()` / `prepare()` 之后、`run()` 之前）：
     //     两条命令面互斥（D-C2-2），所以这里只有一条会装配。
     //   ★ 顺序照测绘 §3.3：`init`（= 编译 + 沙箱，⛔ 不调 start）→ `attachMemory`（Edit/Read）→
     //     `setReadPointObserver`（装配点必须在**循环外**）→ `stop_requested`。
@@ -1188,7 +1122,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<lift::plugin::PluginReadings> plugin_readings;
     std::unique_ptr<lift::plugin::PluginHost> plugin_host;
     if (!plugin_path.empty()) {
-        // 生产读数源：marker 身份 / 位置 + 鼠标（每读点一次；与 `InputPlan` 的采样互斥）。
+        // 生产读数源：marker 身份 / 位置 + 鼠标（每读点一次）。
         plugin_readings = std::make_unique<lift::plugin::PluginReadings>(host.mem(), *host.cpu().windows);
         plugin_host = std::make_unique<lift::plugin::PluginHost>(*plugin_readings);
         // ★ `ctx.appdata`（2026-11-25）：根由宿主绝对化（`Vfs::setAppDataDir` 存的是 CLI 原串）。
@@ -1218,19 +1152,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift-aot: --plugin 装载失败（exit 2）：%s\n", plugin_err.c_str());
             return 2;
         }
-        // ★ Edit / EngineRead：`host.cpu().mem`（`init()` 之后才可读；`--input-plan` 的 attach 同处）。
+        // ★ Edit / EngineRead：`host.cpu().mem`（`init()` 之后才可读；与控制层输入队列的装配同处）。
         plugin_host->attachMemory(*host.cpu().mem);
         // ★ 读点观察者（C2a 的唯一泵；`input.h` 四个投递口 → `PluginHost::onReadPoint`）。
         host.cpu().windows->setReadPointObserver(plugin_host.get());
-        // ★ **回调边界**（2026-11-22）：插件 executor 与 `--input-plan` 走**同一条**帧线 ——
-        //   `presenter.frameCount()`（`present.cpp` 在 `++frame_count_` 同一刻推 `Frame`）。
+        // ★ **回调边界**（2026-11-22）：插件 executor 与控制层输入队列走**同一条**帧线 ——
+        //   `presenter.frameCount()`（`present.cpp` 在 `++frame_count_` 同一刻 +1；拉取）。
         //   ⇒ `ctx.input.click` 的抬起同样要跨过一个完整 guest 回调（闸门 ②′；阈值只有
         //   `PointerCore::kCallbackFramesBeforeRelease` 一份）。⛔ 不按插件 / 场景开特判。
         plugin_host->executor().setFrameSource(&host, &presentFrameCount);
         // ★ `ctx.quit()` 的归因（D-C2-9）：run 循环在下一个块边界看到 `Stopped` + `plugin: quit`。
         //   ★ S2：只有**有 Run**（`start`/`onTrigger`）的插件才可能调 `ctx.quit`（`RenderCtx` 没有
         //     `quit`）⇒ 纯 render 插件（含内置 `hud`）**不覆盖** `run_opts.stop_requested`
-        //     （否则 `--overlay --input-plan` 的 quit 指令会被一个永远为 false 的 flag 顶掉）。
+        //     （否则 `--overlay` 的输入队列会被一个永远为 false 的 flag 顶掉）。
         if (plugin_host->script() != nullptr && plugin_host->script()->hasRun()) {
             run_opts.stop_requested = plugin_host->quitFlag();
             run_opts.stop_detail = "plugin: quit";
@@ -1498,9 +1432,6 @@ int main(int argc, char** argv) {
         }
         control_started = true;
         host.setControl(&control);
-        // ★ `--input-plan-trace` 的 `state_seq=` 来源（唯一生产者 = 控制层）。装在这里是因为
-        //   `control` 要到上面 `start()` 之后才存在；没开控制层 ⇒ 不装 ⇒ trace 打 `-`（⛔ 不编造）。
-        if (input_plan_trace) input_plan.setStateSeqSource(&control, &controlStateSeq);
         // ★ `present` 的事实来源只有一处（`windowHidden()`，⛔ 不由 `--present` 推：`auto` 会静默
         //   回落隐藏窗）。`hello.present` 与 `sample.present` 都读它。
         host.setPresentState(copts.present);
@@ -1533,20 +1464,10 @@ int main(int argc, char** argv) {
         const char* requested_by = r.host_stop_reason == "window-closed" ? "client" : nullptr;
         control.shutdown(run_reason, requested_by);
     }
-    // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"按钮一直按着"）----
-    //   `releaseAll()` 只抬起待办的按钮，不是 step、不推进入口；返回个数只用于摘要。
-    //   ★ 完成度是**判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：`pending != 0`（任务没走完）
-    //     或某一步的 `timeout` 到期 ⇒ **exit 5** + stderr 点名 `文件:行` + 门/动作。
-    //     ⛔ 不许只打一行 stderr 警告仍 exit 0 —— 那正是"图 → 配方"改写会把 CTest 变成假绿的缝。
-    //   ★ 判据先算、摘要照打（读数面不因失败而消失）；退出码在 `printRunSummary` 之后取，
-    //     保证"跑失败（2）"与"配方没走完（5）"两个数都能在 stdout 上看到原因。
-    const lift::RecipeOutcome plan_outcome =
-        input_plan.armed() ? input_plan.outcome() : lift::RecipeOutcome::Done;
-    if (input_plan.armed()) {
-        input_plan.releaseAll(*host.cpu().windows);
-        printf("input-plan: %s\n", input_plan.summary().c_str());
-        std::fflush(stdout);
-    }
+    // ---- ⑥' 控制层输入队列收口：**跑结束前必须抬**（否则下一次 run 会看到"按钮一直按着"）----
+    //   `releaseAll()` 抬起待办的按钮 + 把 Program 的电平交还 OS；不是 step、不推进入口。
+    //   ★ 控制会话**不按会话收口**（没有 `closeSessionIfDone`）：所有权保持到这一句。
+    if (control_any) control_input.releaseAll(*host.cpu().windows);
     // ---- ⑥'` `--plugin` 收口：**一次性** readout（⛔ 不周期；§12.8 第 3 条）----
     //   ★ 顺序：先摘读点观察者（run 之后⛔ 不再有读点回调），再释放本 owner 的武装 / 输入状态，
     //     最后打一行。`releaseOwner` 只抬本 owner 的（⛔ 不 `releaseProgram` 全抬）。
@@ -1573,14 +1494,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift-aot: ⛔ 停在一个派发表里没有的 EA：%s\n", r.detail.c_str());
     }
     std::fflush(stdout);
-    if (plan_outcome != lift::RecipeOutcome::Done) {
-        // 多行报告（点名 `文件:行` + 门/动作 + 进度）由 `InputPlan` 自己算（同一个结论只在一个出口）。
-        const std::string report = input_plan.failureReport();
-        std::fputs(report.empty() ? "input-plan: FAIL（配方没有走完，但没有可点名的指令）\n" : report.c_str(),
-                   stderr);
-        std::fflush(stderr);
-        return lift::recipeOutcomeExitCode(plan_outcome);  // = 5（recipe.h 的 kRecipeIncompleteExitCode）
-    }
     std::fflush(stderr);
     // ★ 退出码口径与解释器臂逐字相同（`machine.cpp` 的 `exitCodeForRun` + `runtime/guest_exit.h`）：
     //   ① run 本身没有正常结束 ⇒ 2（= `exitCodeForRun`）；

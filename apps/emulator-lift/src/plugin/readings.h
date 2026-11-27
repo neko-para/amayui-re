@@ -13,10 +13,10 @@
 //     `SetCursorPos` / 配方 click 同一坐标系）。
 //
 // ★ 缓存：同一 `(cur,id)` + 名字表签名不变 ⇒ 复用上次解析出的名字（否则每个读点都要付一次
-//   CP932 解析 —— `InputPlan::refreshIdentity` 同形）。⛔ 这不是"第二份身份状态"：真源仍是
+//   CP932 解析 —— 与插件自己的 marker 采样同形）。⛔ 这不是"第二份身份状态"：真源仍是
 //   marker 采样器，这里只缓存**字符串**。
 //
-// ★ 与 `InputPlan::atPoint` 的采样**互斥**：`--plugin` 与 `--input-plan` / `--control-root`
+// ★ 与 `ControlInput::atPoint` 的采样**互斥**：`--plugin` 与 `--control-root`
 //   启动即 exit 2（D-C2-2）⇒ 同一个读点不会两次付身份采样的钱。
 #pragma once
 

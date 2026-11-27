@@ -21,7 +21,7 @@
 // ★ **③ 在 ④ 之前**（合同 §4.2 445）：这是唯一能让"回调里读到的 `released()` 还是旧值"可被观测的
 //   位置。`owner-timeout` 用它做**可判**断言（回调内 `released()==0`、pump 返回后 `==1`），
 //   ⛔ 不要换成"headless ⇒ 不超时"那类恒真断言。
-// ★ **⑦ 放末尾**（`InputPlan` 放开头）：本读点的 up 已经入队 ⇒ guest 下个读点能取到；且避免
+// ★ **⑦ 放末尾**（`ControlInput` 放开头）：本读点的 up 已经入队 ⇒ guest 下个读点能取到；且避免
 //   "刚提交的 intent 还没落地就把 Program 电平收了"。
 //
 // ★ **早退条件必须含 `runner_ && runner_->armedCount() > 0`**：配方执行器那一份 `atPoint` 的早退**不含**
@@ -33,13 +33,13 @@
 //     用 ready 深度会让"刚提交、还没提升"的那一拍早退 ⇒ 那条 intent 永远等不到下一拍。
 //
 // ★ **钟 = 宿主墙钟**（`pluginNowNs() / 1e6`），⛔ **不接** `Clock` / `attachClock` /
-//   `pausedTotalMs()`：这里是墙钟，扣暂停是配方执行器（`InputPlan`）的口径 —— 两者**故意不同**
+//   `pausedTotalMs()`：这里是墙钟，扣暂停是控制层输入队列（`ControlInput`）的口径 —— 两者**故意不同**
 //   （与 `TriggerRunner::atPoint` 收到的那个 `now_ms` 是同一个数）。
 //
 // ★ **两条 `PointerCore` 语义照抄、不重写**：click 的两段 + 三个闸门（`armClickAt` / `pressDue` /
 //   `releaseDue`）、"同按钮未抬起 ⇒ 停队首"（连点串行化）。⇒ 本文件**没有**第二套坐标映射 / 闸门。
 //   ★ **闸门 ②′（回调边界）也走同一份**：装配点用 `setFrameSource` 把 `presenter.frameCount()`
-//   （= `InputPlan::presenting()` 的同一个计数）接进来 ⇒ `PointerPoint::frames` 是活的、
+//   （= `ControlInput` 的同一个计数）接进来 ⇒ `PointerPoint::frames` 是活的、
 //   `callback_boundary=true` ⇒ 插件 `ctx.input.click` 的抬起同样要跨过一个完整 guest 回调。
 //   ⛔ 阈值只有 `PointerCore::kCallbackFramesBeforeRelease` 一份（不在本类复制）。
 //
@@ -97,14 +97,14 @@ public:
     //   `now_ms` 参数用 —— 驱动方负责让两者一致（`tests/trigger_runner.cpp` 的 `pump()` 就是这么做的）。
     void setClockForTest(NowFn now_ms) { now_fn_ = now_ms; }
 
-    // ★ **帧线**（2026-11-22）：与 `InputPlan::presenting()` 是**同一个计数源** —— 宿主**已完成**的
+    // ★ **帧线**（2026-11-22）：与 `ControlInput::setFrameSource` 是**同一个计数源** —— 宿主**已完成**的
     //   guest 回调数（`present.cpp` 在 `++frame_count_` 同一刻推 `PlanEventKind::Frame`；装配点给的是
     //   `presenter.frameCount()`）。供给之后 `PointerPoint::callback_boundary=true` ⇒ 抬起还必须在
     //   **按下之后的下一个完整 guest 回调**之后（`PointerCore::kCallbackFramesBeforeRelease`；
     //   闸门 ②′ 在 `PointerCore::releaseDue`，⛔ 本类不复制阈值、不另造一套）。
     //   · 缺省 `fn == nullptr` ⇒ `frames=0` / `callback_boundary=false` = **旧行为**（纯夹具 /
     //     没有 presenter 的驱动）。⛔ 不是"恒 false ⇒ 插件永远不受闸门②′"—— 生产装配点会接上。
-    //   · 形状与 `InputPlan::setProfileMarkHook` / `setStateSeqSource` 同一条（裸函数指针 + `void*`；
+    //   · 形状 = 裸函数指针 + `void*`（缺省 nullptr ⇒ 每个读点多一次判空；⛔ 不用 `std::function`）。
     //     缺省 nullptr ⇒ 每个读点多一次判空，⛔ 不用 `std::function`）。
     using FrameCountFn = std::uint64_t (*)(void* ctx);
     void setFrameSource(void* ctx, FrameCountFn fn) {

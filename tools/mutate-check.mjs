@@ -3593,9 +3593,10 @@ const MUTATIONS = [
   //     今天本条由**插件路径**的 `inject/executor-click-crosses-callback` 抓住（实测：改回总样本数
   //     ⇒ 同一个回调里就抬起 ⇒ 该用例的"同回调凑满闸门① 仍不许抬"当场红；CTest 退出码 8）。
   {
-    // ★ C1a（2026-11-19）：闸门①的实现从 `input_plan.cpp` 搬进了 `PointerCore::releaseDue`
-    //   （`runtime/pointer_core.cpp`），读数改走 `PointerPoint::key_level_reads` ⇒ 本条 `file`/`from`
-    //   跟着指到新落点（机制点名与 `what` 不变）。
+    // ★ C1a（2026-11-19）：闸门①的实现从旧 `InputPlan` 的实现文件（`input_plan.cpp`，
+    //   2026-11-27 已随入口删除）搬进了 `PointerCore::releaseDue`（`runtime/pointer_core.cpp`），
+    //   读数改走 `PointerPoint::key_level_reads` ⇒ 本条 `file`/`from` 跟着指到新落点
+    //   （机制点名与 `what` 不变）。
     file: 'apps/emulator-lift/src/runtime/pointer_core.cpp',
     from: '        const bool key_seen = pt.key_level_reads >=\n' +
           '                              r.press_key_reads + kKeyLevelReadsBeforeRelease;',
@@ -3615,8 +3616,8 @@ const MUTATIONS = [
   //     可以全在同一个回调里满足（实测失败臂 press→release 只跨 6 个读点、frames 244→244），
   //     回调体的状态机一次也没看到按下电平 ⇒ 单发 `click … right` 4/5 成。
   //   ★ 判据不变的红/绿：把 `callback_ok` 改成恒 true ⇒ `inject/executor-click-crosses-callback`
-  //     在"同一个回调里凑满闸门① / 墙钟过兜底仍不许抬起"那一拍当场红（`InputPlan` 驱动的那条
-  //     同名正例已随 `--input-plan` 退役，2026-11-27）。
+  //     在"同一个回调里凑满闸门① / 墙钟过兜底仍不许抬起"那一拍当场红（旧 `InputPlan` 驱动的那条
+  //     同名正例已随类一起删除，2026-11-27）。
   {
     file: 'apps/emulator-lift/src/runtime/pointer_core.cpp',
     from: '        const bool callback_ok = !pt.callback_boundary ||\n' +

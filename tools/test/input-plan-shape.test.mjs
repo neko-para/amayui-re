@@ -9,15 +9,18 @@
  *   旧的 ③（"关系断言不是恒真"—— 钉 `tests/input_plan.cpp` 的 `deliverCalls == ShimDef::call_count`
  *   与 `add_test(NAME input-plan-read-points …)`）**已删**：那个 CTest 与源文件本批一起退场
  *   （`input-plan-shape` 的 ③ 没有对象了）。①/② 保持不变 —— ② 判的投递层今天仍服务
- *   `ReadPointObserver`（`input.h` 的 `input::deliver*`），与 plan 类是否存在无关。
+ *   `ReadPointObserver`（`input.h` 的 `input::deliver*`）与控制层立即队列（`ControlInput::atPoint`），
+ *   与旧 `InputPlan` 类是否存在无关。
+ *   ★ ① 的禁用词随类删除**缩表**：`InputPlan` / `input_plan` / `note(` 已不存在于本仓
+ *   （删掉它们不是放宽判据 —— 目标词本身没了）；`input::` / `deliver(` / `atPoint(` 等
+ *   "把推进塞回循环"的词**保留**（真正要防的回潮形态）。
  *
  * ## 两条判据（红了意味着什么）
  * ① **执行循环里不许出现投递层**：`src/runtime/machine.cpp` / `src/aot/aot_run.cpp` 里
- *    `InputPlan` / `input_plan` / `input::` / `deliver(` / `atPoint(` / **`note(`** 命中 = 0。
- *    ★ `note(` 是复审点名的**原设计漏掉的那个入口**：原设计允许 `sampleMarker()`（它在
- *      `Machine::run` 的**块边界 `if`** 里）调 `note(WindowManager&, …)`，一旦它能施加到期 step，
- *      那就是用户点名的旧错误"块边界 pump"。S1 的结构性堵法 = `InputPlan::note()` **不接受
- *      `WindowManager`**，所以这条词表必须包含 `note(`。
+ *    `input::` / `deliver(` / `atPoint(` / `TriggerRunner` / `onTrigger(` / `IntentExecutor` 命中 = 0。
+ *    ★ 2026-11-27：旧 `InputPlan` 的三条词（`InputPlan` / `input_plan` / `note(`）随类删除退场
+ *      —— 它们在本仓已不存在，留着只会变成"永远不可能命中"的假守卫。防的是**形态**：任何把
+ *      输入推进塞回执行循环 / 块边界的写法都会撞上 `input::` / `deliver(` / `atPoint(`。
  *    ★ 旧 `harness_script` 闸门**本轮不删**（那是 S6 的事）。所以 `tickInputScript` /
  *      `tickInteraction` 在 `machine.cpp` 里**允许**存在于两处老位置：函数定义行，或
  *      `if (harness_marker || harness_script) { … }` 的块内。任何新位置（尤其 `aot_run.cpp`
@@ -91,7 +94,7 @@ function braceBlockRange(lines, startIndex) {
 //   ⛔ 不加 `fire(`：`hitLines` 用的是无词边界的 `includes`，而且本设计里 pump 的入口叫 `atPoint`、
 //   **没有** `fire(` 这个公开拼写（`fire` 是 `atPoint` 内的局部步骤）⇒ 加了只会制造假红。
 const LOOP_FORBIDDEN = [
-  'InputPlan', 'input_plan', 'input::', 'deliver(', 'atPoint(', 'note(',
+  'input::', 'deliver(', 'atPoint(',
   'TriggerRunner', 'TriggerHandler', 'trigger_runner', 'onTrigger(',
   'IntentExecutor', 'intent_executor',
 ];

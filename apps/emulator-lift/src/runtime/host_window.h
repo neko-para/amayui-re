@@ -22,7 +22,7 @@
 namespace lift {
 
 struct X86;
-class InputPlan;
+class ControlInput;
 class ReadPointObserver;
 class UiInputRouter;
 class WindowManager;
@@ -310,25 +310,25 @@ public:
 
     // =====================================================================================
     // ★ 投递层接线（S1；`REQ-01M7G7EMX3JR272D8FVM7JFY9D`）
-    //   **非拥有指针**（形状照 `presenter_.setFrameSampler(&sampler_)`）：计划的生命周期在
-    //   宿主装配处（S4），`WindowManager` 只借它。`nullptr` = 没有计划 = 缺省档 ⇒ 每个读点
-    //   只有**一次判空**（`inputPlan()` 是 inline 裸读，⛔ 不要在这里加 checkMainThread；
+    //   **非拥有指针**（形状照 `presenter_.setFrameSampler(&sampler_)`）：控制层输入队列的生命周期在
+    //   宿主装配处（S4），`WindowManager` 只借它。`nullptr` = 没有控制层输入 = 缺省档 ⇒ 每个读点
+    //   只有**一次判空**（`controlInput()` 是 inline 裸读，⛔ 不要在这里加 checkMainThread；
     //   那会把"1 条 null 检查"变成"线程检查 + 判空"）。
-    //   ★ 只有 `setInputPlan` 是状态入口（算进主线程亲和性账），读指针不算。
-    //   ⚠ `setInputPlan` 必须在 `machine.cpp` / `aot_run.cpp` 的**循环外**调用（S4 的装配点）。
+    //   ★ 只有 `setControlInput` 是状态入口（算进主线程亲和性账，站点名 `window.control`），读指针不算。
+    //   ⚠ `setControlInput` 必须在 `aot_main.cpp` 的**循环外**调用（装配点）。
     // =====================================================================================
-    void setInputPlan(InputPlan* plan);
-    InputPlan* inputPlan() const { return input_plan_; }
+    void setControlInput(ControlInput* input);
+    ControlInput* controlInput() const { return control_input_; }
 
     // =====================================================================================
     // ★ **读点观察者**（C2a；父级裁决 `c2-decisions.md` D-C2-1）
-    //   **非拥有指针**（形状逐字照 `setInputPlan` / `inputPlan`）：生命周期 = 装配者
+    //   **非拥有指针**（形状逐字照 `setControlInput` / `controlInput`）：生命周期 = 装配者
     //   （`aot_main` 的 `PluginHost`），`WindowManager` 只借它。`nullptr` = 没有观察者 ⇒
     //   `input.h` 的四个投递口每个读点只多**一次判空**（⛔ 不取时钟、不碰容器、不加第三个 `if`）。
     //   ★ `setReadPointObserver` 是状态入口（算进主线程亲和性账，站点名 `window.readpoint`）；
     //     **读指针不算**：它在每个读点的热路径上，读指针就是一次裸读。
-    //   ⚠ 必须在 `machine.cpp` / `aot_run.cpp` 的**循环外**装配（与 `setInputPlan` 同一条口径）。
-    //   ★ 为什么不去 `InputPlan` 上挂回调：那让核心认识配方（`core-shape` 的禁用词 + 合同 §6 行 1）。
+    //   ⚠ 必须在 `aot_main.cpp` 的**循环外**装配（与 `setControlInput` 同一条口径）。
+    //   ★ 为什么不去输入驱动器上挂回调：那让核心认识输入队列（`core-shape` 的禁用词 + 合同 §6 行 1）。
     // =====================================================================================
     void setReadPointObserver(ReadPointObserver* observer);
     ReadPointObserver* readPointObserver() const { return read_point_observer_; }
@@ -337,8 +337,8 @@ public:
     // ★ 叠层注入路由（S9；`docs/03-emulator/overlay.md` D6 / D2）
     //   **非拥有指针**：生命周期 = 装配者（`SdlWindow::Impl`，由 `attachWindowManager` /
     //   `setOverlay` 装/卸）。`nullptr` = 没有叠层 / `--ui-input=pass` 未装 / 叠层已关 ⇒
-    //   `InputPlan` 的 click 路径只多一次判空（⛔ 没有第二份命中 / 捕获状态）。
-    //   ★ 与 `setInputPlan` 不同：**读指针也算状态入口**（站点名 `window.ui-input`）——它只用
+    //   注入 click 的路径只多一次判空（⛔ 没有第二份命中 / 捕获状态）。
+    //   ★ 与 `setControlInput` 不同：**读指针也算状态入口**（站点名 `window.ui-input`）——它只用
     //     在 click 的臂上 / 抬起（不是每个读点），所以线程检查的代价不在热路径上。
     //   ★ 谁装、装的条件（`overlay && ui_script`）不在这里判：`WindowManager` 只存指针。
     // =====================================================================================
@@ -392,8 +392,8 @@ private:
     std::uint64_t input_sample_period_ms_ = 0;  // 最近 K 个采样间隔的**最大值**（周期估计）
     std::uint64_t last_input_sample_ms_ = 0;
     bool have_input_sample_ = false;
-    // ★ 投递层（S1）：非拥有指针；nullptr = 没有计划（缺省档）。
-    InputPlan* input_plan_ = nullptr;
+    // ★ 投递层（S1）：非拥有指针；nullptr = 没有控制层输入（缺省档）。
+    ControlInput* control_input_ = nullptr;
     // ★ 读点观察者（C2a）：非拥有指针；nullptr = 没有观察者（缺省档）。见方法注释。
     ReadPointObserver* read_point_observer_ = nullptr;
     // ★ 叠层注入路由（S9）：非拥有指针；nullptr = 没有叠层（缺省档）。见方法注释。

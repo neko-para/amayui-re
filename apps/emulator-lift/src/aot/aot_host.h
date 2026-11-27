@@ -146,18 +146,18 @@ struct AotRunOptions {
     //   IR 里的闸门块 / 快路径**仍然在**（构建期决定）；闸门返回 false ⇒ 回退原 lifted 函数体。
     //   ⛔ 不是运行期 override：本开关只让一个只读判定改答案，不替换任何执行来源。
     bool no_intrinsics = false;
-    // ★ **外部请求停止**（缺省 nullptr = 从不请求）。唯一的生产者 = `--input-plan` 的 `quit`
-    //   （`InputPlan::quitFlag()`）⇒ 与解释器臂**同一条口径**（`machine.cpp` 的
-    //   `interaction_.actuator().quitRequested()` ⇒ `Stopped` + detail `… quit`）：
+    // ★ **外部请求停止**（缺省 nullptr = 从不请求）。生产者 = 插件的 `ctx.quit()`
+    //   （`plugin_host->quitFlag()`）⇒ 与解释器臂**同一条口径**（`machine.cpp` 的
+    //   `input_script_.quitRequested()` ⇒ `Stopped` + detail `… quit`）：
     //   本次运行以 `Stopped`（正常结局）收口，⛔ **不等 guest 自己退出** —— 那会把 guest
     //   带进它的停机路径，而停机路径可能不在闭包里（实测：WM_QUIT 之后停在 `00513B90`
     //   ⇒ `decode-error`，退出码 2）。
     //   读点在**主线程**里写这个 bool、主线程的块边界读它 ⇒ 不需要原子。
     const bool* stop_requested = nullptr;
     // ★ **停因归因**（C2a；`c2-decisions.md` D-C2-9）：`stop_requested` 被触发时写进
-    //   `AotRunResult::detail` 的文本。`nullptr`（缺省）⇒ 保持旧文本 `"input-plan: quit"`。
-    //   为什么需要一格归因：`--plugin` 与 `--input-plan` 互斥（启动即 exit 2），但两者**写同一个**
-    //   `stop_requested` 槽 ⇒ 不归因就会把插件的 quit 说成配方的 quit（`bye.reason` 也跟着错）。
+    //   `AotRunResult::detail` 的文本。`nullptr`（缺省）⇒ 保持旧文本 `"plugin: quit"` 的兜底。
+    //   为什么需要一格归因：`stop_requested` 槽的写者可能换（控制层 / 插件），不归因就会把
+    //   插件的 quit 说成别的来源（`bye.reason` 也跟着错）。
     //   ⛔ 不要改成"按有没有装插件分支"：那是第二个判据，而这里只需要一个标签。
     const char* stop_detail = nullptr;
 };
@@ -394,10 +394,6 @@ public:
     //   nullptr = 没接 ⇒ 经典 `host.config` 是 `undefined`（⛔ 不是抛错）。
     //   ⛔ 本头不 include `plugin/` 的具体类型：只认 `lift::plugin::ConfigBridge` 指针。
     void setConfigBridge(lift::plugin::ConfigBridge* bridge) { ui_host_ops_.config = bridge; }
-    // 窗口标记的落点（`InputPlan::ProfileMarkHook` 的 thunk）：begin ⇒ 开窗，end ⇒ 打表 + 关窗。
-    // ★ 静态 + `void*` 上下文 = 与 `InputPlan` 的 C 形状钩子对齐（⛔ 不用 std::function：
-    //   那会在每个读点付一次间接跳转，而"缺省零成本"是硬口径）。`aot_main.cpp` 取它的地址。
-    static void windowMarkThunk(void* ctx, const char* label, bool begin);
     AotWindowProf& window() { return win_; }
     const AotWindowProf& window() const { return win_; }
 

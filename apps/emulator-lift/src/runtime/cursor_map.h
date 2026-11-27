@@ -15,7 +15,7 @@
 namespace lift {
 
 // `--input-plan` 的坐标参考系：人手在**标准画面**上量出来的 (x,y) 都属于它。
-// ⛔ 这两个常数只在本文件（= 唯一公式来源）里被除；`input_plan.cpp` 里不许出现 1280/720 的除法。
+// ⛔ 这两个常数只在本文件（= 唯一公式来源）里被除；注入 / 控制层里不许出现 1280/720 的除法。
 inline constexpr int kReferenceFrameW = 1280;
 inline constexpr int kReferenceFrameH = 720;
 

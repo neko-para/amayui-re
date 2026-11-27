@@ -1,12 +1,11 @@
 // emulator-lift · 输入**投递点**（11 个投递点的闭集合）
 //
 // ★ 为什么单独一个头（2026-11-19 · C1a 行为不变的机械抽取）：`PointerCore`
-//   （`runtime/pointer_core.h`）要用这份枚举判"闸门看的是不是 KeyLevel 读点"，而
-//   `input_plan.h` 又要 include `pointer_core.h` ⇒ 枚举若仍住在 `input_plan.h` 就是**循环
-//   include**（`#pragma once` 会让枚举在用到时还没声明）。⇒ 类型搬到这里，`input_plan.h`
-//   只留一行 `#include`。
-// ★ 文本逐字搬自 `input_plan.h`（W1）；**唯一定义仍在 `input_plan.cpp`**：`inputPointName()`
-//   的定义一个字节没动（⛔ 不要在这里加 out-of-line 定义，那会变成两个 TU 的同一份词表）。
+//   （`runtime/pointer_core.h`）要用这份枚举判"闸门看的是不是 KeyLevel 读点"，而派生类
+//   （`ControlInput` / `IntentExecutor`）都要 include `pointer_core.h` ⇒ 枚举住在这里，
+//   两个头之间不成环。
+// ★ 2026-11-27：旧的 `inputPointName()` 文本出口随 `--input-plan-trace` 一起删除
+//   （⛔ 不要再加回来：它只服务已退役的 trace 行）。
 #pragma once
 
 #include <cstddef>
@@ -35,6 +34,5 @@ enum class InputPoint : std::uint8_t {
 };
 
 constexpr std::size_t kInputPointCount = static_cast<std::size_t>(InputPoint::Count);
-const char* inputPointName(InputPoint point);
 
 }  // namespace lift

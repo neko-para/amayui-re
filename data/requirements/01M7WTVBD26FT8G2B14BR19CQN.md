@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
-- repro: apps/emulator-lift/scripts/recipes/save07-battle.plan#click 640 517
+- repro: apps/emulator-lift/scripts/plugins/scenario-save07-battle.js#TURN_END_X
 - severity: S1
 - tags: [emulator-lift, d3d9, arena, save07]
 

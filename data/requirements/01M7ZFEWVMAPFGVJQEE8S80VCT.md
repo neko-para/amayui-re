@@ -31,7 +31,7 @@
 
 ## 复现（能照抄）
 
-配方已入库：`repo:apps/emulator-lift/scripts/recipes/fellow-switch.plan`（零 `wait`；窗口 = `click` → 等 `SETTOOLLIST` → 等回 `FELLOW` → 等主轮询体 `[0x1570,0x15A8)`）。
+配方已入库：`repo:apps/emulator-lift/scripts/plugins/scenario-fellow-switch.js`（零 `wait`；窗口 = `click` → 等 `SETTOOLLIST` → 等回 `FELLOW` → 等主轮询体 `[0x1570,0x15A8)`）。
 
 ```bash
 cd apps/emulator-lift

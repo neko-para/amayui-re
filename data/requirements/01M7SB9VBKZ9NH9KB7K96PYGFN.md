@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
-- repro: apps/emulator-lift/src/runtime/input_plan.cpp#armClickAt
+- repro: apps/emulator-lift/src/runtime/pointer_core.cpp#armClickAt
 - severity: S3
 - done_reason: S7（0a720cf）删掉 armClickAt 的强制抬起，改成“一个读点最多一条写动作 + 同按钮 pending_ 时 click/mouse_down 不消费”；两条连续 click 现在逐条串行、消息序列为 DOWN,UP,DOWN,UP（测试 input-plan/two-clicks-serialized 实测 seq=DUDU，⛔ 不是 DDUU）。repro 保留为重开条件。
 - tags: [emulator-lift, input-plan]

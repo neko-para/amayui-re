@@ -11,7 +11,7 @@
 
 ## 判据（存在性 + 观测）
 
-- 现象链（代码证据）：`repo:apps/emulator-lift/src/runtime/interaction_graph.cpp`（`action profile_begin/end` 的追加处在 810–821 行） 把图里的
+- 现象链（代码证据）：`src/runtime/interaction_graph.cpp`（2026-11-27 已删：plan 退役）（`action profile_begin/end` 的追加处在 810–821 行） 把图里的
   `action profile_begin/end <label>` 经 `actuator_.appendText(...)` **在运行期**追加进 `InputScript`；
   而 `repo:apps/emulator-lift/src/runtime/machine.cpp` 的 `prepare()` 在 **`prepare()` 时**只按
   `window_prof_.setArmed(input_script_.hasProfileActions())` arm 一次。

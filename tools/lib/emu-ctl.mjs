@@ -858,7 +858,7 @@ export function describe() {
     },
     traps: {
       wait:
-        '控制层 `wait <ms>` = 让 guest 跑 N ms 后**重停**（= `resume --for-ms`）；`--input-plan` 里的 `wait` 是配方 DSL 的一条 deadline —— 两者不是一回事。',
+        '控制层 `wait <ms>` = 让 guest 跑 N ms 后**重停**（= `resume --for-ms`）；`--input-plan` 的 `wait` 是配方 DSL 的一条 deadline（该入口 2026-11-27 已退役）—— 两者不是一回事。',
       criteria:
         '⛔ 验收判据不要用 wait：要能红就用 `sample` 的 script/pos、`state_seq`、`insns`。★ 截图是 `present` 时冻结的那一帧；`hash_still_matches` 只回答"冻结有没有生效"，⛔ 别拿它当判据（判内容要判非全黑 / 与同帧 `--dump-frame` 对照）。',
     },

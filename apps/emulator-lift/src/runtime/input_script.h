@@ -260,7 +260,7 @@ public:
     // 直接解析文本（测试 / 内嵌用）；origin 只进报错与日志。
     bool loadText(const std::string& text, const std::string& origin, std::string* err);
     // ★ 追加：把 `text` 解析成动作接到**末尾**（⛔ 不 clear、⛔ 不动已应用的账）。
-    //   为什么需要它：交互状态机（`runtime/interaction_graph.h`）在**运行中**才知道"下一个动作在哪个
+    //   为什么需要它：运行中的驱动（程序内夹具 / 宿主内嵌）在**运行中**才知道"下一个动作在哪个
     //   时刻"（块边界上的 frame / guest_ms），而动作的注入与"一次按下一定被 guest 观察到"的语义
     //   已经全在 `InputScript` 里 —— 状态机只追加，不另写一套按下 / 抬起。
     //   前置（全部可由本类自己的账判定；违反 ⇒ false + err 带原因）：

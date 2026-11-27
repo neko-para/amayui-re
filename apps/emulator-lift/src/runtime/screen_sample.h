@@ -2,7 +2,7 @@
 //
 // ★ 为什么单列一份：交互模型（`docs/03-emulator/interaction-model.md`）的判定必须是
 //   **观测值的纯函数** —— 采样发生在哪一刻、采样到什么值，与"什么时候判定"分开。
-//   这里只做采样与记账；判定在 `runtime/interaction_graph.h`。⛔ 不要把两者混在一起：
+//   这里只做采样与记账；判定在消费端（效果级判据 / 叠层）。⛔ 不要把两者混在一起：
 //   混起来以后"同一份画面 ⇒ 同一串判定"就只能靠测试碰运气。
 // ★ 采样点 = **Present**（唯一的呈现汇点：D3D9 Present 与 DDraw Flip 都走
 //   `HeadlessPresenter::present()`；`arena.hash(surface)` 也是在那里算的）。

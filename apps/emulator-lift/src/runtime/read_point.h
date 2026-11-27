@@ -6,11 +6,11 @@
 //
 // ★ 为什么是"读点观察者"而不是 `pluginPump`：这是"一个读点发生了"的**通用**通知面
 //   （谁想在这个拍子上做事就实现它），不是插件专属的私线。C2 只**借用**它把
-//   `IntentExecutor::atPoint` 接到 `input.h` 的四个投递口上；C4 收编时把 `InputPlan` 也变成
+//   `IntentExecutor::atPoint` 接到 `input.h` 的四个投递口上；C4 收编时把 `ControlInput` 也变成
 //   观察者（或删掉双指针）—— 那时**只剩一个泵**。⇒ ⛔ 不要在这里写"插件"三个字以外的语义，
 //   ⛔ 也不要给它加 `armed()` / 预算 / 时钟（那些是被通知方自己的账）。
 //
-// ★ 与 `WindowManager::setInputPlan` **同形**：非拥有裸指针、`nullptr` = 没有观察者。
+// ★ 与 `WindowManager::setControlInput` **同形**：非拥有裸指针、`nullptr` = 没有观察者。
 //   空指针路径只多**一次判空**（`input.h` 的四个 inline 各加一句）⇒ 现有输出/行为逐字节不变。
 //
 // ★ 守卫：本头属于**核心面** ⇒ 在 `tools/test/core-shape.test.mjs` 的 `CORE_FILES` 里逐文件列出

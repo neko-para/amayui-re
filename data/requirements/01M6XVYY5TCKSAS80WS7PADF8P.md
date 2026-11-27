@@ -10,7 +10,7 @@
 
 ## 现在到哪了（2026-11-10：进 / 出 EU-ROOM 都跑通；只剩"脚本身份"识别源）
 
-- **节点图 runner**：`repo:apps/emulator-lift/src/runtime/interaction_graph.h` + `repo:apps/emulator-lift/src/runtime/interaction_graph.cpp`
+- **节点图 runner**：`src/runtime/interaction_graph.{h,cpp}`（2026-11-27 已删：plan 退役）
   （行写法解析 / 状态机 / 三种失败 / trace / `failureReport()` / `defaultFailDumpPath`）。
 - **画面采样**：`repo:apps/emulator-lift/src/runtime/screen_sample.h` + `.cpp`，采样点 = Present（唯一呈现汇点）；
   整帧 hash / 矩形均值 / 矩形 hash / "与上一次采样不同"的**单调计数**。

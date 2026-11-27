@@ -163,15 +163,6 @@ bool parseExpectChangeActions(const std::string& spec, ExpectChangePolicy* out, 
 }
 
 bool Machine::configureExpectChange(const ExpectChangePolicy& p, std::string* err) {
-    if (interaction_.active()) {
-        if (err) {
-            // ★ 文案里保留 `interaction`（`runtime/interaction_graph.h`）：这是驱动器的名字，
-            //   pure CTest `input-expect` 用它区分"配方冲突"与"没脚本 / 没匹配动作"两类拒绝。
-            *err = "与交互配方驱动器（runtime/interaction_graph.h）互斥：配方有自己的门语义，"
-                   "两套判据同时开会出两套口径";
-        }
-        return false;
-    }
     if (p.enabled && !(p.click || p.key || p.mouse)) {
         if (err) *err = "--expect-change-after 至少要一个动作类别（click / key / mouse）";
         return false;
@@ -771,24 +762,8 @@ bool Machine::loadInputScriptText(const std::string& text, const std::string& or
     return true;
 }
 
-bool Machine::loadInteractionGraph(const std::string& path, std::string* err) {
-    // 换配方前先把旧配方仍按着的输入抬起来（⛔ 不静默留下"卡住的键"）。
-    if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
-    if (!interaction_.loadFile(path, err)) return false;
-    // ★ **不再接画面采样器**：配方的门只有"脚本身份 + 脚本内位置"两个源（`runtime/recipe.h`），
-    //   画面采样仍由 `--expect-change-after` 在 `run()` 里按需接（两条通道互斥，见 §4.2c）。
-    std::fprintf(stderr, "[interaction] 配方：%s（%zu 条指令）\n", path.c_str(), interaction_.steps().size());
-    return true;
-}
-
-bool Machine::loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err) {
-    if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
-    if (!interaction_.loadText(text, origin, err)) return false;
-    return true;
-}
-
 // 一份 `InputScript` 的公共推进：tick + profiler 窗口边界登记 + `quit` 唤醒。
-// ★ 交互图的 actuator 走这条路（原时间线也走它；2026-11-16 起时间线没有 CLI 入口，只剩夹具）：
+// ★ 2026-11-16 起时间线没有 CLI 入口，只剩夹具与宿主内嵌：
 //   自动 hold / 延迟抬起 / profiler / quit 只有一份实现，⛔ 不要各写一遍。
 void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
     if (!script.active()) return;
@@ -802,8 +777,7 @@ void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
     if (script.takeProfileBegin(&label)) {
         // ★ **运行期追加**的 `profile_begin` 必须在这里重新 arm（缺陷 `REQ-01M701PEB38VDQJD4QR2JEBA74`）：
         //   `run()` 只在 **prepare 期**按 `input_script_.hasProfileActions()` arm 一次；而
-        //   配方驱动器（历史上经 `--interaction-graph`，今天只有程序内夹具）的 `profile_begin/end`
-        //   是**运行中**才经 `InputScript::appendText` 追加进来的（`InteractionGraph::issueAction`）
+        //   程序内夹具的 `profile_begin/end` 可能是**运行中**才经 `InputScript::appendText` 追加的
         //   ⇒ prepare 期那个判据看到的是 false，
         //   `armed_` 会停在 false：窗口照开照收，可 `iterations` / 函数表的 self / shim 墙钟
         //   全是 0，而且不报错、不告警（= 静默残表）。
@@ -935,31 +909,6 @@ bool Machine::sampleMarker() {
                                     cpu_.insns, wallMs());
 }
 
-void Machine::tickInteraction(X86& cpu) {
-    if (!interaction_.active()) return;
-    if (cpu.windows == nullptr) return;
-    // ★ 顺序是判据的一部分：先让配方判定并在命中时**追加**动作（`at frame <F+1>`，本块边界内绝不生效），
-    //   再由 actuator 推进（真正发 WM_* + 自动 hold + 延迟抬起）。
-    //   ★ 身份 = `last_marker_sample_`（最近一次 VM 循环头采样；门控见 `run()` 的块入口钩子）。
-    //     身份门是**电平**：同一个身份重复传进去仍然成立（⛔ 不是边沿）。
-    //   ★ 位置 = 块边界上**现读一次**（与 `--input-plan` 共用 `readScriptPositionSample`）；
-    //     配方里没有 `await position` ⇒ 一次也不读（零成本）。
-    ScriptPositionSample position;
-    if (interaction_.needsPositionSamples() && cpu.mem != nullptr) {
-        position = readScriptPositionSample(*cpu.mem, last_marker_sample_);
-    }
-    interaction_.tick(*cpu.windows, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs(),
-                      &last_marker_sample_, &position);
-    pumpScript(interaction_.actuator(), cpu, wallMs());
-    // ★ 图在**宿主事件泵**里失败 / 完成时，guest 可能正阻塞在 `GetMessageA`（那时没有块边界）
-    //   ⇒ 不叫醒它就永远到不了 `Machine::run` 的那条检查（`quit` 早就是这么做的，图没有理由不）。
-    //   只投一次：投过就记账，避免每 5 ms 往队列里塞一条 WM_QUIT。
-    if (!interaction_stop_posted_ && (interaction_.failed() || interaction_.done())) {
-        interaction_stop_posted_ = true;
-        cpu.windows->postQuit(0);
-    }
-}
-
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
     // ★ `WindowManager` 的 owner 线程 = **跑 `run()` 的这个线程**（REQ-01M76SXW0Y3R8QX1F94AB85M9H
@@ -1036,15 +985,12 @@ RunResult Machine::run(const RunOptions& opts) {
     instrument_.expect_change = expect_policy_.enabled;
     // ★ 时间线的效果级判据要读**画面采样**：没接线时 `sampleCount()` 恒 0 ⇒ 会把"没接采样器"
     //   误报成"识别源失明"。只在本策略开时接（缺省零成本）。
-    //   ★ 交互配方驱动器**不消费**画面采样（门只有身份 + 脚本内位置）⇒ 它不接；
-    //     两者互斥（`configureExpectChange` 拒绝），所以这里是唯一一处接线点。
-    if (!interaction_.active()) {
-        if (expect_policy_.enabled) {
-            sampler_.reset();  // 跨 run 时清掉 `last_.hash`（否则第一个样本会被记成 changed）
-            sampler_.setWatchFrame(true);
-        }
-        presenter_.setFrameSampler(expect_policy_.enabled ? &sampler_ : nullptr);
+    //    这里是唯一一处接线点。
+    if (expect_policy_.enabled) {
+        sampler_.reset();  // 跨 run 时清掉 `last_.hash`（否则第一个样本会被记成 changed）
+        sampler_.setWatchFrame(true);
     }
+    presenter_.setFrameSampler(expect_policy_.enabled ? &sampler_ : nullptr);
     expect_windows_.clear();
     expect_stats_ = ExpectChangeStats{};
     expect_failed_ = false;
@@ -1124,9 +1070,6 @@ RunResult Machine::run(const RunOptions& opts) {
     //   只按 EA 拦会把 `jmp`/尾调用也当成函数入口（那时栈上没有本次调用的返回地址，
     //   抬栈 + 弹返回地址 = 静默改坏控制流）。所以 call 目标只对**下一次** dispatcher 迭代有效。
     std::uint32_t next_call_target = 0;
-    // ★ 图要不要身份采样：图在 `run()` 之前就加载完、运行时不变 ⇒ 在循环外算**一次**
-    //   （块入口钩子是每条主循环指令都会经过的热路径，⛔ 不要在那里扫节点表）。
-    const bool interaction_needs_identity = interaction_.needsIdentitySamples();
     // ★ 块计时闸门（REQ-01M7CAJHYHWCVF3XQ7NM3X428Y）：默认档（没有 `--profile`、没有窗口 profiler）
     //   块循环里**一次 `steady_clock::now()` 都不调**。两个 `now()`（块首 / 块尾）都收进这个闸门，
     //   ⛔ 不许只门控 `b->ns +=`（那正是本单之前的形态：累加被门控、取时钟没有 ⇒ 白付 ~40–58 ns/块）。
@@ -1188,20 +1131,19 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ① 时间线（marker 动作 / 0 点配置）—— 只问 `hasMarkerActions()` 的话，"只有
         //      `--anchor-script`、没有 marker 动作"的脚本一次也不采样 ⇒ 0 点永不闩锁 ⇒ 假报
         //      `origin-missed:`；
-        //   ② 交互图里有 `script` 条件（**电平**；不采样 ⇒ 条件恒不成立）；
-        //   ③ `LIFT_LOG_MARKERS`（身份发现路径；没有它就只能靠猜名字）；
-        //   ④ 叠层 `script` 行（`--overlay`；不采样 ⇒ 这一行永远是空的）。
-        //   ⛔ 这一段**不能**放进下面 `input_script_.active()` 的块：只跑交互图 / 只开日志时
-        //     时间线可能是空的（那时采样一次也不会发生 ⇒ 图等不到 / 日志为空）。
+        //   ② `LIFT_LOG_MARKERS`（身份发现路径；没有它就只能靠猜名字）；
+        //   ③ 叠层 `script` 行（`--overlay`；不采样 ⇒ 这一行永远是空的）。
+        //   ⛔ 这一段**不能**放进下面 `input_script_.active()` 的块：只开日志 / 只开叠层时
+        //     时间线可能是空的（那时采样一次也不会发生 ⇒ 日志为空）。
         //   四个都不需要时一次也不进（零成本）。
         // ★★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：**harness 的每块 tick 移出令牌**。
-        //   这三件事（marker 采样 / 输入时间线 / 交互图）是**纯宿主簿记**：只碰 `InputScript` /
-        //   `InteractionGraph` / `WindowManager` / `presenter` / `marker_sampler_`（全是主线程独占的
+        //   这两件事（marker 采样 / 输入时间线）是**纯宿主簿记**：只碰 `InputScript` /
+        //   `WindowManager` / `presenter` / `marker_sampler_`（全是主线程独占的
         //   宿主对象）与 guest **数据面**（`mem_` 的读 —— 从不由令牌保护，见 guest_token.h 的星号注），
         //   ⛔ 不碰 GuestHeap / HandleTable / Vfs / SurfaceArena / ComRegistry 这类令牌保护的东西。
         //   而它们每个块边界都要扫一遍动作表 + 读 `steady_clock`（实测 `host` 桶里 input-script
         //   占墙钟 9–16%）⇒ 放在令牌里就成了"主线程一次不间断持有"的一格。
-        //   **为什么放令牌安全**：同一组三件事在 `GetMessageA` 的宿主事件泵里**已经**在令牌外跑
+        //   **为什么放令牌安全**：同一组调用在 `GetMessageA` 的宿主事件泵里**已经**在令牌外跑
         //   （`host_window.cpp` 的 `YieldGuard` + `main.cpp` 的 `setHostEventPump` 装的那三个回调）
         //   ⇒ 本项只是把块边界的同一组调用统一到同一口径，⛔ 不新增任何"容器在令牌外被访问"的类别。
         //   取回之后本迭代照旧执行 guest 块 ⇒ guest 执行仍在令牌里（YieldGuard 在下面那个 `if`
@@ -1211,17 +1153,17 @@ RunResult Machine::run(const RunOptions& opts) {
         const bool harness_nested = guest_calls_.active() || cpu_.shim.timer_firing || seh_.busy();
         const bool harness_marker =
             !harness_nested && (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa) &&
-            (input_script_.needsIdentitySamples() || interaction_needs_identity || log_markers_ || overlay_on_);
-        const bool harness_script = !harness_nested && (input_script_.active() || interaction_.active());
+            (input_script_.needsIdentitySamples() || log_markers_ || overlay_on_);
+        const bool harness_script = !harness_nested && input_script_.active();
         if (harness_marker || harness_script) {
             GuestToken::YieldGuard harness_yield(guestToken());
             if (!guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
                 if (input_script_.needsIdentitySamples() &&
                     (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
                     sampleMarker();
-                } else if ((interaction_needs_identity || log_markers_ || overlay_on_) &&
+                } else if ((log_markers_ || overlay_on_) &&
                            (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
-                    // ★ 时间线不需要、但图 / 日志 / 叠层需要：**同一次采样点只采一次**（`else if`
+                    // ★ 时间线不需要、但日志 / 叠层需要：**同一次采样点只采一次**（`else if`
                     //   就是为了不重复喂 `noteMarker`）。
                     sampleMarker();
                 }
@@ -1268,34 +1210,6 @@ RunResult Machine::run(const RunOptions& opts) {
                     if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
                     r.reason = StopReason::Stopped;
                     r.detail = "input script: quit";
-                    cpu_.running = false;
-                    break;
-                }
-            }
-            // ★ 交互配方驱动器（今天没有 CLI 入口）：同样的门控（嵌套 guest 调用 / 定时器回调进行中
-            //   不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
-            //   配方走完与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，不是靠退出码判）。
-            if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
-                const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
-                                                           : std::chrono::steady_clock::time_point{};
-                tickInteraction(cpu_);
-                if (window_prof_.active())
-                    window_prof_.addHost(WindowProfiler::HostInput,
-                                         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                                        std::chrono::steady_clock::now() - t_graph)
-                                                                        .count()));
-                if (interaction_.failed()) {
-                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                    r.reason = StopReason::InteractionFailed;
-                    r.detail = std::string("interaction: ") + graphFailureName(interaction_.failure()) + " · " +
-                               interaction_.failureDetail();
-                    cpu_.running = false;
-                    break;
-                }
-                if (interaction_.done() || interaction_.actuator().quitRequested()) {
-                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                    r.reason = StopReason::Stopped;
-                    r.detail = interaction_.done() ? "interaction: task done" : "interaction: quit";
                     cpu_.running = false;
                     break;
                 }
@@ -2753,20 +2667,6 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
             std::fprintf(out, "messagebox: calls=%llu last-type=0x%08X last-result=%u\n",
                          static_cast<unsigned long long>(mb_calls), messageBoxLastType(),
                          messageBoxLastResult());
-        }
-    }
-    // ★ 交互配方驱动器（今天没有 CLI 入口）：状态 / 迁移次数 / 发出的动作数 / 失败类别。
-    //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
-    //   ⚠ 不再打 `samples= / changes=`：顺序模型的门只有身份与脚本内位置，不消费画面采样。
-    if (interaction_.active()) {
-        std::fprintf(out, "interaction: state=%s step=%s transitions=%llu actions=%llu\n",
-                     interaction_.stateName(),
-                     interaction_.current() != nullptr ? interaction_.current()->id.c_str() : "-",
-                     (unsigned long long)interaction_.stateChanges(),
-                     (unsigned long long)interaction_.actionsIssued());
-        if (interaction_.failed()) {
-            std::fprintf(out, "FAIL      : %s（%s）\n", graphFailureName(interaction_.failure()),
-                         interaction_.failureDetail().c_str());
         }
     }
     // ★ 时间线 **0 点**（`--anchor-script <id>`）的可观测面：闩锁了就**一定**打一行（四单位齐全）。

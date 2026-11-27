@@ -3,7 +3,7 @@
 // ⛔ 本文件**不是**第二份输入状态：状态只有 `WindowManager` 一份。这里只有"到期了没有"的推进 +
 //   计数 + 待抬起队列；施加输入的**每一处**都走 `runtime/input.h` 既有的 `input::*`（与 SDL /
 //   旧脚本同一条路径）。
-// ★ 文本来源：`input_plan.cpp` 的 397-499 / 567-602 / 621-658 段（C1a 的**行为不变的机械抽取**）。
+// ★ 文本来源：旧 `InputPlan`（配方驱动器，2026-11-27 退役）的 click 施加段（C1a 的**行为不变的机械抽取**）。
 //   唯一的改写 = 三个读数换成 `PointerPoint` 的值参数、钟换成 `pt.now_ms`（见头注的"唯一偏离"）。
 #include "runtime/pointer_core.h"
 
@@ -153,11 +153,6 @@ void PointerCore::releaseDue(WindowManager& wm, const PointerPoint& pt) {
             ++i;
             continue;
         }
-        // ★ trace（opt-in）：抬起走的是哪条腿 = "guest 到底有没有机会看到按下"的唯一读数
-        //   （D 的判据面：`reason=wallclock` + `key_reads==press_key_reads` ⇒ 兜底先于任何一次电平读）。
-        if (trace_ != nullptr) {
-            trace_(trace_ctx_, r, key_seen, wallclock, wm.inputSampleCount(), pt.frames, pt.point);
-        }
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
         --releases_pending_;
@@ -225,13 +220,6 @@ std::size_t PointerCore::releaseOwner(WindowManager& wm, std::uint32_t owner) {
             continue;
         }
         const PendingRelease& r = pending_[i];
-        // trace：owner 级释放**没有**闸门（两条腿都不成立，是"被强制抬起"）。
-        // `point` 给 `Count`：调用点不在读点上下文里（`releaseOwner` 是 Run 的生命周期事件）。
-        // `frames` 给 0：这里没有本读点的帧读数（不是闸门，只是 trace 读数）。
-        if (trace_ != nullptr) {
-            trace_(trace_ctx_, r, /*key_seen=*/false, /*wallclock=*/false, wm.inputSampleCount(),
-                   /*frames=*/0, InputPoint::Count);
-        }
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
         ++n;
@@ -249,7 +237,7 @@ std::size_t PointerCore::releaseOwner(WindowManager& wm, std::uint32_t owner) {
 }
 
 void PointerCore::clearPointerState() {
-    // `InputPlan::clear()` 里"指针那一半"的机械改写（成员搬到基类 ⇒ 复位也搬过来）。
+    // 旧 `InputPlan::clear()` 里"指针那一半"的机械改写（成员搬到基类 ⇒ 复位也搬过来）。
     // ⚠ 与旧 `clear()` 的字段集合**逐个对齐**：`ui_consumed_` 旧 `clear()` 也不复位 ⇒ 这里不碰。
     pending_.clear();
     armed_.clear();

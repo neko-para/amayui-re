@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "runtime/log.h"
-#include "runtime/input_plan.h"  // PlanEventKind::Frame（`--input-plan` 的 presents 门）
 #include "runtime/screen_sample.h"
 
 namespace lift {
@@ -153,9 +152,8 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     }
     gpu_pending_ = !guest_pixels_materialized;
     ++frame_count_;
-    // ★ `--input-plan` 的 `presents` 门 emit 点：与 `++frame_count_` **同一刻**（guest 可见、确定）。
-    //   ⛔ 这里只记账（`note()` 不接受 `WindowManager`）⇒ 不可能在 Present 里施加 step。
-    if (input_plan_ != nullptr) input_plan_->note(PlanEventKind::Frame);
+    // ★ 帧线（`ControlInput` / `IntentExecutor` 的闸门 ②′）是**拉取**的：它们持有
+    //   `frameCount()` 的读数函数 ⇒ Present 只维护这一个计数，⛔ 不再向输入层推事件。
     // ★ `present-tail` 的**唯一**盖章点：与 `frame_count_` 同一刻记下 (insns / ns)。
     //   口径是"最后一次 Present **调用**"——这里在 sink / dump **之前**，所以 sink 失败的那次也算
     //   （与 `++frame_count_` 同一条契约）。只读解引用注入的计数器 ⇒ 不碰 guest 状态。

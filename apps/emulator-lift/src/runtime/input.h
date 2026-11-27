@@ -1,6 +1,6 @@
 // emulator-lift · 输入应用层（★ SDL 真实事件与（机器内）注入的**唯一**汇合点）
-//   ★ 2026-11-16：`--input-script` 的 CLI 入口已退役；注入侧只剩配方驱动器的 actuator 与 pure CTest 夹具
-//     （见 `runtime/input_script.h` 头注与 `docs/03-emulator/input-plan.md` §7）。
+//   ★ 2026-11-16：`--input-script` 的 CLI 入口已退役；注入侧只剩机器内 actuator 与 pure CTest 夹具
+//     （见 `runtime/input_script.h` 头注）。
 //
 // ★ 为什么要有这一层（2026-11-08）：在它之前，"一次输入"的落地代码只存在于
 //   `present_sdl.cpp` 的 `handleEvent` 里 —— 那是 SDL 回调，只有 OS 能喂它。于是
@@ -25,7 +25,7 @@
 
 #include "runtime/host_window.h"
 #include "runtime/input_device.h"
-#include "runtime/input_plan.h"
+#include "runtime/control_input.h"
 #include "runtime/read_point.h"  // ReadPointObserver（四个投递口的第二个接收者；C2a）
 
 namespace lift {
@@ -91,8 +91,8 @@ std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
 //   ⇒ 四类都要在**同一次读点内、读之前**落地（flush-before-read 的**位置**在 S1 就留好；
 //      S2 才填内容）。
 //
-// ★ 成本（S1 的硬要求）：**没有计划时 = 一条 null 检查**。这四个函数都是 `inline`：
-//   `wm.inputPlan()` 是 `host_window.h` 里的 inline 裸指针读，非空才 call `atPoint()`。
+// ★ 成本（S1 的硬要求）：**没有控制层输入时 = 一条 null 检查**。这四个函数都是 `inline`：
+//   `wm.controlInput()` 是 `host_window.h` 里的 inline 裸指针读，非空才 call `atPoint()`。
 //   ⛔ 不要在快路径上取时钟 / 碰容器。
 //   ★ C2a（父级裁决 `c2-decisions.md` D-C2-1）：每个口在计划调用**之后**多一次
 //     **读点观察者**的判空（`wm.readPointObserver()` 同样是 inline 裸读）。⇒ 缺省档（没有观察者）
@@ -102,23 +102,23 @@ std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
 // ★ 唯一性能口径：判据是**调用点不在执行循环里**（不是"每次多少钱"）。
 // =====================================================================================
 inline void deliverLevel(WindowManager& wm, InputPoint point) {
-    InputPlan* plan = wm.inputPlan();
-    if (plan != nullptr) plan->atPoint(wm, point);
+    ControlInput* input = wm.controlInput();
+    if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverQueue(WindowManager& wm, InputPoint point) {
-    InputPlan* plan = wm.inputPlan();
-    if (plan != nullptr) plan->atPoint(wm, point);
+    ControlInput* input = wm.controlInput();
+    if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverWrite(WindowManager& wm, InputPoint point) {
-    InputPlan* plan = wm.inputPlan();
-    if (plan != nullptr) plan->atPoint(wm, point);
+    ControlInput* input = wm.controlInput();
+    if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverFileRead(WindowManager& wm, InputPoint point) {
-    InputPlan* plan = wm.inputPlan();
-    if (plan != nullptr) plan->atPoint(wm, point);
+    ControlInput* input = wm.controlInput();
+    if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 

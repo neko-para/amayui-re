@@ -1516,20 +1516,5 @@ bool AotHost::uiProfileEndThunk(void* ctx, std::string* text, std::string* err) 
     return true;
 }
 
-void AotHost::windowMarkThunk(void* ctx, const char* label, bool begin) {
-    auto* host = static_cast<AotHost*>(ctx);
-    if (host == nullptr) return;
-    if (begin) {
-        // ★ 已有一段开着 ⇒ `beginWindow` 返回 false（**不 reset**）。配方里重复 `profile_begin` 是
-        //   用户可见的错：留一行 stderr（⛔ stdout 一个字节不变），下一段 `profile_end` 收的是第一段。
-        if (!host->beginWindow(label)) {
-            std::fprintf(stderr, "[aot] profile_begin 时已有窗口打开（label=%s）⇒ 忽略（⛔ 不静默 reset）\n",
-                         (label != nullptr && *label != '\0') ? label : "(unnamed)");
-        }
-    } else {
-        host->endWindow();
-    }
-}
-
 }  // namespace aot
 }  // namespace lift

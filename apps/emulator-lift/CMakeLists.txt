@@ -67,22 +67,22 @@ add_library(emulator-lift-runtime STATIC
     # ★ 输入：`input.cpp` = SDL 真实事件与（机器内）注入的**唯一**汇合点；
     #   `input_script.cpp` = 指令式时间线（`at frame N` / `at guest_ms T` / click / key ...）。
     #   ⚠ 2026-11-16 起时间线的 **CLI 入口已退役**（`--input-script` 整族）；它只剩机器内 actuator
-    #     与 pure CTest 夹具两个消费者（见 docs/03-emulator/input-plan.md §7）。
+    #     与 pure CTest 夹具两个消费者（见 `runtime/input_script.h` 头注）。
     src/runtime/input.cpp
     # ★ 输入设备实体（S1：6 组输入状态 + 三套 owner 的规则；`WindowManager` 私有持有并同名转发）。
     src/runtime/input_device.cpp
     src/runtime/input_script.cpp
-    #   ★ 输入**投递层**（S1：骨架 + 计数，没有配方）：`input_plan.h` 的三条铁律是形状真源。
+    #   ★ 输入**投递层**（S1：骨架 + 计数）与控制层立即队列：`control_input.h` 的头注是形状真源。
     #     ⛔ 它不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ①）。
-    src/runtime/input_plan.cpp
-    #   ★ **指针施加核心**（C1a：click 两段 / 三个闸门 / 写预算的**唯一**实现）。`InputPlan`
-    #     与（C1b）executor 共用它 ⇒ 放进本 target（同 `input_plan.cpp` 的理由；纯 CTest 只链它）。
+    src/runtime/control_input.cpp
+    #   ★ **指针施加核心**（C1a：click 两段 / 三个闸门 / 写预算的**唯一**实现）。`ControlInput`
+    #     与（C1b）executor 共用它 ⇒ 放进本 target（同 `control_input.cpp` 的理由；纯 CTest 只链它）。
     #     ⛔ 同样不在执行循环里被调用。
     src/runtime/pointer_core.cpp
     #   ★ **插件运行时 C1b 的核心**（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
     #     `trigger_runner.cpp`（armed 集合 / 一读点最多一个事件 / timeout / owner / budget）、
     #     `trigger_factory.cpp`（造 trigger 值 + **新**运行期状态）、`budget.cpp`（回调墙钟预算的
-    #     唯一读数来源）。归属本 target 的理由与 `input_plan.cpp` / `pointer_core.cpp` 相同：
+    #     唯一读数来源）。归属本 target 的理由与 `control_input.cpp` / `pointer_core.cpp` 相同：
     #     纯 CTest `trigger-runner` **只链本 target**（⛔ 放进 AOT target 会让它链接失败）。
     #     ⛔ 它们同样不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ① 与
     #     `tools/test/core-shape.test.mjs`）。
@@ -107,12 +107,6 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/surface.cpp
     # ★ 画面特征采样（交互模型的 `screen` 源）：采样点 = Present。
     src/runtime/screen_sample.cpp
-    # ★ 输入**配方**（一套语法、一份解析器）：`recipe.cpp` = 解析器 + 顺序模型 + 门判定（**唯一一份**）；
-    #   `interaction_graph.cpp` = 机器内驱动器（块边界推进、动作经 InputScript 追加；
-    #     ⚠ 2026-11-16 起**没有 CLI 入口** —— `--interaction-graph` 已退役，只剩 pure 夹具用它）；
-    #   `input_plan.cpp` = **唯一的用户入口**（AOT 臂 `--input-plan`；guest 读点推进、动作直接写 WindowManager）。
-    src/runtime/recipe.cpp
-    src/runtime/interaction_graph.cpp
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
     # ★ 画面 ↔ 窗口客户区的 letterbox 映射的**唯一一份**（鼠标事件入 + 宿主光标 warp 出共用；
@@ -1279,8 +1273,8 @@ set_tests_properties(gdi-font-fallback-assets PROPERTIES
 #   `stress-gpu-coverage`（+ 6 个独占源文件），登记单 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。
 #   ⇒ 那 6 条都是"带 `--native-overrides` 的解释器压力/效率读数"，AOT 结构上没有 override。
 #   ⚠ **空窗期**：端到端压力档在 AOT 侧还没建（新档见 `REQ-01M7HQJEEENYDJ91FB5DAC4K23`）⇒
-#     这一段里端到端速度只能人手跑（`scripts/recipes/*.plan` + `emulator-lift-aot --input-plan`），
-#     ⛔ 不许把"没有读数"说成"没有退化"。
+#     这一段里端到端速度只能人手跑（`emulator-lift-aot --control-root` 的暂停 / 采样读数，
+#     或 JS 插件场景 `scripts/plugins/scenario-*.js`），⛔ 不许把"没有读数"说成"没有退化"。
 # =====================================================================================
 if(DEFINED ENV{LIFT_STRESS})
     # ---- LIFT_STRESS：boot trace（A4）的**读数 + 阈值**面（2026-11-14 从默认档移入）----
@@ -1338,9 +1332,9 @@ if(DEFINED ENV{LIFT_STRESS})
 
     # ---- 2026-11-27：`aot-stress-plan-exit5` / `aot-stress-boot-title` **已按用户裁决删除** ----
     #   两条的主题都是 `.plan` 驱动（永不满足的门 ⇒ exit 5 / 门 + quit 配方 + profile 窗）；
-    #   `--input-plan` 整体退役的裁决见 `REQ-01M875NDRETPPNN68VCE3VMCT1`（测试面本批清，
-    #   产品入口 / `InputPlan` 类下一批删）。⚠ 连带：`tests/fixtures/boot-title-exit-never.plan`
-    #   只剩这两条消费者 ⇒ 夹具也删了；`scripts/recipes/boot-title.plan` **本批不动**（下一批）。
+    #   `--input-plan` 整体退役的裁决见 `REQ-01M875NDRETPPNN68VCE3VMCT1`（测试面 + 产品入口 /
+    #   `InputPlan` 类一起清）。⚠ 连带：`tests/fixtures/boot-title-exit-never.plan` 与
+    #   `scripts/recipes/*.plan` 全部删除。
     #   端到端的"boot → TITLE → guest 自己的退出路径"唯一保留在 `aot-quit-exit`（已改 JS 插件驱动）。
 
     # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
@@ -1449,7 +1443,8 @@ add_test(NAME input-anchor COMMAND lift-input-anchor)
 
 # ---- 2026-11-27：`tests/input_plan.cpp` 的 20 个子用例（CTest 注册已整块删）----
 #   `--input-plan` / `.plan` 整体退役（`REQ-01M875NDRETPPNN68VCE3VMCT1`）⇒ 这个纯 DSL 面的
-#   单元套件随类一起退场；`InputPlan` 类 / 产品 `src/` 本批**不动**（下一批删）。
+#   单元套件随类一起退场；`InputPlan` 类 / `recipe.*` / `interaction_graph.*` / `recipe_json.*`
+#   与产品入口 `--input-plan` / `--input-plan-trace` 同批删除。
 #   ⚠ 台账里仍有 4 条 `done` 单的 `verify:` 指着旧 CTest 名 —— 那几行**预期红**（父级改锚）。
 
 # ---- pure：插件运行时的 **TriggerRunner**（C1b；`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）----
@@ -1486,9 +1481,9 @@ add_test(NAME input-inject-visible COMMAND lift-input-inject-visible)
 # `REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 点名取消）；它**不进测试**。复现命令见
 # `docs/03-emulator/defects.md` BUG-16。
 # ★ 2026-11-16：**入口本身也退役了**（`--interaction-graph` / `--interaction-trace` /
-#   `--interaction-fail-dump` 三个 CLI 参数 + 仓根 `graphs/` + `scripts/interaction/`）；
-#   配方只经 AOT 臂 `--input-plan`（落点 `scripts/recipes/*.plan`）。登记单
-#   `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。`runtime/interaction_graph.*` 保留为机器内驱动器。
+#   `--interaction-fail-dump` 三个 CLI 参数 + 仓根 `graphs/` + `scripts/interaction/`）。登记单
+#   `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。★ 2026-11-27（`REQ-01M875NDRETPPNN68VCE3VMCT1`）：
+#   `runtime/interaction_graph.*` / `recipe.*` / `recipe_json.*` 与 `--input-plan` 一起整体删除。
 
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)
@@ -3142,9 +3137,9 @@ if(LIFT_BUILD_TESTS)
     #      （`ctx.finish` / `ctx.quit`）；同一条用例还断言它仍写着该写的链（`forceFieldPointsVisible`
     #      + `afterPosition` + `reenter` + `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO`/`HI` / `fp:draw`），
     #      且**没有** `FIELD_MAIN_LOOP` / `afterDelay` / `poll` ⇒ "禁令全过"不能靠一个空文件达成。
-    #   ② 端到端（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan`）：
+    #   ② 端到端（真子进程 `--present headless --plugin field-point-visible`）：
     #      Run 常驻（readout `run=waiting` + 摘要 `stop      : time-limit` + exit 0 + `calls>=1`）；
-    #      stdout/stderr 没有 `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行；
+    #      stdout/stderr 没有 `boot:` / `load:` / `load-save:` / `[input-script]` 行；
     #      首行 `field-points:` 日志带 `on=0`，且没有 `field-points: draw` ⇒ "关着就什么也不做"可读。
     # ★ **档位 = pure**（`add_test` 在顶层 `if(LIFT_BUILD_TESTS)` 里 ⇒ `cmakeTestTier()` 把该 if 当透明；
     #   `AGENTS.md` §12.4 判据 = 注册位置）。静态那一段零资产、任何机器都跑；端到端要安装树 / 执行源 /
@@ -3195,13 +3190,10 @@ endif()
 # J · C3：JS recipe driver 的 parity（旧 `--input-plan` = oracle）—— **2026-11-27 已删**
 #
 # ★ 用户裁决 `REQ-01M875NDRETPPNN68VCE3VMCT1`：`--input-plan` / `.plan` 整体退役 ⇒
-#   `tests/recipe_driver_parity.cpp`（oracle = `InputPlan`，逐条 replay 12 份 `.plan`）与它的
-#   插件入口 `tests/plugin_fixtures/recipe-driver.js` 一起退场。`scripts/plugins/lib/recipe.js`
-#   与 `src/runtime/recipe_json.cpp` 是**产品侧**、本批**不动**（入口 / 类的删除在下一批）。
-# ★ `src/runtime/recipe_json.cpp` 仍是 `Step[]` 的**唯一** JSON 出口（只读 `Step`，不执行）⇒
-#   保留注册（否则 `recipe.js` 的消费面在下批删除前先失去编译面）。
+#   `tests/recipe_driver_parity.cpp`（oracle = `InputPlan`，逐条 replay 12 份 `.plan`）、它的
+#   插件入口 `tests/plugin_fixtures/recipe-driver.js`、`scripts/plugins/lib/recipe.js` 与
+#   `src/runtime/recipe_json.cpp`（`Step[]` 的唯一 JSON 出口）一起退场。
 # =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE src/runtime/recipe_json.cpp)
 
 # =====================================================================================
 # K · 二级设置页 `scripts/ui/settings-page.js`（父级裁决 `.tmp/settings-overlay/decision.md` D2/D4）

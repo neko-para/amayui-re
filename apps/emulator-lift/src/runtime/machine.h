@@ -35,7 +35,6 @@
 #include "runtime/host_services.h"
 #include "runtime/image.h"
 #include "runtime/input_script.h"
-#include "runtime/interaction_graph.h"
 #include "runtime/memory.h"
 #include "runtime/message_box.h"
 #include "runtime/native_overrides.h"
@@ -298,28 +297,15 @@ public:
     InputScript& inputScript() { return input_script_; }
     const InputScript& inputScript() const { return input_script_; }
     // ★ 帧停滞兜底阈值（原 `--input-stall-ms`；0 = 关闭）。必须在 `run()` 之前设。
-    // ★ 这三个旋钮**同时**作用到两条通道（时间线 + 交互图的 actuator）：图把动作追加进自己的
-    //   actuator，调 `setInputMaxHoldMs` / `setInputStallMs` 时**必须**也生效 ——
-    //   否则旋钮对图静默无效（复审发现）。
     //   ⚠ 2026-11-16 起 CLI 已退役（`--input-stall-*` / `--input-max-hold` 不再是参数）：
     //     调用者只剩 pure CTest 夹具（`profile_window` / `input_marker`）与宿主内嵌。
-    void setInputStallMs(std::uint64_t ms) {
-        input_script_.setDefaultStallMs(ms);
-        interaction_.actuator().setDefaultStallMs(ms);
-    }
+    void setInputStallMs(std::uint64_t ms) { input_script_.setDefaultStallMs(ms); }
     // 还没出现第一帧时的宽限（原 `--input-stall-boot-ms`；boot 期间没有 Present 不算停滞）。
-    void setInputStallBootGraceMs(std::uint64_t ms) {
-        input_script_.setDefaultBootGraceMs(ms);
-        interaction_.actuator().setDefaultBootGraceMs(ms);
-    }
+    void setInputStallBootGraceMs(std::uint64_t ms) { input_script_.setDefaultBootGraceMs(ms); }
     // ★ 自动 hold 的上限（原 `--input-max-hold`，guest ms；0 = 不设限）。必须在 `run()` 之前设。
     //   到上限仍未采样 ⇒ 抬起 + 告警（见 `runtime/input_script.h`）；⛔ 不挂死。
-    void setInputMaxHoldMs(std::uint64_t ms) {
-        input_script_.setMaxAutoHoldMs(ms);
-        interaction_.actuator().setMaxAutoHoldMs(ms);
-    }
-    // ★ marker 超时（原 `--input-marker-timeout-ms`，**宿主墙钟** ms；0 = 不设限）。只作用到时间线：
-    //   交互图的 actuator 没有 marker 动作源（图生成的是 `at frame`）。必须在 `run()` 之前设。
+    void setInputMaxHoldMs(std::uint64_t ms) { input_script_.setMaxAutoHoldMs(ms); }
+    // ★ marker 超时（原 `--input-marker-timeout-ms`，**宿主墙钟** ms；0 = 不设限）。必须在 `run()` 之前设。
     void setInputMarkerTimeoutMs(std::uint64_t ms) { input_script_.setMarkerTimeoutMs(ms); }
     // ★ 在 VM 循环头的**块入口**采一次样并喂给时间线（`Machine::run` 的钩子调它；纯档夹具也直接调）。
     //   返回 true = 这次产生了边沿（有新事件）。⛔ 它**不是**通用块边界采样入口：调用点必须已经
@@ -333,24 +319,14 @@ public:
     ui::UiFrameSource* frameSource() { return &frame_source_; }
     const ui::UiFrameSource* frameSource() const { return &frame_source_; }
     // 每个块边界推进一次注入时间线（`Machine::run` 内部调用）。★ 2026-11-16 起没有 CLI 入口：
-    // 它服务的是 pure CTest 夹具与宿主内嵌（交互配方的 actuator 走 `pumpScript`，不经过这里）。
+    // 它服务的是 pure CTest 夹具与宿主内嵌。
     void tickInputScript(X86& cpu);
 
-    // ★ 交互配方驱动器：见 `runtime/interaction_graph.h`。⛔ 2026-11-16 起**没有 CLI 入口**
-    //   （`--interaction-graph` 已退役）——这里只剩程序内的夹具入口（pure CTest 用它）。
-    bool loadInteractionGraph(const std::string& path, std::string* err);
-    // 直接给文本（测试 / 内嵌用）：与 `loadInteractionGraph` 走同一个解析器。
-    bool loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err);
-    InteractionGraph& interactionGraph() { return interaction_; }
-    const InteractionGraph& interactionGraph() const { return interaction_; }
     // 画面特征采样器：只给效果级判据用（策略关 ⇒ 不接、零成本）。
     FrameSampler& sampler() { return sampler_; }
-    // 每个块边界推进一次交互配方（顺序：先配方 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
-    void tickInteraction(X86& cpu);
 
     // ★ 效果级判据（见上面的 `ExpectChangePolicy`）：必须在 `run()` 之前、**在
     //   `loadInputScriptText` 之后**配置一次（策略要扫一遍脚本的动作；零匹配 = 拒绝 ⇒ 不许静默开局）。
-    //   与交互配方驱动器**互斥**（配方有自己的门语义；两套判据同时开 = 两套口径）。
     bool configureExpectChange(const ExpectChangePolicy& p, std::string* err);
     bool expectChangeEnabled() const { return expect_policy_.enabled; }
     const ExpectChangePolicy& expectChangePolicy() const { return expect_policy_; }
@@ -506,13 +482,7 @@ private:
     std::uint32_t marker_logged_id_ = 0;
     bool marker_logged_degraded_ = false;
     std::string marker_logged_name_;
-    // ★ 交互配方驱动器：**顺序配方**的推进器（`runtime/recipe.h`）。今天没有 CLI 入口。
-    //   ⚠ 它**不消费**画面采样（门只有身份 + 脚本内位置）；`sampler_` 是 `--expect-change-after`
-    //   的（两者互斥），⛔ 不要在这里重新接线。
-    InteractionGraph interaction_;
     FrameSampler sampler_;
-    // 配方驱动器失败 / 完成时投 WM_QUIT 唤醒阻塞中的 guest（只投一次）。
-    bool interaction_stop_posted_ = false;
     // ★ 区间 profiler（`runtime/window_profile.h`）：armed = 脚本里有 profile_begin/end 动作。
     //   ⛔ 没有这些动作时它整条路径都是 no-op（两次 steady_clock 也不会有）。
     WindowProfiler window_prof_;

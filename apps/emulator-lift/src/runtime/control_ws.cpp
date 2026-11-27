@@ -56,7 +56,7 @@
 #include "runtime/control_global.h"  // global-get/set 的请求形状 + 十六进制口径（实现只在本 TU）
 #include "runtime/cursor_map.h"      // kReferenceFrameW/H（`click` 的参考系上界；⛔ 这里不做除法）
 #include "runtime/host_window.h"
-#include "runtime/input_plan.h"  // M1：`click` 入的是**同一个** InputPlan 的立即队列
+#include "runtime/control_input.h"  // M1：`click` / `move` 入的是控制层输入队列
 
 #ifdef _WIN32
 #include <process.h>
@@ -557,7 +557,7 @@ std::string Control::Impl::resJson(const std::string& id, const Reply& r) const 
                                   {"source", r.shot.source}};
     }
     if (r.has_click) {
-        // ★ `queued` = 入队后的深度（判据 5 的读数面；上界见 `InputPlan::kImmediateClickCapacity`）。
+        // ★ `queued` = 入队后的深度（判据 5 的读数面；上界见 `ControlInput::kImmediateClickCapacity`）。
         //   ⚠ 它只是**回执**：真正施加发生在下一个 guest 读点（⛔ 不等于"已点中"）。
         data["click"] = json{{"x", r.click_x},
                              {"y", r.click_y},
@@ -1416,24 +1416,24 @@ bool Control::Impl::serve(Context& ctx) {
             }
             case ControlOp::Move: {
                 // ★ 与 `click` **同一条**时态：只接受暂停态入队，落点 = 下一个 guest 读点，
-                //   走**同一个** `InputPlan` 的立即队列（⛔ 不另造一条施加路径 / 不在控制线程碰 guest）。
+                //   走**同一个** `ControlInput` 的立即队列（⛔ 不另造一条施加路径 / 不在控制线程碰 guest）。
                 if (!paused) {
                     rep.error = ControlError::NotPaused;
                     rep.error_detail = "当前没有暂停（`move` 只在暂停态入队：先 `pause` 再投）";
                     break;
                 }
-                InputPlan* plan = ctx.windows != nullptr ? ctx.windows->inputPlan() : nullptr;
-                if (plan == nullptr) {
+                ControlInput* input = ctx.windows != nullptr ? ctx.windows->controlInput() : nullptr;
+                if (input == nullptr) {
                     rep.error = ControlError::Unavailable;
                     rep.error_detail = "这个宿主没有接输入投递层（没有可施加 move 的 guest 读点）";
                     break;
                 }
-                if (!plan->enqueueMove(click_x, click_y)) {
+                if (!input->enqueueMove(click_x, click_y)) {
                     rep.error = ControlError::BadRequest;
                     char msg[128];
                     std::snprintf(msg, sizeof(msg),
                                   "立即队列已满（上限 %zu 条；等下一个 guest 读点消费后再投）",
-                                  InputPlan::kImmediateClickCapacity);
+                                  ControlInput::kImmediateClickCapacity);
                     rep.error_detail = msg;
                     break;
                 }
@@ -1441,7 +1441,7 @@ bool Control::Impl::serve(Context& ctx) {
                 rep.has_move = true;
                 rep.move_x = click_x;
                 rep.move_y = click_y;
-                rep.move_queued = plan->queuedClicks();
+                rep.move_queued = input->queuedClicks();
                 break;
             }
             case ControlOp::Click: {
@@ -1451,22 +1451,21 @@ bool Control::Impl::serve(Context& ctx) {
                     rep.error_detail = "当前没有暂停（`click` 只在暂停态入队：先 `pause` 再投）";
                     break;
                 }
-                // ★ 落点 = **同一个** `InputPlan`（`WindowManager` 的非拥有指针）⇒ 施加点是它的
-                //   **下一个 guest 读点**（`atPoint` 里先于配方当步）。⛔ 控制线程 / 本汇点都**不**碰
-                //   guest 状态；⛔ 也不推进配方的 `next_`（判据 2）。
-                InputPlan* plan = ctx.windows != nullptr ? ctx.windows->inputPlan() : nullptr;
-                if (plan == nullptr) {
+                // ★ 落点 = **同一个** `ControlInput`（`WindowManager` 的非拥有指针）⇒ 施加点是它的
+                //   **下一个 guest 读点**（`atPoint`）。⛔ 控制线程 / 本汇点都**不**碰 guest 状态。
+                ControlInput* input = ctx.windows != nullptr ? ctx.windows->controlInput() : nullptr;
+                if (input == nullptr) {
                     rep.error = ControlError::Unavailable;
                     rep.error_detail = "这个宿主没有接输入投递层（没有可施加 click 的 guest 读点）";
                     break;
                 }
-                if (!plan->enqueueClick(click_x, click_y, click_button)) {
+                if (!input->enqueueClick(click_x, click_y, click_button)) {
                     // ★ 判据 5：队列**有界**；超界要**响亮**（⛔ 静默丢 / ⛔ 无界扩容）。
                     rep.error = ControlError::BadRequest;
                     char msg[128];
                     std::snprintf(msg, sizeof(msg),
                                   "立即队列已满（上限 %zu 条；等下一个 guest 读点消费后再投）",
-                                  InputPlan::kImmediateClickCapacity);
+                                  ControlInput::kImmediateClickCapacity);
                     rep.error_detail = msg;
                     break;
                 }
@@ -1475,7 +1474,7 @@ bool Control::Impl::serve(Context& ctx) {
                 rep.click_x = click_x;
                 rep.click_y = click_y;
                 rep.click_button = click_button == MouseButton::Right ? "right" : "left";
-                rep.click_queued = plan->queuedClicks();
+                rep.click_queued = input->queuedClicks();
                 break;
             }
             case ControlOp::GlobalGet:

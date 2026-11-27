@@ -15,7 +15,7 @@
 //   指针事件（调用方 **不得**调用 `input::*`）。返回 false = 放行（照旧施加）。
 //   ⛔ 不要把这个类做成"第二个 ClickRouter"：它只是 `ClickRouter` 在注入路径上的转接点。
 //
-// ★ 为什么放在 `runtime/` 而不是 `ui/`：`InputPlan`（`runtime/input_plan.cpp`）必须能在**不 include
+// ★ 为什么放在 `runtime/` 而不是 `ui/`：`ControlInput`（`runtime/control_input.cpp`）必须能在**不 include
 //   SDL / 不 include ui/hit.h** 的形状下问路由（pure CTest `input-plan-read-points` 直接用它）；
 //   本头只依赖 `input_device.h` 的 `MouseButton`。
 #pragma once

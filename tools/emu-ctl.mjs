@@ -107,8 +107,8 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   pause / resume 的 res.paused_total_ms = **含当前冻结区间**。
 
 ★ **同名陷阱**：控制层 \`wait <ms>\` = 让 guest 跑 N ms 后**重停**（等价 resume --for-ms）；
-  \`--input-plan\` 里的 \`wait\` 是**配方 DSL 的一条 deadline**。两者**不是一回事**，
-  ⛔ 不要把这里的 wait 实现成"往 InputPlan 里塞一条 step"。
+  （历史对照：\`--input-plan\` 的 \`wait\` 是**配方 DSL 的一条 deadline** —— 那个入口已退役。）
+  两者**不是一回事**，⛔ 不要把这里的 wait 实现成"往控制层输入队列里塞一条动作"。
   ⚠ \`wait\` 与 \`resume --for-ms\` 一样**要求端点已暂停**（它不自己先 pause；先 \`pause\` 或 \`sample\`）。
   ⛔ 验收判据不要用 wait：要能红就用 sample 的 script/pos、state_seq、insns。
   ★ 截图是 present 时冻结的那一帧；\`hash_still_matches\` 只回答"冻结有没有生效"，⛔ 别拿它当判据

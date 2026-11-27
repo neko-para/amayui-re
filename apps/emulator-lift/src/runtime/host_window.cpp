@@ -389,11 +389,11 @@ std::uint64_t WindowManager::noteInputSample(std::uint64_t guest_ms) {
     return ++input_samples_;
 }
 
-// ---- 投递层接线（S1）：非拥有指针；**唯一**的状态入口（读取端 `inputPlan()` 是 inline 裸读，
+// ---- 投递层接线（S1）：非拥有指针；**唯一**的状态入口（读取端 `controlInput()` 是 inline 裸读，
 //      刻意**不**走 checkMainThread —— 读点快路径的成本必须是"一条 null 检查"）。
-void WindowManager::setInputPlan(InputPlan* plan) {
-    checkMainThread("window.inputplan");
-    input_plan_ = plan;
+void WindowManager::setControlInput(ControlInput* input) {
+    checkMainThread("window.control");
+    control_input_ = input;
 }
 
 // ---- 读点观察者（C2a；`c2-decisions.md` D-C2-1）：非拥有指针。

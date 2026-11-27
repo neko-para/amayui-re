@@ -15,7 +15,7 @@
 //   再抄一份 —— `tools/test/capability-matrix.test.mjs` 会红）。
 //   `capabilities` 只列**真的实现了**的（`hello` 如实报这一份）。
 //   ★ `move` = **纯 move**（只把光标放到参考坐标，⛔ 不按键）；`click` = **暂停态入队**，由**下一个 guest
-//     读点**（`InputPlan::atPoint`）施加 —— 控制线程与 `serve()` 都**不碰** guest 状态；⛔ 也不推进配方（判据 2）。
+//     读点**（`ControlInput::atPoint`）施加 —— 控制线程与 `serve()` 都**不碰** guest 状态。
 //   `key` 本轮**不做** ⇒ `unknown_op`；`wait` 是 `emu-ctl` 的**客户端糖**（= `resume --for-ms`），
 //   ⛔ 不是服务端 op、不进能力表。
 //   ★ `global-get` / `global-set` = **哑原语**：按 id + 显式 kind 读写一格 script global。
@@ -92,9 +92,10 @@ public:
 
     // 主线程一侧的命令上下文：只有 `serve()` 要动的宿主对象（⛔ 不含任何 guest 指针）。
     //   · `clock`   = 暂停期间冻结 guest 时间（`Clock::freeze/unfreeze`）；
-    //   · `windows` = `quit` 的 `postQuit(0)`（与 `--input-plan` 的 quit 同一个交付点）；
-    //     ★ M1 的 `click` **入队点**也在这里：`windows->inputPlan()`（`WindowManager` 的非拥有指针）
-    //     ⇒ 入的是**同一个** `InputPlan`，施加点是它自己的 guest 读点（⛔ 控制层不施加）；
+    //   · `windows` = `quit` 的 `postQuit(0)`（同一个交付点）；
+    //     ★ M1 的 `click` / `move` **入队点**也在这里：`windows->controlInput()`
+    //     （`WindowManager` 的非拥有指针）⇒ 入的是**同一个** `ControlInput`，施加点是它自己的
+    //     guest 读点（⛔ 控制层不施加）；
     //   · `stop_requested` = 置停（主线程每个块边界读；本轮由 `serve()` 的返回值同时表达）；
     //   · `paused_at` = 本汇点的名字（`"block"` / `"present"`）—— 由**调用点**填，⛔ Control 不猜；
     //   · `host`     = 快照 / 截图 / resume / **global 读写**的宿主取数口（S2/S3/S4；nullptr ⇒ 该能力 `unavailable`）。
@@ -146,7 +147,7 @@ public:
     const std::string& nonce() const;
     const std::string& token() const;
     const std::string& controlFilePath() const;
-    // ★ `state_seq` 的只读口（`--input-plan-trace` 的 `state_seq=`；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。
+    // ★ `state_seq` 的只读口（暂停态变化的唯一读数列）。
     //   语义不变：只在进入 / 离开暂停时 +1（`control_snapshot.h` 的头注）。**只在主线程读**
     //   （写入点也都在主线程的 `serve()` / `requestQuit`）⇒ 不加锁；没启动 / 没暂停过 ⇒ 0。
     std::uint64_t stateSeq() const;
