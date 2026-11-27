@@ -30,7 +30,7 @@
 - 入口按扩展名喂 `JS_EVAL_FLAG_TYPESCRIPT`；`.js` 不加（避免 `f<a>(b)` 歧义改变 JS 语义）。
 - 自定义 `moduleLoad` 每个模块也要加同一 flag；否则 `lib/*.ts` 被当 JS 解析。
 - “classic 先试 / 再 `JS_DetectModule`” 的探测要带 flag；`interface` 开头的 `.ts` 才能探出 module。
-- `resolvePluginSpec` 加 `.ts`/`.mts` 候选；`locateSpecifier` 加 `.ts` 后缀；`--plugin ./x.ts` 路径形式可直接用。
+- 宿主集成：入口按扩展名喂 `JS_EVAL_FLAG_TYPESCRIPT`（`.js` 不加）；`.ts` 入口**强制 module**（ng 的 `JS_DetectModule` 无 flags）；`moduleLoad` 每个 `.ts` 模块也加同一 flag；`plugin_search` 的 id 候选 `.js`→`.ts`→`.mts`（`.js` 优先）；路径形式 `--plugin ./x.ts` 本来就能到 `initFromFile`，卡点只在引擎 eval。★ `locateSpecifier` 只用于错误文本、不参与装载（下面"核实"已推翻原文的"加 `.ts` 后缀"）。
 - 保留 `tsc --noEmit --erasableSyntaxOnly` 门禁（tsc 5.9.3；现有 examples exit 0）；quickts 只 parse，不查类型。
 
 ## 边界 / 未证

@@ -835,16 +835,26 @@ struct Context {
   ★ **触发 / 读 / 改是三个独立能力**（用户裁决 2026-11-26 晚：触发 ≠ 修改）：`at` 只装"到点"（纯观察，
   只计数，⛔ 不读不写 guest）；`capture({ints, ptrs})` + `stats()` 读该点的 local；`patch(target, value,
   {maxHits})` 才做覆盖 —— 可以只触发、只读，或装好触发后再决定改什么（`patch` 可反复换 / `{enabled:false}` 撤）。
-  · 覆盖语义 = 在这条指令**读之前**改一个 dword，**下一条脚本指令派发前逐字节恢复** ⇒ **净变化 0**
-    （⛔ 不进存档；⛔ 与 `ctx.edit.global.set` 的持久写不是一回事）。`target` 三选一：
+  · 覆盖语义 = 在这条指令**读之前**改一个 dword，**下一条脚本指令派发前恢复**。★ **恢复是 CAS**
+    （S0，2026-11-27）：只有当"当前值仍是我写进去的编码值"才写回旧 raw；窗口里有人写过同一地址
+    （引擎 guest 写 / 另一条执行流）⇒ **不写回**、计 `restore_conflicts`（"别人的写赢"）。
+    ⇒ **净变化 0** 只在这个窗口没人写过时成立；窗口里出现持久写（`ctx.edit.global.set` / 控制层
+    `global-set`）时由**写方主动撤销** pending（"持久写赢过瞬时覆盖"，`instrHookCancelPendingAt`）。
+    ⛔ 不进存档；⛔ 与持久写不是一回事。`target` 三选一：
     `{ptrLocal: N}`（`local-ptr N` **指向**的 dword）· `{localInt: N}` · `{globalId: id}`。
   · 实现 = `src/runtime/instr_hook.cpp`；入口 = AOT 在 VM 的 3 个派发点（`aot/aot_hook_ea.h` 的
     `kScriptDispatchEas`）注入的 `call void @lift_instr_hook(ptr)`。⛔ **不要**改回"在 `lift_dyn` 里用
     `[esp]` 回溯判定"：那会让每次间接跳转（≈54.8k/帧）都付判定成本，而且"我是谁"靠猜。
   · 判据（实测 2026-11-26 / 存档 012 / `DRAWOBJ 0x03A0`）：`ctx.hook.at` + `.patch({ptrLocal:2}, 1)`
     ⇒ 静态纹理出现、右上动效不受影响、`SAVE12.DAT` hash 前后相同；`clear()` / Run 收口也会把未还原的那次写回。
-  · 生命周期：Run 内有效；`finish` / `quit` / Run 收口自动 `clear()`（⛔ 不跨 Run 泄漏）。
-  · 失败 ⇒ `at` 返回 `undefined`（`script_empty` / `pos_zero` / `duplicate`，宿主另打一行 error）；
+  · 生命周期（S0）：hook 归 **Run 序号（owner）**；`fail` / `finish` / `quit` / 预算超限 / `[]` 的 done /
+    install 拒绝 / 卸载 / `~PluginHost` **每条收口路径**都 `instrHookReleaseOwner`（⛔ 不是 `clear()`：
+    那会撤掉别的 Run 的）。Run 结束后 `instrHookList()` 必须为空。
+  · `ctx.hook.*` 只用于 **Run 回调**（`start` / `onTrigger`）：render 期 7 个 trampoline 一律 TypeError
+    （⛔ 不许拿存下来的 RunCtx 在 render 里改 hook）。
+  · `--no-s7` / 闭包没覆盖派发 EA ⇒ 生成器把注入站点数写进 `lift_pin.h`，AOT 启动交给 runtime；
+    0 时 `at()` **当场**返回 `undefined`（`no_injection` + 一行 error），⛔ 不是"装上了、永远 hits=0"。
+  · 失败 ⇒ `at` 返回 `undefined`（`script_empty` / `pos_zero` / `duplicate` / `no_injection`，宿主另打一行 error）；
     `patch` 失败 ⇒ 回执 `{accepted:false, code}`。
 - `ctx.fail/finish/quit`：只影响 runner/owner，不直接改 guest；`ctx.finish(code, reason)` 结束本 Run
   （映射历史 exit 5；C2c 的 `loadSave` 门超时用它），`ctx.quit()` 请求宿主停机。
@@ -1409,6 +1419,30 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - control/trigger 的运行期 `global.get/set` 是 `NON-DIFFABLE`；要可复现就写常量/静态断言。
 - trace 是 callback 模型的“可读状态”：`trigger:`/`edit:`/`intent:`/`run:` + `ctx.log`；没有 Step 列表 diff。
 
+### 4.12 TypeScript 插件（E1 纯类型擦除；2026-11-28）
+
+- **引擎**：vendored `third_party/quickjs-ng` v0.18.0 + `quickts_e1.h`（上游
+  <https://github.com/FrameOS/quickts> @ `66e2847`，MIT；E1 only）。`quickjs.h` 增
+  `JS_EVAL_FLAG_TYPESCRIPT (1 << 8)`；所有 TS 钩子都在 `if (s->ts)` 里 ⇒ **`.js` 不加 flag，行为逐字节不变**。
+  补丁内容 / 删了什么 / 不支持清单 / 回退方式见 `third_party/quickjs-ng/README.md` 的补丁节。
+- **支持的语法**：`import type`、`interface`、`type` 别名、类型注解（变量/参数/返回/属性）、泛型（声明与调用）、
+  `as` / `as const` / `satisfies`、`readonly` / 可选 / `void` / 非空断言、类成员修饰符。
+- **不支持**（⛔ 不支持不等于"tsc 会拒"）：enum、构造参数属性、JSX、装饰器、含值的 namespace、`import =`、
+  `accessor`、legacy `<T>` 断言、`a?.<T>()`。`tsc --erasableSyntaxOnly` 只拒"擦不掉"的语法，放行
+  "擦得掉但引擎不支持"的写法 ⇒ 类型门禁绿 + 运行期 smoke 跑通才是验收。
+- **装载**：`.ts` / `.mts`（ASCII 大小写不敏感）⇒ 带 flag；`.ts` 入口**强制 module**、跳过
+  classic / `JS_DetectModule`（ng 的公开 `JS_DetectModule` 没有 flags 参数）；`moduleLoad` 对每个 `.ts`
+  模块也加同一 flag（`lib/*.ts` 不会被当 JS 解析）。`.js` 仍走原路径。
+- **id 候选**：`.js` → `.ts` → `.mts`（扩展名优先于搜索根；同一 id 同时有 `.js` / `.ts` 时 **`.js` 优先**）。
+  保留 id `hud` 的遮蔽检查**仍只看 `.js`**（用户 `hud.ts` 不参与遮蔽 —— 已知边界，不是 bug）。
+- **门禁**：CTest `quickts`（16 个发行 `.js` 的 flags off/on 字节码恒等 + 13 条内联 GLOBAL +
+  examples 9/9 编译且**零 module request** ⇒ `import type` 整条擦掉 + `hello.ts` 求值 + E2 负例）；
+  `plugin-runtime` 的 `plugin/ts-module`（真装载 + `lib/helper.ts` 运行期导出 + click 落地）；
+  类型侧 = `pnpm typecheck`（`examples/tsconfig.json` 已开 `erasableSyntaxOnly`）。
+- **尺寸读数**（2026-11-28，同一 preset）：`quickjs.o __text` **+8,243 B（+1.27%）**。它是读数，不是断言。
+- **未做 / 待核**：extensionless `import './lib/x'`（当前必须写扩展名）、HUD 的 `.ts` 来源、
+  product-exe 的 `.ts` e2e、win32/MSVC 以外的平台、深嵌套类型栈预算的压测。
+
 ---
 
 ## §5 迁移切片 C0–C5
@@ -1433,6 +1467,11 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - v3 **S2（QJS 预生成 Step）** → **删除**；文本 plan 由 C3 的 JS driver 消费历史 `Step[]`，不再生成新 plan。
 - v3 **B2** → **冻结/历史**；只在 C3 parity 中作为数据。
 - **文本 recipe 冻结**：`StepKind`/parser 不再加能力；C3 只验证/支持历史 plan。
+
+★ **2026-11-27 起，新工作的入口是 v2 分片 S0–S5**（AGE VM 指令点 + TypeScript；需求单
+`REQ-01M8EKFAP4QJY9G12K7KB9YEQB`）。C0–C5 是 v1 的**落地史**，⛔ 不再是新工作的排期表；
+v1 的 `start`/`onTrigger`/具名 armed 集合在 v2 期间**保留为 deprecated 兼容层**（新写法 = `RunCtx`/`Tick` +
+`at`/`once`/`task`，见 v2 子单 `REQ-01M8EKFS5HSQFP93T19JDD50ZD`）。
 
 ### C0 — 能力表 + 接口 + control 9 项同源
 
@@ -1751,6 +1790,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 41 | **`ctx.config` 的文件形状 / 值 / 持久化 / 装载期上限**：信封 `version=1` + `domains` 对象 + 域值对象；未知顶层键 / 域内键保留；域自动创建；值只收原生六种（深度 8 / 节点 1024 / 串 8192 / key 128 / 域 256 / 每域 key 1024 / 文件 1 MiB；**set 与 attach 同一套**）；非法 UTF-8 在 set 期 TypeError、装载期 exit 2；`__proto__` / `prototype` / `constructor` 在域 id 与 key 都拒；没有 appdata ⇒ `domain()` 抛 `Error("no_appdata")`；`applied` = 内存已改（只有 `read_only` / `no_appdata` 两个 code）；`set` 只改内存 + **回调末**原子 flush（I/O 失败 warn 一次、后续不重试；序列化/超限失败不熔断）；`HostPause` 含值转换 | 配置文件被静默重写（丢前向兼容键）/ 深层文件在 `get` 递归爆栈而不是 exit 2 / 坏配置被当成"没有配置"继续跑 / `__proto__` 污染原型 / 写盘每 set 一次 / 宿主转换被记进用户 2 ms | `plugin-config` 的 `roundtrip` / `unknown-preserved` / `domain-autocreate` / `bad-json-exit2`（attach 判据）/ `bad-top-level` / `bad-domain-value` / `proto-key` / `limits` / `limits-on-load` / `invalid-utf8` / `no-appdata` / `missing-root` / `document-size` / `read-only-receipt` / `flush-on-callback` / `cross-instance-read` + `plugin/bad-config-exit2`（**进程 exit 2**）+ `control-script/config-roundtrip`（真宿主 + 回调末 flush）+ `plugin/config-host-pause` |
 | 42 | **内建插件参数来源 = config > params > 默认**（`has()` 判"给了"，falsy 也算）；没有 config 时**完全回退**到旧 params 行为 | 内建插件仍只认 `--plugin-param`（用户口径的迁移没发生）；或 `on:0` 被当成"没给" | `plugin/load-save-e2e`（⑥ 用 `plugin-config.json`、**不带** `--plugin-param`）+ `control-script/config-roundtrip` + 三个库文件的域表（`scripts/plugins/README.md`） |
 | 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / 内部 hud 回退（`--overlay` + 无 render 的插件）三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 八成员（含 `config` 与 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（八成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
+| 44 | **指令点钩子的收口 / CAS / 注入可见性（S0）**：hook 归 **Run owner**，Run 的每条收口路径都 `instrHookReleaseOwner`；`patch` 恢复 = **CAS**（当前值仍是我写的编码值才写回），否则计 `restore_conflicts`；持久写（`ctx.edit` / 控制层 `global-set`）**主动撤销** pending；render 期 7 个 `ctx.hook.*` trampoline 一律 TypeError；`--no-s7` / 注入站点 0 ⇒ `at()` 返回 `no_injection`（⛔ 不是永远 hits=0 的假句柄） | Run 结束后仍按条改 guest；窗口里别人的写被静默抹掉；render 里改 hook；插件"装上了但永不命中"且无消息 | `instr-hook`（`patch-restore-cas` / `patch-restore-clean` / `no-injection` / `owner-release` / `patch-edit-cancels-pending`）+ `plugin/hook-release-{fail,done,budget}` + `plugin/render-stored-runctx-rejected`（OPS 含 hook）+ 变异 `--match instr-hook` |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
