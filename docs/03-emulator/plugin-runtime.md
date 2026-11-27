@@ -1524,6 +1524,18 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **仍未做（S3/S4）**：`Tick.now.carrier`（待核）、多 Run / 逻辑 timer；examples 迁 v2、`ctx.now` 退出 RunCtx、
   scenario/lib 迁移；全局 `log`。
 
+### 4.16 全局 `log`（S3）
+
+- 插件上下文（`makeQuickJsPlugin` 装载路径）有**独立全局** `log = { info, warn, error, debug }`，
+  四方法都是 `(msg, data?)`；`msg` 先 `String`、`data` 不进日志行。底层复用 `PluginCallHost::log`
+  （与 `ctx.log`/`tick.log` 同一份格式化/去重/上限）。
+- 可用范围 = **Run 回调 / tick handler / `render` / timeout（泵）的 continuation**（它不判 `inCallback`，
+  只看 `call_host_persistent`）。`ctx.log` / `tick.log` **保持现状**（不删）。
+- **只装插件路径**：classic HUD / 内部 hud 回退**没有** `log`（守卫 `ui-script-quickjs/sandbox` 的负控制）。
+- 全局属性**不可写 / 不可配置**（module strict 下 `log = …` TypeError；`const log` 只是模块内 shadow）。
+- **门禁**：`plugin/global-log`（四路各一行 + `ctx.log` 正控制）、`plugin/global-log-timeout`（泵里 catch）、
+  `plugin/global-log-number`；`ui-script-quickjs/sandbox` 的 classic 负控制；变异 `installGlobalLog`。
+
 ---
 
 ## §5 迁移切片 C0–C5
@@ -1876,6 +1888,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 46 | **异步面（S2b）**：`once` 只收 `{script,pos}` + `timeoutMs>0`；超时 = reject → 泵 drain → `fail Run`；`task` 返回 Promise 才接受、rejected ⇒ fail Run；`pump` 只在读点 + `renderFrame`；Run 存活 = `tasks ∪ onces ∪ onTick 订阅` 为空才收口；`start` 可单独存在（`onTrigger` 单独仍拒） | 永不结束的 once / once 泄漏 hook；task 拒绝被静默吞；Run 提前 done 把 task 杀掉 / 或永不收口；loader 把 onTrigger-only 当可用 | `plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` / `pump-budget` / `module-start-only` + 3 条变异 |
 | 47 | **同步订阅（S2c-1）**：`ctx.at` 每条订阅一条 Entry、链按 handle 升序、`next()` 截断、二次幂等、链外抛；handler 抛错摘整条订阅；`Tick` = `{id,now,local,log}`、`local` 是 DEC 语义值、越界/无 key ⇒ undefined、跨入口 `local.*` 抛 `stale_tick`；`at` 算 Run 存活、`off` 幂等且门 = `call_host` | 链序/截断错；僵尸订阅让 Run 永不收口；stale Tick 读到别人视图；越界读编 0；`at` 不阻止 Run 提前收口 | 9 条 `plugin/at-*`/`tick-*` + `instr-hook/sink-hit-batch` + `add-ex-shared` + 6 条变异 |
 | 48 | **where 过滤 + Tick 写面 + 多槽 Pending（S2c-2）**：`where` 五形态（`{script,pos}` / `{script,lo,hi}` / `{script}` / `{opcode}` / `{script,opcode}`），`{opcode}` 才多付 `rd32(pc)`；`Tick.edit/input/patch` 走 `editAttached/inputAttached`（⛔ 不开 `in_callback_`），`tick.patch` 在 handler 之后写；`Pending` 多槽（≤8、逐槽 CAS、同址保留最初 raw、按 handle/owner 结算、持久写撤销全部同址槽）；Tick 归属本 Impl；stale 写零变化 | where 边界/形态错；`{opcode}` 让每拍多读；tick 写面把 `ctx.fail` 等一起放开；链上多 patch 静默丢一次覆盖；同址恢复抹掉别人的写；stale Tick 写 guest | `at-where-{range,script,opcode,mixed}` + `at-tick-id-attribution` + `tick-{edit,input,patch-cas,patch-limit,stale-write,once-tick-writable}` + `instr-hook/pending-{multi-slot,same-addr,remove-isolation,slot-limit}` + 变异 3 条（`--match` 实测） |
+| 49 | **全局 `log`（S3）**：插件上下文有 `log.info/warn/error/debug(msg,data?)`，Run/tick/render/timeout 都可用；复用 `PluginCallHost::log`；只装插件路径（classic HUD 没有）；不可写/不可配置 | 超时 catch / render / tick 里无法记日志；把 `log` 泄给 classic 脚本；复制第二套格式化/上限 | `plugin/global-log` / `global-log-timeout` / `global-log-number` + `ui-script-quickjs/sandbox` 负控制 + 变异 `installGlobalLog` |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
