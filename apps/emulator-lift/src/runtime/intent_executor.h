@@ -135,6 +135,9 @@ public:
     std::uint64_t readPoints() const { return read_points_; }
     // `Context`（驱动方可以往 `trigger` 里塞工厂 —— 本切片的 `atPoint` 只填 now/edit/input/read）。
     Context& context() { return ctx_; }
+    // ★ S2c-2：只读的那一份（`PluginHost::inputAttached()` 要在**回调之外**判"输入队列接没接"：
+    //   tick 入口 `ctx_` 为 nullptr，但 `IntentQueue` 是本类构造时接的成员）。
+    const Context& context() const { return ctx_; }
     const TriggerReadings& readings() const { return readings_; }
 
 private:

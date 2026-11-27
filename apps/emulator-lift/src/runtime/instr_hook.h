@@ -265,6 +265,8 @@ void instrHookSetInjectionSites(std::uint32_t n);
  * 由 `writeGlobal` 的唯一写点调（`runtime/script_globals.cpp`）⇒ 不要求调用方知道地址。
  * 为什么还要它（CAS 已经不会把别人的写盖回去了）：撤销让 pending **不再**挂着一个过时的 `raw`，
  * 否则下一次恢复会白读一次、而且 `hits/restores` 的账会显示"恢复过"（那是假读数）。
+ * ★ S2c-2：pending 是**多槽**的（`State::pendings`）⇒ 本函数取消**所有** `addr` 相同的槽
+ *   （同址合并后本来就只可能有一条，但语义按"所有"写 —— 别让将来的实现依赖"至多一条"）。
  */
 void instrHookCancelPendingAt(std::uint32_t addr);
 
@@ -272,8 +274,31 @@ void instrHookCancelPendingAt(std::uint32_t addr);
 bool instrHooksActive();
 
 /**
+ * ★ S2c-2：`Tick.patch`（**本条指令**的 one-shot 覆盖）。
+ *
+ * 语义 = 只在**本次派发**（`instrHookProbe` 的这一次 `on_hits`）生效：handler 里设、`on_hits`
+ * 返回之后由 probe 应用（⛔ 不早于 handler —— handler 必须看到"打补丁前"的读数），下一拍派发前
+ * 按 CAS 恢复。`handle` 必须是**本拍命中**的条目（`hit #` 与当前 probe 的序号相等），否则 false。
+ *
+ * 失败 ⇒ false + `*err` 静态字面量：
+ *   `no_such_hook`（条目已撤）/ `not_hit`（不是本拍命中 / 不在派发中）/
+ *   `once_tick`（`once` 的临时条目在 resolve 之后立刻撤 ⇒ 这次覆盖无处落地，⛔ 不假装收下）/
+ *   `bad_target`（目标不可解析：下标越界 / 指针 0 / 全局池读不到）/
+ *   `no_key`（本帧没有 ENC key ⇒ 不能把语义值写成 dword）/
+ *   `too_many_slots`（本拍计划中的不同地址已到 `kMaxPatchSlots`）。
+ * ★ 一个条目只有**一个** one-shot 位（同一 handler 多次调用 = 最后一次赢）；不同 handler 各自
+ *   归到自己那条订阅（ui 层的 `tick_writer`），所以"同一 Tick 对象给多个 handler 用"不会互踩。
+ */
+bool instrHookSetTickPatch(std::uint32_t handle, InstrPatchKind kind, std::uint32_t index,
+                           std::uint32_t value, const char** err);
+
+/** 本拍 pending 槽的上限（同址合并后仍按"不同地址"计；超出 ⇒ 该 entry `skips += 1`）。 */
+inline constexpr std::size_t kMaxPatchSlots = 8;
+
+/**
  * 派发点探针（**唯一调用方** = AOT 注入的 `lift_instr_hook`）。
- * 做的事：恢复上一次未还原的写 → 找命中的 hook → 采样 / 执行覆盖并登记待恢复。
+ * 做的事：恢复上一次未还原的**全部**写 → 找命中的 hook → 采样 / 每条 entry 各执行一次覆盖并登记
+ * 待恢复 → 一次 `on_hits` → 应用本拍 `tick.patch` 的 one-shot 覆盖（再各登记一个槽）。
  */
 void instrHookProbe(X86& cpu);
 

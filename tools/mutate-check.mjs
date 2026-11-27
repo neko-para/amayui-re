@@ -4500,8 +4500,8 @@ const MUTATIONS = [
   //   ★ 只为 `lift-instr-hook` 一个 target 重建（新加 CTest 条目时必填 `buildTarget`）。
   {
     file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
-    from: '            if (current == st.pending.written) {\n',
-    to: '            if (true) {  // 变异：CAS 退化成无条件写回（别人的写被静默抹掉）\n',
+    from: '    if (current == slot.written) {\n',
+    to: '    if (true) {  // 变异：CAS 退化成无条件写回（别人的写被静默抹掉）\n',
     guard: 'ctest:instr-hook',
     ctest: 'instr-hook',
     buildDir: 'apps/emulator-lift/out',
@@ -4807,20 +4807,17 @@ const MUTATIONS = [
       '`once` 拿不到句柄；`instr-hook/add-ex-shared` 红（`plugin/at-multi-same-pos` 连带红）',
   },
 
-  // ── S2c-1 复审 F1（S2）：v1 patch 写成功之后 ⛔ 不许 `break`（同点后面的订阅会被饿死）──────────
-  //   ★ 代表这一类错：`wrote_patch = true;` 又退回 `break;` ⇒ 同一点的 v2 `ctx.at` 既不
-  //     `hits += 1`、也进不了 `hit_ids` ⇒ handler 静默不跑、`hook.list().hits` 恒 0。
-  //     旧注释"位置唯一"在 S2c 多条目之后已不成立（S2c-2 的多槽 / 写面会把它变成主路径）。
+  // ── S2c-1 复审 F1（S2）+ S2c-2b：v1 patch 写成功之后 ⛔ 不许 `break`（同点后面的订阅会被饿死）──
+  //   ★ 代表这一类错：写完立刻 `break;` ⇒ 同一点的 v2 `ctx.at` 既不 `hits += 1`、也进不了
+  //     `hit_ids` ⇒ handler 静默不跑、`hook.list().hits` 恒 0。
   //   ★ 红点 = `instr-hook/v1-patch-does-not-starve-sub`（sub.hits 必须是 1、sink 必须 2 条）。
   {
     file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
     from:
-      '        st.pending.written = written;\n' +
-      '        // ★ F1：一次 probe 只许写一次（先注册者赢）；**继续遍历**把同点后面的订阅照常记账。\n' +
-      '        wrote_patch = true;\n' +
+      '        (void)recordPending(e.id, addr, raw, written, &e);\n' +
       '    }\n',
     to:
-      '        st.pending.written = written;\n' +
+      '        (void)recordPending(e.id, addr, raw, written, &e);\n' +
       '        break;  // 变异：写成功就 break（同点后面的订阅被饿死）\n' +
       '    }\n',
     guard: 'ctest:instr-hook',
@@ -4828,8 +4825,8 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-instr-hook',
     what:
-      '把 v1 patch 的 `wrote_patch = true;` 换回 `break;`（写成功立刻跳出遍历）⇒ 同点后面的 v2 订阅' +
-      '既不 `hits += 1` 也进不了 sink；`instr-hook/v1-patch-does-not-starve-sub` 红',
+      'v1 patch 写成功后 `break;`（立刻跳出遍历）⇒ 同点后面的 v2 订阅既不 `hits += 1` 也进不了 ' +
+      'sink；`instr-hook/v1-patch-does-not-starve-sub` 红',
   },
 
   // ── S2c-1 复审 F4（S3）：「Tick 的有效期**含本入口 drain**」的常驻变异 ─────────────────────────
@@ -4859,6 +4856,155 @@ const MUTATIONS = [
     what:
       '把 `impl.ticks.clear()` 挪到 drain **之前**（入口 drain 时 Tick 已 stale）⇒ handler 里排的 ' +
       'microtask 读 `tick.local.int(0)` 抛 stale；`plugin/tick-valid-during-drain` 红',
+  },
+
+  // ── S2c-2：`{opcode}` 的闸门（`has_opcode_entry`）恒 false ⇒ 订阅永不匹配 ──────────────────────
+  //   ★ 代表这一类错：`recomputeGates` 不再真维护（恒 false）⇒ `{opcode}` / `{script,opcode}`
+  //     装上但永不命中，`hook.list().hits` 恒 0（没有任何报错）。
+  //   ★ 红点 = `plugin/at-where-opcode`（首拍 `instrHits(all)` 必须是 1，修前 = 0）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '    st.has_opcode_entry = opcode;\n',
+    to: '    st.has_opcode_entry = false;  // 变异：闸门恒 false（{opcode} 订阅永不匹配）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`recomputeGates` 把 `has_opcode_entry` 钉成 false（有 `{opcode}` 订阅也不读 pc）⇒ ' +
+      '`{opcode}` / `{script,opcode}` 永不命中；`plugin/at-where-opcode` 红' +
+      '（`instr-hook/add-ex-opcode` / `add-ex-opcode-gate` 连带红）',
+  },
+
+  // ── S2c-2：`{opcode}` 的闸门恒 true ⇒ 没有订阅也每拍多付一次 `rd32(pc)` ─────────────────────────
+  //   ★ 代表这一类错：`if (st.has_opcode_entry)` 被短路成 `if (true)` ⇒ 全进程每一拍都读 pc
+  //     （`{script,pos}` 这条最热的路径白付一次 guest 读，且没有任何症状）。
+  //   ★ JS 面看不到这次读 ⇒ 红点在 C++ 的 `instr-hook/add-ex-opcode-gate`（`g_access` 正/负控制）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '    if (st.has_opcode_entry) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);\n',
+    to: '    if (true) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);  // 变异：闸门恒 true（每拍都读 pc）\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '把 `{opcode}` 的读闸门短路成 `if (true)`（没有 `{opcode}` 订阅也每拍读 pc）⇒ ' +
+      '`instr-hook/add-ex-opcode-gate` 的 `g_access.ea != kPcA` 负控制红（`add-ex-opcode` 连带红）',
+  },
+
+  // ── S2c-2（复审 F2）：`Tick` 的 `hits[0]` 必须判归属 ────────────────────────────────────────────
+  //   ★ 代表这一类错：多 Impl 同活时 `makeTickObject` 仍用全局 `hits[0]` ⇒ 后注册实例的 `Tick.id`
+  //     是**别人的**句柄（文档说"第一条订阅"，实际是"第一个注册者"；用户拿它 `off` 会撤错）。
+  //   ★ 红点 = `plugin/at-tick-id-attribution`（B 实例的 `tick.id` 必须是 hB，修前 = hA）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (!makeTickObject(impl, hits[owner_first], /*once=*/false, &tick)) {\n',
+    to: '        if (!makeTickObject(impl, hits[0], /*once=*/false, &tick)) {  // 变异：不判归属（用全局 hits[0]）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`makeTickObject` 退回全局 `hits[0]`（不判"是否属于本 Impl"）⇒ 两个 Impl 同活时后注册的实例 ' +
+      '`tick.id` 拿到别人的句柄；`plugin/at-tick-id-attribution` 红',
+  },
+
+  // ── S2c-2b：多槽 pending 的恢复必须遍历**所有**槽 ───────────────────────────────────────────
+  //   ★ 代表这一类错：`restorePendingLocked` 只结算第一槽（单槽思维）⇒ 同拍第二条订阅的覆盖
+  //     永远留在 guest 里（净变化 ≠ 0），而 `restores` / `restore_conflicts` 都不算出错。
+  //   ★ 红点 = `instr-hook/pending-multi-slot`（b 的地址在下一拍仍是 patch 值、b.restores = 0）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '    for (const PendingSlot& slot : slots) settleSlot(slot);\n',
+    to: '    if (!slots.empty()) settleSlot(slots.front());  // 变异：只恢复第一槽\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '`restorePendingLocked` 只结算**第一槽**（多槽退回单槽思维）⇒ 同拍第二条订阅的覆盖留在 guest 里；' +
+      '`instr-hook/pending-multi-slot` 红（`pending-slot-limit` / `v1-patch-does-not-starve-sub` 连带红）',
+  },
+
+  // ── S2c-2b：`tick.patch` 的写必须在 handler **之后** ──────────────────────────────────────────
+  //   ★ 代表这一类错：在 `instrHookSetTickPatch` 里就把值写进 guest ⇒ handler 读到的是**打了补丁**
+  //     的值（需求：patch 是"本条指令读之前"的覆盖，不是"handler 读之前"）。
+  //   ★ 红点 = `plugin/tick-patch-cas` 的 `patchPreLocal`（handler 里 patch 之后必须读到 7，修前 = 5）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from:
+      '    e->tick_patch = true;\n' +
+      '    e->tick_kind = kind;\n' +
+      '    e->tick_index = index;\n' +
+      '    e->tick_value = value;\n' +
+      '    e->tick_addr = addr;\n',
+    to:
+      '    e->tick_patch = true;\n' +
+      '    e->tick_kind = kind;\n' +
+      '    e->tick_index = index;\n' +
+      '    e->tick_value = value;\n' +
+      '    e->tick_addr = addr;\n' +
+      '    // 变异：在 handler 里就写（handler 会读到自己打的补丁）\n' +
+      '    (void)write32(*st.probe_mem, addr, encodeInt(value, st.probe_frame->key));\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`tick.patch` 在 handler 里**立刻**写（不等 `on_hits` 返回）⇒ handler 读到打了补丁的值；' +
+      '`plugin/tick-patch-cas` 的 `patchPreLocal` 红（连带"该条指令读到 5"仍绿 ⇒ 红点可归因）',
+  },
+
+  // ── S2c-2b：Tick 写面的 stale 门必须在**任何写之前** ──────────────────────────────────────────
+  //   ★ 代表这一类错：`tick.edit` 不查 `tickRefOf`（先写后查 / ★ 忘了查）⇒ 捕获的旧 Tick 跨入口
+  //     仍能持久写 guest；`tick.local` 的 stale 仍会抛，所以只有写面露出这个洞。
+  //   ★ 红点 = `plugin/tick-stale-write`（edit 不抛 + guest 目标槽被改）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '            if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;\n',
+    to: '            // 变异：不查 stale（先写后查）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`tick.edit.global.set` 不查 `tickRefOf`（stale 门缺失）⇒ 捕获的旧 Tick 跨入口仍写 guest；' +
+      '`plugin/tick-stale-write` 红（`throwEdit` / 消息 / 零变化三处）',
+  },
+
+  // ── S2c-2 复审 F1：`where` 的键**存在但值是 null/undefined** 不能当"没给" ──────────────────────
+  //   ★ 代表这一类错：`{script, pos: undefined}` 静默退化成 `{script}` 整本脚本订阅 —— 每拍命中、
+  //     每拍一个 Tick（成本面最大的形态），而且**没有任何症状**（用户以为自己装的是单点）。
+  //   ★ 红点 = `plugin/at-where-null-field`（6 条非法形态必须全抛；`hook.list()` 不许新增条目）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (has != 0) {\n',
+    to: '        if (has != 0 && false) {  // 变异：null/undefined 当"没给"\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`where` 把"键存在但值是 null/undefined"当"没给"（`{script,pos:undefined}` 静默变成 `{script}` ' +
+      '整本脚本订阅）⇒ `plugin/at-where-null-field` 红（表里多条目 + 抛的条数不足）',
+  },
+
+  // ── S2c-2 复审 F2：`once` 的 Tick 调 `tick.patch` 必须回执 `once_tick` ──────────────────────────
+  //   ★ 代表这一类错：不判 `TickRef::once`，落到 runtime 时 once 的临时条目已撤 ⇒ 回执
+  //     `no_such_hook`（"句柄不存在"的误导读数；d.ts / 合同点名的是 `once_tick`）。
+  //   ★ 红点 = `plugin/tick-patch-once-tick`（`code === "once_tick"` 的那一位）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (tick->once) {\n',
+    to: '        if (tick->once && false) {  // 变异：once 的 Tick 落到 runtime ⇒ no_such_hook\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`once` 的 Tick 调 `tick.patch` 不判 once（落到 runtime 的 `no_such_hook`，而不是该有的 `once_tick`）⇒ ' +
+      '`plugin/tick-patch-once-tick` 红（`code === "once_tick"` 那一位 = 0）',
   },
 
 ];

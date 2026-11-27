@@ -467,11 +467,13 @@ void PluginHost::report(const char* what, const std::string& text) {
 // =====================================================================================
 bool PluginHost::editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
                               const char** code) {
-    if (ctx_ == nullptr || ctx_->edit == nullptr) {
+    // ★ S2c-2：走 `edit_` 而不是 `ctx_->edit` —— tick 入口**不在 Run 回调里**（`ctx_` 为 nullptr），
+    //   但 `Tick.edit` 必须落同一份 `GuestEditSink`（⛔ 不复制第二套写路径 / 回执）。
+    if (edit_ == nullptr) {
         if (code != nullptr) *code = "not_wired";
         return false;
     }
-    const Receipt receipt = ctx_->edit->globalSet(kind, id, value);
+    const Receipt receipt = edit_->globalSet(kind, id, value);
     if (code != nullptr) *code = receipt.code;
     if (!receipt.accepted) {
         // 合同 §4.3 490：失败 ⇒ receipt + **一行**（⛔ 不让核心 `exit 5`）。有界 ⇒ 不刷屏。
@@ -534,6 +536,15 @@ bool PluginHost::instrHookSetPatch(std::uint32_t handle, bool enabled, lift::Ins
     return true;
 }
 
+bool PluginHost::instrHookSetTickPatch(std::uint32_t handle, lift::InstrPatchKind kind,
+                                       std::uint32_t index, std::uint32_t value, const char** err) {
+    const char* why = nullptr;
+    const bool ok = lift::instrHookSetTickPatch(handle, kind, index, value, &why);
+    if (err != nullptr) *err = why;
+    // ★ 不 log 成功（tick 可能每拍都调用）；失败由 JS 回执 `code` 带走（`too_many_slots` / …）。
+    return ok;
+}
+
 bool PluginHost::instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
                                      const std::vector<std::uint32_t>& ptrs) {
     return lift::instrHookSetCapture(handle, ints, ptrs);
@@ -550,10 +561,9 @@ void PluginHost::instrHookClear() { lift::instrHookClear(); }
 std::vector<lift::InstrHookStatus> PluginHost::instrHookList() { return lift::instrHookList(); }
 
 Receipt PluginHost::submitIntent(IntentKind kind, int x, int y, MouseButton button) {    Receipt receipt;
-    if (ctx_ == nullptr || ctx_->input == nullptr) {
-        receipt.code = "not_wired";
-        return receipt;
-    }
+    // ★ S2c-2：`Tick.input` 在回调之外调用 ⇒ 不能靠 `ctx_`（tick 入口它是 nullptr）。
+    //   `queue_` 是本类的成员（`IntentExecutor` 构造时就接了它）⇒ 与回调里是**同一条**队列；
+    //   「有没有接」由 `inputAttached()` 判（构造即接 ⇒ 恒 true，但门的形状保留）。
     Intent intent;
     intent.kind = kind;
     intent.cls = IntentClass::GuestWrite;
@@ -562,7 +572,7 @@ Receipt PluginHost::submitIntent(IntentKind kind, int x, int y, MouseButton butt
     intent.x = x;
     intent.y = y;
     intent.button = button;
-    return ctx_->input->submit(intent);
+    return queue_.submit(intent);
 }
 
 Receipt PluginHost::inputClick(int x, int y, MouseButton button) {
@@ -579,8 +589,8 @@ Receipt PluginHost::inputUp(MouseButton button) {
 }
 
 ui::PluginInputState PluginHost::inputStatus(std::uint64_t id) {
-    if (ctx_ == nullptr || ctx_->input == nullptr) return ui::PluginInputState::Unknown;
-    switch (ctx_->input->status(id)) {
+    // ★ S2c-2：回调之外（tick / 泵 / render）也要能查 ⇒ 用成员队列，⛔ 不靠 `ctx_`。
+    switch (queue_.status(id)) {
         case IntentQueue::Status::Queued:
             return ui::PluginInputState::Queued;
         case IntentQueue::Status::Applied:
