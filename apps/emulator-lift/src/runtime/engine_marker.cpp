@@ -184,7 +184,8 @@ MarkerSample MarkerSampler::sampleIdentity(const GuestMemory& mem) {
     if (!readU32(mem, static_cast<std::uint64_t>(base) + kEngineCurOffset, &cur)) {
         ++invalid_;
         s.why = "cur-uncommitted";
-        if (warnOnce(WarnCur)) {
+        // ★ 告警时机（头注）：boot 早期读不到是正常时序 ⇒ 只有"曾经读到过合法身份"之后才打印。
+        if (saw_valid_ && warnOnce(WarnCur)) {
             std::fprintf(stderr, "[marker] ⚠ Engine=0x%08X 的 cur 槽未提交 ⇒ 本次不采\n", base);
         }
         return s;
@@ -192,7 +193,7 @@ MarkerSample MarkerSampler::sampleIdentity(const GuestMemory& mem) {
     if (cur >= kFrameCount) {
         ++invalid_;
         s.why = "cur-out-of-range";
-        if (warnOnce(WarnCur)) {
+        if (saw_valid_ && warnOnce(WarnCur)) {
             std::fprintf(stderr, "[marker] ⚠ cur=%u 越界（预期 0..%u）⇒ 本次不采；采样点/基址可能已漂\n", cur,
                          kFrameCount - 1u);
         }
@@ -206,7 +207,9 @@ MarkerSample MarkerSampler::sampleIdentity(const GuestMemory& mem) {
     if (!readU32(mem, rec, &code_base) || code_base == 0 || !mem.committed(code_base, 1u)) {
         ++invalid_;
         s.why = "frame-record-unavailable";
-        if (warnOnce(WarnRecord)) {
+        // ★ 每次启动都会在 boot 早期命中一次（`cur=0` 的记录还没装好）—— 这是正常时序，不是告警；
+        //   只有"曾经读到过合法身份、之后又读不到"才打印（基址漂移 / 帧被清）。
+        if (saw_valid_ && warnOnce(WarnRecord)) {
             std::fprintf(stderr,
                          "[marker] ⚠ Engine=0x%08X cur=%u 的记录不可用（+0x00=0x%08X 为 0 / 未提交）⇒ 本次不采；"
                          "帧还没装好或基址已漂\n",
@@ -219,12 +222,13 @@ MarkerSample MarkerSampler::sampleIdentity(const GuestMemory& mem) {
     if (!readU32(mem, rec + kFrameIdentityOffset, &raw_id)) {
         ++invalid_;
         s.why = "identity-uncommitted";
-        if (warnOnce(WarnRecord)) {
+        if (saw_valid_ && warnOnce(WarnRecord)) {
             std::fprintf(stderr, "[marker] ⚠ Engine=0x%08X cur=%u 的身份格（记录+0x3C）未提交 ⇒ 本次不采\n", base, cur);
         }
         return s;
     }
     s.valid = true;
+    saw_valid_ = true;  // ★ 从此以后 `WarnCur` / `WarnRecord` 才允许打印（见头注）
     s.cur = cur;
     s.id = raw_id;
     if (raw_id == 0 && cur != 0 && warnOnce(WarnZeroId)) {

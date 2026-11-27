@@ -104,6 +104,10 @@ ScriptPositionSample readScriptPositionSample(const GuestMemory& mem, const Mark
 ScriptPositionSample readScriptPositionAt(const GuestMemory& mem, std::uint32_t engine, std::uint32_t slot);
 
 // marker 采样器（有状态：告警**每类只打一次**；计数供 run summary / CTest 读）。
+// ★ **告警口径**：`WarnCur` / `WarnRecord` 只在**本进程曾经读到过一次合法身份**之后才打印。
+//   boot 早期 `Engine` 单例已发布、但 `cur` 槽 / 帧记录 / 身份格还没装好 ⇒ 那时读不到是**正常时序**
+//   （每次启动都会命中一次 `frame-record-unavailable`），不构成信号；真信号是"曾经能读、之后读不到"
+//   （基址漂移 / 帧被清）。⛔ 计数（`invalid_` / `why`）与返回值不受这条影响 —— 静音的只是日志。
 // ★ 纯档夹具直接 `MarkerSampler s; s.sample(machine.mem())` 即可驱动一次采样。
 class MarkerSampler {
 public:
@@ -138,6 +142,9 @@ private:
         return true;
     }
 
+    // ★ 曾经读到过一次 `s.valid = true`（合法身份）⇒ 之后才允许 `WarnCur` / `WarnRecord` 打印。
+    //   boot 早期读不到是正常时序（见上面的"告警口径"）；⛔ 只影响打印，不影响计数 / 返回值。
+    bool saw_valid_ = false;
     std::uint32_t warned_ = 0;
     std::uint64_t attempts_ = 0;
     std::uint64_t unpublished_ = 0;
