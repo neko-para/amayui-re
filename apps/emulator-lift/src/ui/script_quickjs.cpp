@@ -4176,7 +4176,8 @@ void runHookStepV1(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit, 
  * ① 组一个 Tick（一次派发一个，全链共享同一个快照；缺它 ⇒ 一行 error、本拍不跑 handler）；
  * ② 同一预算窗里按注册序跑链：`at` 参与者受截断影响，`once` / v1 `onTick` **不受**；
  * ③ 同一预算窗 drain 到静止（`plugin/drain-per-entry` 的 tick 方向）+ settleTasks；
- * ④ 恢复 7 个预算字段；**末尾 `ticks.clear()`** —— Tick 的有效期到此结束（之后 `local.*` = stale）。
+ * ④ 恢复 7 个预算字段 + `ticks` / `chain_step`（嵌套派发）；**末尾 `ticks.clear()`** —— Tick 的
+ *   有效期到此结束（之后 `local.*` = stale），再把外层入口的表搬回来（正常档 = 空）。
  */
 void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     if (impl.ctx == nullptr || hits == nullptr || n == 0) return;
@@ -4202,6 +4203,17 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
         }
     }
     if (!any) return;
+
+    // ★ S2c-1 复审 F3（S3）：`ticks` / `chain_step` 与预算字段**同一套保存-恢复**（嵌套派发；
+    //   今天不可达、S2c-2 可达）。必须在 `makeTickObject` **之前**快照：本入口自己建的 Tick
+    //   不能进"外层那份"，否则入口末尾的 `ticks.clear()` 会被这次快照悄悄抵消（stale 失效）。
+    //   为什么必须保存（而不是只写注释）：一次嵌套派发（外层 tick handler 里经宿主能力触发
+    //   probe）会在本函数入口把 `chain_step` 归零、末尾把 `ticks` 清空 ⇒ 外层 handler 剩余的
+    //   `next()` 变 `next_outside_chain`、`local.*` 变 `stale_tick`，而且**没有任何症状**（外层
+    //   已经认为这一拍是有效的）。⛔ 不保存 `next_tick_serial`：它只增不减 ⇒ 内层 serial 不与
+    //   外层撞。
+    std::map<std::uint32_t, TickRef> prev_ticks = impl.ticks;  // 值拷贝（正常档 = 空表，代价 0）
+    const Impl::ChainStep prev_chain_step = impl.chain_step;
 
     // ① Tick：跑 handler **之前**组好（handler 可能 `off` 掉自己 / 摘条目 ⇒ Tick 必须是值拷贝）。
     //   `once` 的 Tick 由 `runOnceResolve` 用同一个 `makeTickObject` 造（id = 它自己的 handle）。
@@ -4339,7 +4351,10 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     impl.overran = prev_overran;
     impl.paused_ns = prev_paused_ns;
     impl.call_host = prev;
-    impl.chain_step = Impl::ChainStep{};
+    // ★ F3：把**外层入口**的链状态 / Tick 表原样放回（正常档 prev = 空 / 未激活 ⇒ 与旧行为逐字相同）。
+    //   `ticks` 已在本入口末尾 clear（代际结束）；这里只把嵌套时外层那份**值**搬回来。
+    impl.ticks.merge(prev_ticks);
+    impl.chain_step = prev_chain_step;
 
     if (!ok) {
         if (entry_overran) {

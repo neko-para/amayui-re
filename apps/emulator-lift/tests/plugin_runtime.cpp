@@ -3160,6 +3160,14 @@ void caseAtHandlerError() {
     LIFT_CHECK(!f.host->failed());  // 观察者挂掉不 fail Run
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
                       static_cast<std::int64_t>(base + 1));  // 恰好一行
+    // ★ S2c-1 复审 F7（S3）：不只判行数 —— 消息必须点名 `at #N` / `hit #M`（plan 的判据）。
+    //   出口 = `PluginHost::lastLogLine()`（只读观测，⛔ 不改日志行为）。
+    {
+        const std::string& line = f.host->lastLogLine();
+        LIFT_CHECK(line.find("at #") != std::string::npos);
+        LIFT_CHECK(line.find("hit #") != std::string::npos);
+        LIFT_CHECK(line.find("boom") != std::string::npos);  // handler 抛的原文
+    }
     {
         const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);  // 整条订阅被撤
@@ -3375,6 +3383,65 @@ void caseAtKeepsRun() {
     LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
     LIFT_CHECK(!lift::instrHooksActive());
     std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+// `plugin/at-next-outside`：把 `next` 存下来、在 handler 返回之后（下一个 call() 入口）调用
+//   ⇒ 抛 TypeError（消息含 `next_outside_chain`）；插件自己接住 ⇒ Run 不崩、能收口。
+//   红了 = `next()` 在链外静默生效 / 静默 no-op（"我以为我继续了、其实没有"）。
+void caseAtNextOutside() {
+    lift_test::g_current_case = "plugin/at-next-outside";
+    Fixture f;
+    if (!loadAtChain(f, "next-outside")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：一条 at + armed trigger
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+    dispatchInstr(f, kInstrPos);  // handler 把 next 存进模块变量（⛔ 不在 handler 里调）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：链外调 next ⇒ 抛；夹具自己接住 + 写回 + off
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());                    // ★ 观察者用错 API 不 fail Run
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // 确实抛了
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // 消息含 next_outside_chain
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);  // 抛的是 TypeError
+    LIFT_CHECK(f.host->instrHookList().empty());
+
+    f.pump();  // 再一个读点：订阅没了 ⇒ 收口（与 at-off 同一节奏）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+}
+
+// `plugin/tick-valid-during-drain`：handler 里排的 microtask 在**同一次入口的 drain** 里跑 ⇒
+//   Tick 仍有效（`local.int(0)` 读得到、不 stale）。
+//   红了 = `ticks.clear()` 被挪到 drain 之前（老 Tick 在 continuation 里已经失效）。
+void caseTickValidDuringDrain() {
+    lift_test::g_current_case = "plugin/tick-valid-during-drain";
+    Fixture f;
+    if (!loadAtChain(f, "drain-tick-local")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(installInstrLocalValues(f.mem));
+    f.pump();  // start：一条 at
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+    dispatchInstr(f, kInstrPos);  // handler 排 microtask；本入口末尾的 drain 跑到它
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：写回 drain 里那次 local 读的读数
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 7u);   // local.int(0) 的语义值
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 0u);   // 没有 stale_tick
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);   // microtask 确实跑了（不是"没跑也绿"）
 }
 
 // =====================================================================================
@@ -4324,6 +4391,9 @@ int main() {
     caseTickStale();
     caseAtMultiSamePos();
     caseAtKeepsRun();
+    // ---- S2c-1 复审收口（F5 next 的链外调用 / F4 Tick 含 drain / F7 消息）----
+    caseAtNextOutside();
+    caseTickValidDuringDrain();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

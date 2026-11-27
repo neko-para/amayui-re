@@ -28,6 +28,12 @@
 //   ⑨ `instr-hook/add-ex-shared`（S2c）：`duplicate` **只对 V1At**；Sub / Once 同点可重复；
 //      `{Range}` + `{Pos}` 同拍各命中一次；`range_empty` / `bad_where` 两条形状校验。
 //      红了 = v2 同点多订阅被 v1 去重拒掉（`at-multi-same-pos` 会连带红）或形状校验缺失。
+//   ⑩ `instr-hook/v1-patch-does-not-starve-sub`（S2c-1 复审 F1）：同点 V1At+patch 写成功之后，
+//      后面的 v2 `Sub` 仍必须 `hits += 1` 并进 sink 的批量；写仍只有一次（先注册者赢）。
+//      红了 = probe 又退回"写成功就 break"⇒ 同点后面的 `ctx.at` 静默不跑（S2 复发）。
+//   ⑪ `instr-hook/add-ex-opcode`（S2c-1 复审 F6）：`{opcode}` 真按 opcode 匹配；撤掉 opcode 条目后
+//      `has_opcode_entry` 归 false ⇒ 普通 probe **不读 pc**（用 `g_access` 判）。
+//      红了 = opcode 匹配是假面 / 闸门恒 true（每拍多付一次 `rd32(pc)`）。
 //
 // ★ 夹具形状：一块假 `GuestMemory`（假 Engine / 帧记录 / 名字表 / int 池 / ptr local）+
 //   一个只填了 `mem` 的 `X86` + 直接调 `instrHookProbe` —— ⛔ 不需要 AOT、不需要游戏安装 / LFS。
@@ -665,6 +671,130 @@ void caseAddExShared() {
     L::instrHookClear();
 }
 
+// =====================================================================================
+// ⑩ S2c-1 复审 F1 · `instr-hook/v1-patch-does-not-starve-sub`
+//
+//   红 = v1 的 patch 写成功后 `break` ⇒ 同点**后面**的 v2 订阅既不 `hits += 1`、也进不了
+//   `hit_ids`（`ctx.at` handler 静默不跑、`hook.list().hits` 恒 0）。
+//   判据：同点 V1At+patch + Sub+patch 各一条 ⇒ 一次 probe 后两条 hits 都是 1、sink 恰好 2 条；
+//   地址 = **先注册的 v1** 的 patch 值（"一条指令最多一次写、先注册者赢"没变）。
+// =====================================================================================
+void caseV1PatchDoesNotStarveSub() {
+    lift_test::g_current_case = "instr-hook/v1-patch-does-not-starve-sub";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    RecordingSink sink;
+    L::InstrHookSink hooks;
+    hooks.user = &sink;
+    hooks.on_hits = &recordingOnHits;
+    L::instrHookAddSink(hooks);
+
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    LIFT_CHECK(put32(mem, kPcA, kOpcode));
+
+    bool v1_ok = false;
+    bool sub_ok = false;
+    const std::uint32_t v1 = addHook(0x41u, kPosA, &v1_ok);
+    LIFT_CHECK(v1_ok);
+    const char* err = nullptr;
+    LIFT_CHECK(L::instrHookSetPatch(v1, true, L::InstrPatchKind::PtrDword, 0u, 7u, 0u, &err));
+    const std::uint32_t sub = addExHook(0x41u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                        L::InstrHookKind::Sub, &sub_ok);
+    LIFT_CHECK(sub_ok);
+    LIFT_CHECK(v1 < sub);
+    // 第二条也装 patch（值不同）⇒ "sub 不写"有读数：地址必须还是 v1 写进去的 enc(7)。
+    LIFT_CHECK(L::instrHookSetPatch(sub, true, L::InstrPatchKind::PtrDword, 0u, 9u, 0u, &err));
+
+    dispatchAt(mem, cpu, kPosA);
+    L::InstrHookStatus v1_st;
+    L::InstrHookStatus sub_st;
+    LIFT_CHECK(L::instrHookStats(v1, &v1_st));
+    LIFT_CHECK(L::instrHookStats(sub, &sub_st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.hits), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.hits), 1);  // ★ 修前 = 0（被 break 饿死）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.last_count), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 2);
+    if (sink.hits.size() == 2) {
+        LIFT_CHECK_EQ_U32(sink.hits[0].handle, v1);  // 注册序 = handle 升序
+        LIFT_CHECK_EQ_U32(sink.hits[1].handle, sub);
+    }
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(7u));  // v1 的 7 生效、sub 的 9 没写
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.skips), 0);  // 跳过写 ≠ 尝试失败
+    // 窗口结束：下一拍恢复 v1 原本的 raw（sub 没留下任何东西）。
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));
+    L::instrHookClear();
+    L::instrHookRemoveSink(&sink);
+}
+
+// =====================================================================================
+// ⑪ S2c-1 复审 F6 · `instr-hook/add-ex-opcode`
+//
+//   红 = `{opcode}` 的匹配 / `has_opcode_entry` 闸门是"写了但永不生效"的假面：
+//   · Opcode=X 的条目：pc 上是 X ⇒ 命中；换成 Y ⇒ 不命中（判据是**按 opcode 匹配**，不是"装上了"）；
+//   · 没有 `{opcode}` 订阅时 probe **不读 pc**：用 `lift::g_access`（最近一次 guest 访存的 EA）判。
+//     ② 里同一仪器读出"读了 pc"，③ 撤掉 opcode 条目之后读出"没读" ⇒ 这不是恒真断言：
+//     闸门恒 true / `recomputeGates` 不维护，都会当场红。
+// =====================================================================================
+void caseAddExOpcode() {
+    lift_test::g_current_case = "instr-hook/add-ex-opcode";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    constexpr std::uint32_t kOpcodeX = 0x72u;
+    constexpr std::uint32_t kOpcodeY = 0x73u;
+    LIFT_CHECK(put32(mem, kPcA, kOpcodeX));
+
+    // ① 没有 opcode 订阅：普通 Pos 订阅先跑两拍（第二拍 script_id 已缓存 ⇒ 之后没有名字解析的读）。
+    bool pos_ok = false;
+    const std::uint32_t pos_h = addExHook(0x51u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                          L::InstrHookKind::Sub, &pos_ok);
+    LIFT_CHECK(pos_ok);
+    dispatchAt(mem, cpu, kPosA);
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);  // ★ 无 `{opcode}` 订阅 ⇒ probe 不读 pc
+
+    // ② `{opcode, X}`：pc 上是 X ⇒ 命中（同时证明闸门在"有 opcode 订阅"时真的读 pc）。
+    bool opx_ok = false;
+    const std::uint32_t op_x = addExHook(0x51u, L::InstrHookForm::Opcode, std::string(), kOpcodeX, 0,
+                                         L::InstrHookKind::Sub, &opx_ok);
+    LIFT_CHECK(opx_ok);
+    dispatchAt(mem, cpu, kPosA);
+    L::InstrHookStatus ox;
+    L::InstrHookStatus ps;
+    LIFT_CHECK(L::instrHookStats(op_x, &ox));
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ox.hits), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 3);
+    LIFT_CHECK(ox.form == L::InstrHookForm::Opcode);
+    LIFT_CHECK_EQ_U32(ox.opcode, kOpcodeX);
+    LIFT_CHECK_EQ_U32(L::g_access.ea, kPcA);  // ★ 正控制：同一仪器确实能看见 pc 读
+
+    // ③ pc 换成 Y ⇒ 不命中（按 opcode 匹配，不是"装了就算"）。
+    LIFT_CHECK(put32(mem, kPcA, kOpcodeY));
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::instrHookStats(op_x, &ox));
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ox.hits), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 4);
+
+    // ④ 撤掉 opcode 条目 ⇒ `has_opcode_entry` 归 false（`recomputeGates` 真维护）⇒ 不再读 pc。
+    LIFT_CHECK(L::instrHookRemove(op_x));
+    LIFT_CHECK(!L::instrHookStats(op_x, &ox));
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 5);
+    L::instrHookClear();
+}
+
 }  // namespace
 
 int main() {
@@ -681,5 +811,8 @@ int main() {
     // ---- S2c（批量 sink；addEx 的 kind / form 准入）----
     caseSinkHitBatch();
     caseAddExShared();
+    // ---- S2c-1 复审收口（F1 的 break 饿死 / F6 的 opcode 路径）----
+    caseV1PatchDoesNotStarveSub();
+    caseAddExOpcode();
     return lift_test::finish("instr-hook");
 }

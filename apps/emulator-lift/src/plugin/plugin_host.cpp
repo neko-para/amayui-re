@@ -660,6 +660,7 @@ void PluginHost::log(const char* level, const std::string& message) {
     }
     if (!message.empty() && message == last_log_) return;
     last_log_ = message;
+    last_line_ = message;  // ★ S2c-1 复审 F7：测试可读的"最后一行原文"（⛔ 不影响打印 / 去重）
     ++log_lines_;
     std::fprintf(stderr, "[plugin %s] %s: %s\n", name_.c_str(), level != nullptr ? level : "info",
                  oneLine(message).c_str());

@@ -622,6 +622,12 @@ void instrHookProbe(X86& cpu) {
     std::uint32_t hit_ids[8];
     std::size_t n_hits = 0;
     std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2c 起可达：同点多条）
+    // ★ S2c-1 复审 F1（S2）：v1 "一条指令最多一次写、先注册者赢" —— 用**本次 probe 的一位**表达，
+    //   ⛔ 不是 `break`。旧写法写成功后 `break` ⇒ 同一点**后面**的条目既不 `hits += 1`、也进不了
+    //   `hit_ids` ⇒ v2 `ctx.at` handler 静默不跑（旧注释"位置唯一"在 S2c 多条目之后已不成立）。
+    //   现在的语义：写成功之后**只跳过写**（下面的 `if (wrote_patch) continue;`），
+    //   hits / hit_ids / capture 照常 —— "先注册者赢"不变，同点后面的订阅不再被饿死。
+    bool wrote_patch = false;
 
     for (Entry& e : st.entries) {
         // ★ S2c：四种 form 的统一判定（v1 的 Pos 仍是"先比 pos"那一支，代价同阶）。
@@ -643,6 +649,10 @@ void instrHookProbe(X86& cpu) {
         }
         if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);
         if (!e.patch) continue;
+        // ★ F1：这条 probe 已经有一条成功写过 ⇒ 后面的 patch 条目**跳过写**（v1 语义不变：
+        //   一条指令最多一次写、先注册者赢）。⛔ 不要在这里 `break`：上面的 hits / hit_ids /
+        //   capture 必须先记完（否则同点后面的 `ctx.at` 连 hits 都不涨）。
+        if (wrote_patch) continue;
         if (e.max_hits != 0 && e.hits > e.max_hits) continue;
 
         std::uint32_t addr = 0;
@@ -667,7 +677,8 @@ void instrHookProbe(X86& cpu) {
         st.pending.raw = raw;
         // ★ S0：记下**我写进去的**编码值 —— 下一次恢复先比它（CAS，见 `restorePendingLocked`）。
         st.pending.written = written;
-        break;  // 一轮派发只允许一条 hook 生效（位置唯一 ⇒ 正常也只有一条命中）
+        // ★ F1：一次 probe 只许写一次（先注册者赢）；**继续遍历**把同点后面的订阅照常记账。
+        wrote_patch = true;
     }
     if (!want_sink || (n_hits == 0 && hit_overflow.empty())) return;
 

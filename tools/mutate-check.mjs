@@ -4807,6 +4807,60 @@ const MUTATIONS = [
       '`once` 拿不到句柄；`instr-hook/add-ex-shared` 红（`plugin/at-multi-same-pos` 连带红）',
   },
 
+  // ── S2c-1 复审 F1（S2）：v1 patch 写成功之后 ⛔ 不许 `break`（同点后面的订阅会被饿死）──────────
+  //   ★ 代表这一类错：`wrote_patch = true;` 又退回 `break;` ⇒ 同一点的 v2 `ctx.at` 既不
+  //     `hits += 1`、也进不了 `hit_ids` ⇒ handler 静默不跑、`hook.list().hits` 恒 0。
+  //     旧注释"位置唯一"在 S2c 多条目之后已不成立（S2c-2 的多槽 / 写面会把它变成主路径）。
+  //   ★ 红点 = `instr-hook/v1-patch-does-not-starve-sub`（sub.hits 必须是 1、sink 必须 2 条）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from:
+      '        st.pending.written = written;\n' +
+      '        // ★ F1：一次 probe 只许写一次（先注册者赢）；**继续遍历**把同点后面的订阅照常记账。\n' +
+      '        wrote_patch = true;\n' +
+      '    }\n',
+    to:
+      '        st.pending.written = written;\n' +
+      '        break;  // 变异：写成功就 break（同点后面的订阅被饿死）\n' +
+      '    }\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '把 v1 patch 的 `wrote_patch = true;` 换回 `break;`（写成功立刻跳出遍历）⇒ 同点后面的 v2 订阅' +
+      '既不 `hits += 1` 也进不了 sink；`instr-hook/v1-patch-does-not-starve-sub` 红',
+  },
+
+  // ── S2c-1 复审 F4（S3）：「Tick 的有效期**含本入口 drain**」的常驻变异 ─────────────────────────
+  //   ★ 代表这一类错：`impl.ticks.clear();` 被挪到 drain **之前** ⇒ handler 里排的 continuation /
+  //     once 的 `.then` 在 drain 里读 `tick.local.*` 就 stale（用户可见：读不到本拍 local，
+  //     S2c-2 开写面后会变成"改错一帧"）。
+  //   ★ 红点 = `plugin/tick-valid-during-drain`（`local.int(0)` 必须是 7 且不 stale）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '    if (js_called) {\n' +
+      '        std::string drain_err;\n' +
+      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
+      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
+      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
+    to:
+      '    if (js_called) {\n' +
+      '        impl.ticks.clear();  // 变异：Tick 在 drain 之前就失效\n' +
+      '        std::string drain_err;\n' +
+      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
+      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
+      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '把 `impl.ticks.clear()` 挪到 drain **之前**（入口 drain 时 Tick 已 stale）⇒ handler 里排的 ' +
+      'microtask 读 `tick.local.int(0)` 抛 stale；`plugin/tick-valid-during-drain` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

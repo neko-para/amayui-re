@@ -261,6 +261,11 @@ public:
     std::uint64_t fired() const { return fired_; }
     std::uint64_t timeouts() const { return timeouts_; }
     std::uint64_t logLines() const { return log_lines_; }
+    // ★ S2c-1 复审 F7（S3）：**最后一条已打出**日志的原文（测试 / readout 判"消息内容"用）。
+    //   ⛔ 不改日志行为：`log()` 照旧 dedup / 上限 / `oneLine()` 打印；这里只是把同一条消息存一份。
+    //   为什么需要：`logLines()` 只数行数 ⇒ `plugin/at-handler-error` 只能判"恰好 +1"，判不了
+    //   消息里有没有点名的 `at #N` / `hit #M`（plan 的判据）。
+    const std::string& lastLogLine() const { return last_line_; }
 
     TriggerRunner& runner() { return runner_; }
     const TriggerRunner& runner() const { return runner_; }
@@ -353,6 +358,7 @@ private:
     std::uint64_t timeouts_ = 0;
     std::uint64_t log_lines_ = 0;
     std::string last_log_;  // 去重（连续相同 ⇒ 不重复打）
+    std::string last_line_;  // ★ 最后一条**已打出**的原文（`lastLogLine()`；只读观测，不参与去重）
 };
 
 }  // namespace lift::plugin

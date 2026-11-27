@@ -18,6 +18,10 @@
 //     `duplicate` 只对 v1 生效 ⇒ 4 条都能装上。
 //   · `keeps-run`       ：`start` 返回 null + 一条 at ⇒ Run 靠订阅存活（run=waiting）；handler 里
 //     `ctx.off(self)` ⇒ 再一个读点后收口（run=done、表空）。
+//   · `next-outside`    ：把 `next` 存下来、在 handler 返回之后（下一个 onTrigger）调用 ⇒ 抛
+//     TypeError（消息含 `next_outside_chain`）；插件自己接住 ⇒ Run 不因这个用错 API 而崩。
+//   · `drain-tick-local`：handler 里排的 microtask（同一次入口的 drain 里跑）读 `tick.local.int(0)`
+//     ⇒ 读得到值、**不** stale（`ticks.clear()` 若挪到 drain 之前，这里就 stale）。
 //
 // ★ tick 入口只读：`ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 全 TypeError
 //   ⇒ 本夹具只写**模块变量**，guest 写回统一放在 `onTrigger`（合法的 Run 回调）。
@@ -57,6 +61,10 @@ let tickRuns = 0;
 let nowRec = null;
 let localRec = null;
 let savedTick = null;
+let savedNext = null;   // `next-outside`：handler 里存下来、handler 返回之后再调
+let drainRan = 0;       // `drain-tick-local`：drain 里那次 microtask 跑了几次
+let drainValue = UNDEF; // 它读到的 `local.int(0)`（读不到 / stale 就保持哨兵）
+let drainStale = 0;     // 那次读有没有抛 `stale_tick`
 
 function note(value) {
     return value === undefined ? UNDEF : value;
@@ -251,6 +259,33 @@ const plugin = {
             ctx.log("info", "at-chain: installed mode=keeps-run");
             return null;
         }
+        if (mode === "next-outside") {
+            h1 = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
+                // ★ 只存下来，**不**在 handler 里调：链外调用必须抛 `next_outside_chain`。
+                savedNext = next;
+            });
+            if (typeof h1 !== "number") throw new Error("next-outside: at failed");
+            ctx.log("info", "at-chain: installed mode=next-outside");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "drain-tick-local") {
+            hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                // ★ 这个 microtask 在**同一次入口的 drain** 里跑（runInstrHits 末尾）⇒ Tick 必须
+                //   仍有效、`local.int(0)` 读得到值；`ticks.clear()` 若挪到 drain 之前就读不到。
+                Promise.resolve().then(() => {
+                    drainRan += 1;
+                    try {
+                        drainValue = tick.local.int(0);
+                    } catch (e) {
+                        const message = String(e && e.message ? e.message : e);
+                        drainStale = message.indexOf("stale_tick") >= 0 ? 1 : 0;
+                    }
+                });
+            });
+            if (typeof hNow !== "number") throw new Error("drain-tick-local: at failed");
+            ctx.log("info", "at-chain: installed mode=drain-tick-local");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
     onTrigger(ctx) {
@@ -391,6 +426,33 @@ const plugin = {
             v1.clear();
             ctx.off(h1);
             ctx.off(h2);
+            return [];
+        }
+        if (mode === "next-outside") {
+            // ★ 存下来的 next 在 handler 返回之后（本次 call() 入口里）调用 ⇒ 必须抛 TypeError。
+            //   这里自己接住：Run 不因观察者用错 API 而崩（语义 = 抛给调用方，不是 fail Run）。
+            let outsideOk = 0;
+            let messageOk = 0;
+            let nameOk = 0;
+            try {
+                savedNext();
+            } catch (e) {
+                outsideOk = 1;
+                const message = String(e && e.message ? e.message : e);
+                messageOk = message.indexOf("next_outside_chain") >= 0 ? 1 : 0;
+                nameOk = (e && e.name === "TypeError") ? 1 : 0;
+            }
+            put(ctx, OUT_A, outsideOk);
+            put(ctx, OUT_B, messageOk);
+            put(ctx, OUT_C, nameOk);
+            ctx.off(h1);
+            return [];
+        }
+        if (mode === "drain-tick-local") {
+            put(ctx, OUT_A, drainValue);
+            put(ctx, OUT_B, drainStale);
+            put(ctx, OUT_C, drainRan);
+            ctx.off(hNow);
             return [];
         }
         ctx.fail("mode", "unexpected onTrigger for " + String(mode));
