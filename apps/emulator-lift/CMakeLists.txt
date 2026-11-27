@@ -37,9 +37,66 @@ find_package(Zydis CONFIG REQUIRED)
 # ---- 第三方：Berkeley SoftFloat 3e（D3；vendor，不进 vcpkg）----
 add_subdirectory(third_party/berkeley-softfloat)
 
+# =====================================================================================
+# ★ `emulator-lift-core` = **构建期工具 `emulator-lift-gen` 的默认档闭包**（`LIFT_S7_IAT=OFF`）。
+#
+#   来源：不是按目录 / 按"看起来像内核"切的，而是**链接闭包本身** ——
+#   `ninja -C out -t query emulator-lift-gen` + 带 `-Wl,-map` 的链接复算，
+#   统计 `libemulator-lift-runtime.a(...)` 成员（2026-11-27：109 → 18，见下）。
+#   理由：`emulator-lift-gen` 是**构建期 host tool**（PE + 闭包 → `.ll`），
+#   它只该依赖"解码 / 语义 / 内存 / shim 注册表"这一小块；audio / ui / d3d9 / quickjs /
+#   freetype / pl-mpeg 只是**运行期**产品（AOT 臂）需要的东西。
+#   ⛔ 不许把整条 runtime 塞进 core 来"让链接过"——那只是把闭包问题藏起来。
+#   ★ 同一 `.cpp` ⛔ **不许**同时进 core 与 `emulator-lift-runtime`（两份定义 = 重复符号 / ODR 漂移）。
+#   ★ 闭包变了（新增强引用 / 删 TU）⇒ 先复查这条清单，再改这里：
+#     `LIFT_S7_IAT=ON` 那一档本来就可以多链（见 `emulator-lift-gen` 的 `if(LIFT_S7_IAT)`）。
+#
+#   依赖：解码只靠 Zydis、x87 只靠 Berkeley SoftFloat ⇒ 两者在这里；FreeType / quickjs /
+#   pl-mpeg / boost / PNG / glm 属于运行期，⛔ 不进 core。
+#   ⚠ SDL 是**例外**（它也在这里）：`vfs.cpp` 在闭包里，而它用 `SDL_TimeToWindows` 换算
+#     宿主文件时间 ⇒ 不链 SDL 就链接不过。为什么这与"把 runtime 整个塞进 core"不同、
+#     以及要彻底拿掉 SDL 需要什么，见下面 `target_link_libraries` 的注释。
+#   WIN32 的 `shell32` = `host_encoding.cpp` 的 `CommandLineToArgvW`（argv 的 UTF-8 重建）。
+# =====================================================================================
+add_library(emulator-lift-core STATIC
+    src/runtime/memory.cpp
+    src/runtime/sha256.cpp
+    src/runtime/image.cpp
+    src/runtime/mnemonics.cpp
+    src/runtime/decode.cpp
+    src/runtime/x86.cpp
+    # ★ 单令牌（guest 执行互斥）：主线程按块取、音频 feeder 每块取；违规计数见 guest_token.h
+    src/runtime/guest_token.cpp
+    src/runtime/exec.cpp
+    src/runtime/exec_integer.cpp
+    src/runtime/exec_control.cpp
+    src/runtime/exec_string.cpp
+    src/runtime/exec_fpu.cpp
+    src/runtime/fpu_bridge.cpp
+    src/runtime/cp932.cpp
+    src/runtime/vfs.cpp
+    src/runtime/host_encoding.cpp
+    src/runtime/shims.cpp
+    src/corpus/lst_index.cpp)
+target_include_directories(emulator-lift-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# ★ 依赖：解码只靠 Zydis、x87 只靠 Berkeley SoftFloat。
+# ★ `SDL3` 为什么也在这里（⚠ 与"SDL 留 runtime"的初衷不同，2026-11-27 实测）：
+#   `src/runtime/vfs.cpp` 在**默认档闭包里**（`image.cpp` 的 `guestEnvironment` /
+#   `openHostFileUtf8` / `Vfs::guestExePath`，`corpus/lst_index.cpp` 的 `openHostFileUtf8`），
+#   而它用 SDL 取宿主文件时间：`SDL_TimeToWindows`（所有平台）+ `SDL_GetPathInfo`（非 Apple）。
+#   ⇒ 不链 SDL 时链接器会报 `_SDL_TimeToWindows`（实测：`vfs.cpp.o` 的
+#   `hostFileTimes` / `hostFileInfo` / `readCache*`）。这不是"把 runtime 塞进 core"：
+#   core 仍然只有 18 个 TU；要彻底拿掉 SDL，得把 `vfs.cpp` 的时间 / 读缓存那半拆成独立 TU
+#   （超出本轮"只解两条边 + 拆 target"的范围，⛔ 不在本轮动）。
+target_link_libraries(emulator-lift-core PRIVATE Zydis::Zydis berkeley-softfloat SDL3::SDL3)
+if(WIN32)
+    # host_encoding.cpp 的 CommandLineToArgvW（argv 的 UTF-8 重建）
+    target_link_libraries(emulator-lift-core PRIVATE shell32)
+endif()
+target_compile_features(emulator-lift-core PUBLIC cxx_std_20)
+
 # ---- 运行时 ----
 add_library(emulator-lift-runtime STATIC
-    src/runtime/memory.cpp
     # ★ AOT 臂的 guest fault 现场（`runtime/fault_state.h` 的唯一实现）：`guestFault` 的钩子在这里，
     #   打印 eip / 当前块 EA / 8 GPR + eflags / 32 字 guest 栈。归属本 target 而不是 AOT target：
     #   纯 CTest `fault-report` 只链本 target（合成 fault 直接驱动打印函数），AOT 臂也链它
@@ -56,11 +113,6 @@ add_library(emulator-lift-runtime STATIC
     #   `window_prof.cpp` 相同：纯 CTest `lift-aot-frame-bucket` 只链本 target，AOT 臂也链它
     #   ⇒ **一份实现两处用**（⛔ 只放进 AOT target 会让测试链接失败）。
     src/aot/frame_bucket.cpp
-    src/runtime/sha256.cpp
-    src/runtime/image.cpp
-    src/runtime/mnemonics.cpp
-    src/runtime/decode.cpp
-    src/runtime/x86.cpp
     src/runtime/guest_call.cpp
     src/runtime/audio.cpp
     src/runtime/host_window.cpp
@@ -133,23 +185,12 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/ddraw_surface.cpp
     src/runtime/com.cpp
     src/runtime/machine.cpp
-    # ★ 单令牌（guest 执行互斥）：主线程按块取、音频 feeder 每块取；违规计数见 guest_token.h
-    src/runtime/guest_token.cpp
     # ★ Phase-0 四行读数（tokenhold / holdhist / waithist / shimmax）的**唯一**实现：
     #   解释器 `Machine::dumpRunSummary` 与 AOT `AotHost::printRunSummary` 都调它
     #   （2026-11-18：AOT 臂以前根本没有这四行 —— 而音频 feeder 只在 AOT 上跑）。
     src/runtime/token_phase0_report.cpp
-    src/runtime/exec.cpp
-    src/runtime/exec_integer.cpp
-    src/runtime/exec_control.cpp
-    src/runtime/exec_string.cpp
-    src/runtime/exec_fpu.cpp
-    src/runtime/fpu_bridge.cpp
-    src/runtime/cp932.cpp
-    src/runtime/vfs.cpp
     src/runtime/handles.cpp
     src/runtime/heap.cpp
-    src/runtime/host_encoding.cpp
     # ★ native override：机制 / 已知表在 `native_overrides.cpp`；各热点实现按域拆在 `native_*.cpp`
     #   （2026-11-08，纯搬运；契约见 native_overrides.h）
     src/runtime/native_overrides.cpp
@@ -178,12 +219,10 @@ add_library(emulator-lift-runtime STATIC
     #   `[this, this+0x800)` 读，⛔ 不硬编码多项式。契约见 native_overrides.h 的 `CrcWhy` 段
     #   （REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ）
     src/runtime/native_crc32.cpp
-    src/runtime/shims.cpp
     src/runtime/window_profile.cpp
     # ★ SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机；
     #   契约与取证见 runtime/seh.h 的头注）。shim 只搬参数，派发在 Machine 的块边界。
     src/runtime/seh.cpp
-    src/corpus/lst_index.cpp
     src/shims/register.cpp
     src/shims/register_import_gaps.cpp
     src/shims/kernel32_sync.cpp
@@ -219,11 +258,10 @@ add_library(emulator-lift-runtime STATIC
     src/shims/kernel32_bootstrap.cpp)
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
-    PUBLIC SDL3::SDL3
+    PUBLIC SDL3::SDL3 emulator-lift-core
     PRIVATE Zydis::Zydis berkeley-softfloat)
 if(WIN32)
-    # host_encoding.cpp 的 CommandLineToArgvW（argv 的 UTF-8 重建）
-    target_link_libraries(emulator-lift-runtime PRIVATE shell32)
+    # ★ `shell32` 随 `host_encoding.cpp` 一起搬去了 `emulator-lift-core`（`CommandLineToArgvW`）。
     # d3d9_gpu.cpp 用 D3DCompile 在运行时把 HLSL 编成 DXBC
     target_link_libraries(emulator-lift-runtime PRIVATE d3dcompiler)
 endif()
@@ -286,6 +324,8 @@ endfunction()
 
 # ★ `/utf-8` 已在 `project()` 之后用目录级 `add_compile_options` 覆盖所有 target（见文件顶部）。
 lift_enable_warnings(emulator-lift-runtime)
+# ★ core 与 runtime **同一档**告警（"警告即错误"只有一份实现 ⇒ 两处都施加，⛔ 不另立一套）。
+lift_enable_warnings(emulator-lift-core)
 
 # =====================================================================================
 # Shape A · 构建期静态 lift 的 **T0** 落点：`emulator-lift-aot`（只做平台 bring-up）
@@ -331,12 +371,16 @@ endif()
 # ★ 位置：`if(LIFT_BUILD_TESTS)` **之前** —— 那个块会把 `CMAKE_RUNTIME_OUTPUT_DIRECTORY`
 #   改成 `out/tests`，产品 / 工具 target 必须落在它之前（与 `emulator-lift` / `emulator-lift-aot`
 #   同一口径）。★ 只插入，⛔ 不改上面任何一行。
-# ★ 允许链 `emulator-lift-runtime`：解码 / 语义只有一份（"产品二进制里没有解释器"是 T3 的约束）。
+# ★ 只链 `emulator-lift-core`（= 本工具的**默认档闭包**，见文件上方该 target 的注释）：
+#   解码 / 语义仍然只有一份（"产品二进制里没有解释器"是 T3 的约束），但 audio / ui / d3d9 /
+#   quickjs / freetype / pl-mpeg 这些**运行期**依赖不再被这个构建期工具拉进来
+#   （⚠ 例外：`vfs.cpp` 用到的 SDL 仍在 core 的链接行上，见 core 的注释）。
+#   `LIFT_S7_IAT=ON` 那一档需要 `registerAotShims`（整条 shim 注册链）⇒ 见下面的 `if(LIFT_S7_IAT)`。
 # ★ 告警口径与上面两个 target 一致：本块**不加**任何 `-W` / `/W` 覆盖。
 # =====================================================================================
 add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp
                                 src/aot/lift_struct.cpp src/aot/lift_iat.cpp)
-target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
+target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-core)
 # ★ D4（2026-11-24）：S7 判据 4（"无间接 `call`"）的放宽开关，**缺省 ON**。
 #   理由 / 语义 / 接受条件见 `src/aot/lift_struct.cpp` 的 `LIFT_S7_RELAX_INDIRECT` 注释与
 #   `docs/03-emulator/aot-s7-evaluation.md` §3。回退 = **一行**：`-DLIFT_S7_RELAX_INDIRECT=OFF`
@@ -348,13 +392,20 @@ option(LIFT_S7_RELAX_INDIRECT "S7/D4: allow units with indirect call when their 
 #   同一条式子 `(conv == Stdcall) ? argc*4 : 0`）⇒ `analyzeStructure` 的间接 `call` 分支不再一律
 #   `kUnknown`。判据 / 停下来的门槛见 `.tmp/reveq/REQ-01M86NMT0YJ9V78XS2DZZV364Q/design.md` §8.3。
 #   ★ **缺省 OFF**（回退 = 一行 flag）：OFF ⇒ 8 份 `.ll` 与不带本机制时**逐字节相同**
-#   （模型建出来但不被查询；连 stderr 的 `[shim-meta]` 读数都不打）。
+#   （`lift_gen.cpp` 里整段不编 —— 连模型都不建；`analyzeStructure` 也不查询它，
+#   连 stderr 的 `[shim-meta]` 读数都不打）。
 #   ⛔ 发射器一行不改：机制改的是"谁进 `structured`"（判据的结论），IR 的发射规则不变。
 option(LIFT_S7_IAT "S7: resolve `call *[IAT slot]` cleanup bytes from the shim registry (build-time table)" OFF)
 
 target_compile_definitions(emulator-lift-gen PRIVATE
     LIFT_S7_RELAX_INDIRECT=$<BOOL:${LIFT_S7_RELAX_INDIRECT}>
     LIFT_S7_IAT=$<BOOL:${LIFT_S7_IAT}>)
+# ★ ON 档 = **允许 gen 多链**：`registerAotShims` 会实例化整条 shim 注册链（d3d9 → present →
+#   quickjs …）⇒ 只有这一档回到全量 `emulator-lift-runtime`（core 由它 PUBLIC 带进来）。
+#   OFF 档（缺省）⛔ 不链 runtime：那正是"gen 只依赖它需要的内容"的落点（见 core 的注释）。
+if(LIFT_S7_IAT)
+    target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
+endif()
 message(STATUS "LIFT_S7_RELAX_INDIRECT: ${LIFT_S7_RELAX_INDIRECT} (S7 criterion 4: indirect call relaxed; OFF = old criterion)")
 message(STATUS "LIFT_S7_IAT: ${LIFT_S7_IAT} (S7 indirect-call cleanup bytes from the IAT slot; OFF = today's kUnknown)")
 
@@ -709,7 +760,8 @@ endif()
 #   收着）。要让它们进 LTO，那个 TU 必须也是 bitcode；要连 shim 一起内联，整个库都必须
 #   是 bitcode（`LIFT_AOT_LTO_RUNTIME`，默认 OFF）。
 #   ⚠ `-flto` 在**链接行**：一旦链进去的静态库成员里有 bitcode，ld64 / ld.lld 不加它就不跑 LTO 后端 ⇒
-#     这里用 `INTERFACE` 让所有链 `emulator-lift-runtime` 的 target（`emulator-lift-gen` / 测试 exe / AOT 臂）
+#     这里用 `INTERFACE` 让所有链 `emulator-lift-runtime` 的 target（测试 exe / AOT 臂 /
+#     `LIFT_S7_IAT=ON` 时的 `emulator-lift-gen`）
 #     自动继承。**lld-link 相反**：它自动识别 bitcode 跑 LTO，`-flto` 只会打一条
 #     `warning: ignoring unknown argument '-flto'`（warning，不是 error）并忽略 —— 保留它是无害的、
 #     也是 mac / Linux 需要的形状，⛔ 不要按平台收窄（那会改动已被实测的形状而没有收益）。
@@ -738,7 +790,11 @@ if(LIFT_AOT_LTO)
             PROPERTIES COMPILE_OPTIONS "${_LIFT_AOT_ABI_COMPILE_OPTS}")
     endif()
     if(LIFT_AOT_LTO_RUNTIME)
+        # ★ "整个 runtime" 现在 = `emulator-lift-runtime` + `emulator-lift-core`（core 是它的一部分）。
         target_compile_options(emulator-lift-runtime PRIVATE -flto)
+        target_compile_options(emulator-lift-core PRIVATE -flto)
+        # core 里出现 bitcode ⇒ 直接链 core 的 target（默认档的 `emulator-lift-gen`）也要 `-flto`。
+        target_link_options(emulator-lift-core INTERFACE -flto)
     endif()
     if(LIFT_AOT_LTO_ABI OR LIFT_AOT_LTO_RUNTIME)
         # 运行库里出现 bitcode ⇒ 每个链它的 target 的链接行都要 `-flto`。

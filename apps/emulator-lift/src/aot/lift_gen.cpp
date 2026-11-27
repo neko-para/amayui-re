@@ -3936,15 +3936,20 @@ int main(int argc, char** argv) {
     //   这个耦合）；`registerAotShims` 只做 `add` / `addStub`（无宿主副作用、不碰 guest 内存）。
     //   ⛔ 不按微软文档手写 conv/argc 表：清理字节的真源就是 `ShimDef::conv/argc`（= 运行期
     //   `invokePrepared` 用的那两个字段）。
+    //   ★ OFF 档**整段不编**：`analyzeStructure` 在 OFF 时不查询模型（`aot/lift_struct.cpp`
+    //     的 `(void)iat`），而 `registerAotShims` 是所有 `shims/*.cpp` 的唯一装配序列 ⇒ 留在
+    //     OFF 档会把整条 shim 注册链（d3d9 → present → quickjs …）强链进这个**构建期工具**。
+    //     ON 档才需要它（该档允许 gen 多链东西）。
+#if LIFT_S7_IAT
     lift::ShimRegistry shim_meta;
     lift::registerAotShims(shim_meta);
-    const lift::aot::IatModel iat_model = lift::aot::buildIatModel(shim_meta, image);
-#if LIFT_S7_IAT
+    const lift::aot::IatModel iat_model_storage = lift::aot::buildIatModel(shim_meta, image);
+    const lift::aot::IatModel* iat_model = &iat_model_storage;
     {
         // 读数（⛔ 不进判据）：`modelled` = 会按 shim 的约定弹参的槽数；其余是未实现导入 /
         // take_control 的 shim（见 `aot/lift_iat.cpp` 的 `kTakeControlImports`）。
         // 两平台比对它就能发现"注册集随宿主平台变"（design §1.4-1）。
-        const lift::aot::IatModelStats ms = lift::aot::iatModelStats(iat_model);
+        const lift::aot::IatModelStats ms = lift::aot::iatModelStats(*iat_model);
         std::fprintf(stderr,
                      "lift-gen: [shim-meta] imports=%llu modelled=%llu unmodelled=%llu"
                      " (registered=%zu; modelled = fn != nullptr && !take_control)\n",
@@ -3952,10 +3957,12 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(ms.modelled),
                      static_cast<unsigned long long>(ms.unmodelled), shim_meta.size());
     }
+#else
+    const lift::aot::IatModel* iat_model = nullptr;
 #endif
     const lift::aot::StructResult structure =
         lift::aot::analyzeStructure(components, entry_owner, drops.dropped, layout.shim_page,
-                                    layout.shim_page + layout.shim_slots * 4u, &iat_model);
+                                    layout.shim_page + layout.shim_slots * 4u, iat_model);
     // ★ S7：交给发射器的**结论**（判据在上面；发射器只消费）。
     lift::aot::GenStructure gen_structure;
     gen_structure.enabled = opt.s7;

@@ -1519,6 +1519,12 @@ bool AudioEngine::setupFeederContext(std::string* err) {
     //   并发安全：所有容器访问都在 `ShimRegistry::invoke` 里发生，而它持 guest 令牌
     //   （见 runtime/guest_token.h 的不变式）—— feeder 的 guest 指令执行本身不持令牌。
     audio_cpu_ = *cpu_;
+    // ★ 诊断面：这份副本是 **feeder 私有**的那一份（主 CPU 永远 false）。`exec.cpp` 的
+    //   `dumpRecentInsns` 据此打"下面是启动时快照"的提示行 —— 它以前读
+    //   `AudioEngine::onFeederThread()`，那是一条对 `audio.cpp` 的**强链接边**，而本文件属于
+    //   构建期工具 `emulator-lift-gen` 不需要的那一半 runtime（见 CMake 的 `lift-core` 拆分）。
+    //   ⛔ 只在这一份私有副本上置位；`audio_cpu_` 的其它字段照旧（含 `audio = this`）。
+    audio_cpu_.audio_feeder = true;
     if (cpu_->native_overrides) audio_overrides_ = *cpu_->native_overrides;
     // ★ 段级 override 的私有副本：**只装 `feeder_ok == true`** 的项（filter + add，不是整表 `operator=`）。
     //   整表拷会把 `sub_414AC0`（boot 期主线程装载器的中段）也带进 feeder —— feeder 永远走不到它，

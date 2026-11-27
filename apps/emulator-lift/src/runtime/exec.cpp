@@ -10,7 +10,6 @@
 #include <string>
 
 #include "corpus/lst_index.h"
-#include "runtime/audio.h"
 #include "runtime/host_services.h"
 #include "runtime/x86.h"
 
@@ -301,8 +300,11 @@ void dumpRecentInsns(const X86& cpu, std::FILE* out) {
     // ★ feeder 线程的 CPU **不维护** ring：feeder 的块执行路径刻意不调 `noteInsn`
     //   （Ogg 解码热路径；见 `audio.cpp` 的 `runFeederGuest`）⇒ 它里面的是**启动时从主 CPU 拷来的
     //   快照**。⛔ 不要把这段当 feeder 的现场 —— feeder 侧的现场看 `[esp]` / `region` / guest stack。
-    //   判据用公开只读面 `AudioEngine::onFeederThread()`（本线程是不是 feeder），⛔ 不加新状态。
-    if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+    //   判据是 `X86::audio_feeder`（这份 CPU 是不是 feeder 的私有副本；`audio.cpp` 的
+    //   `setupFeederContext` 在 `audio_cpu_ = *cpu_` 之后置位）。⛔ 不读
+    //   `AudioEngine::onFeederThread()`：那会让本 TU 强链 `audio.cpp`，而本 TU 在
+    //   `emulator-lift-gen` 的闭包里（构建期工具不跑音频）。
+    if (cpu.audio_feeder) {
         std::fprintf(out,
                      "  （feeder 线程的 CPU：feeder 不维护 noteInsn ring ⇒ 下面是启动时的快照，"
                      "不是 feeder 现场）\n");

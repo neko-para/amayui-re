@@ -312,6 +312,17 @@ struct X86 {
     //   纯宿主状态，⛔ 不进 guest 内存 / 不改 guest 可见地址。
     HostStopKind stop_kind = HostStopKind::None;
 
+    // ★ 诊断面（**纯宿主状态**）：这份 `X86` 是不是 `AudioEngine` 的 feeder **私有副本**
+    //   （`audio.cpp` 的 `setupFeederContext` 在 `audio_cpu_ = *cpu_` 之后置 true；
+    //   ⛔ 主 CPU 永远 false ⇒ 同一台 Machine 的另一个视图不会被误认成 feeder）。
+    //   唯一用途 = `dumpRecentInsns` 的"feeder 不维护 ring ⇒ 下面是启动时快照"提示行：
+    //   feeder 的块执行路径刻意不调 `noteInsn`（Ogg 解码热路径，见 `audio.cpp` 的 `runFeederGuest`），
+    //   所以它那份 ring 是启动时从主 CPU 拷来的，不能当 feeder 现场读。
+    //   ⛔ 不是 guest 状态、不进 guest 内存、不改任何执行语义；也⛔ 不用它替代
+    //   `AudioEngine::onFeederThread()`（后者的消费者是 message_box / user32_menu 的"我是不是
+    //   在 feeder 线程上"，答的是**当前线程**，与"这份 CPU 是谁的副本"是两件事）。
+    bool audio_feeder = false;
+
     // ---- `rep movs*` / `rep stos*` 的宿主快路径（REQ-01M75XK0XRTSWCZ4G8A5W2GW8）----
     // ★ 纯宿主状态：⛔ 不进 guest 内存、不改 `Insn`、不改 guest 可见地址或寄存器语义。
     //   `rep_bulk = false` ⇒ 走**逐元素臂**（就是加这份快路径之前的实现）⇒ 差分夹具的 oracle
