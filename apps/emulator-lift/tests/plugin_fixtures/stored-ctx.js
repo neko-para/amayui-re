@@ -1,20 +1,38 @@
-// C2b 夹具 · `plugin/render-stored-runctx-rejected`（复审 F2）：把 **RunCtx 存下来**在 render 里用
-// `fail`/`finish`/`quit`/`profile.*` ⇒ 必须 **TypeError**。
+// C2b / S0 夹具 · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用
+// `fail`/`finish`/`quit`/`profile.*`/**`hook.*`** ⇒ 必须 **TypeError**。
 //
-// 判据（红了意味着什么）：render 期 `call_host` 非空（`ctx.read`/`ctx.log` 要用），而那 5 个出口
-//   只判"call_host 非空" ⇒ 插件在 `onTrigger` 里 `saved = ctx`，下一帧 `saved.fail(...)` 就能绕过
-//   `RenderCtx` 的成员表（`fail/finish/quit/profile` 都不在它上面）。
+// 判据（红了意味着什么）：render 期 `call_host` 非空（`ctx.read`/`ctx.log` 要用），而那些出口
+//   只判"call_host 非空" ⇒ 插件在 `onTrigger`/`start` 里 `saved = ctx`，下一帧 `saved.fail(…)` /
+//   `saved.hook.clear()` 就能绕过 `RenderCtx` 的成员表（`fail/finish/quit/profile/hook` 都不在它上面）。
 //   本夹具把**被接受**的 op 收集起来自己抛（`accepted:<op,…>`）⇒ 宿主侧 render 返回 false ⇒ 红。
 //   ★ 主机的 profile 桥是**接了的**（否则 `profile.*` 会因为"没接线"抛 TypeError 而假通过）；
 //     C++ 侧同时断言 host_ops 的 begin/end 计数仍为 0。
-const OPS = ["fail", "finish", "quit", "profile.begin", "profile.end"];
+//   ★ S0：`start` 里真装一条 hook（`savedHook`）—— C++ 侧拿 `instrHookList()` 做**基准**，
+//     render 之后逐字段比对（表没变 ⇒ 那 7 个 hook 出口一个都没被接受）。
+const OPS = [
+    "fail",
+    "finish",
+    "quit",
+    "profile.begin",
+    "profile.end",
+    // ★ S0（缺陷 4）：`ctx.hook` 是**唯一**漏了这一位门的写类出口（7 个 trampoline 都只判了
+    //   `call_host != nullptr`）⇒ 存下来的 RunCtx 能在 render 里装 / 撤 / 覆盖正在跑的 Run 的 hook。
+    "hook.at",
+    "hook.list",
+    "hook.clear",
+    "hook.patch",
+    "hook.capture",
+    "hook.stats",
+    "hook.handle.clear",
+];
 
 let saved = null;
+let savedHook = null;
 
 const plugin = {
     render(ctx) {
         // ★ 必须真的在 start 之后：`saved === null` 时 `saved.fail` 也会抛 TypeError（假通过）。
-        if (saved === null) throw new Error("render before start: RunCtx not stored");
+        if (saved === null || savedHook === null) throw new Error("render before start: RunCtx not stored");
         const accepted = [];
         for (const op of OPS) {
             try {
@@ -23,6 +41,13 @@ const plugin = {
                 else if (op === "quit") saved.quit("from-render");
                 else if (op === "profile.begin") saved.profile.begin("x");
                 else if (op === "profile.end") saved.profile.end();
+                else if (op === "hook.at") saved.hook.at("FIELD.BIN", 0x100);
+                else if (op === "hook.list") saved.hook.list();
+                else if (op === "hook.clear") saved.hook.clear();
+                else if (op === "hook.patch") savedHook.patch({ ptrLocal: 0 }, 1);
+                else if (op === "hook.capture") savedHook.capture({ ints: [0] });
+                else if (op === "hook.stats") savedHook.stats();
+                else if (op === "hook.handle.clear") savedHook.clear();
                 else throw new Error("unknown op: " + op);
             } catch (e) {
                 // 唯一正确的形状：非回调期 ⇒ TypeError（⛔ 不是"接受"、也不是别的错）。
@@ -40,6 +65,10 @@ const plugin = {
     },
     start(ctx) {
         saved = ctx;  // ★ 存下来 —— 这就是旁路的入口
+        // ★ S0：同时存一条**真装上了**的 hook 句柄（render 里对它调 patch/capture/stats/clear）。
+        const handle = ctx.hook.at("FIELD.BIN", 0x100);
+        if (handle === undefined) throw new Error("start: ctx.hook.at failed");
+        savedHook = handle;
         return [ctx.trigger.afterScript("TITLE", { name: "hold" })];
     },
     onTrigger() {

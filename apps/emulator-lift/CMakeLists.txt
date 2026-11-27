@@ -1491,6 +1491,16 @@ add_executable(lift-input-marker tests/input_marker.cpp)
 target_link_libraries(lift-input-marker PRIVATE emulator-lift-runtime)
 add_test(NAME input-marker COMMAND lift-input-marker)
 
+# ---- pure：**脚本指令位置钩子**（S0：owner 生命周期 / patch 恢复 CAS / `--no-s7` 可见性）----
+# ★ 判据（红了意味着什么）见 `tests/instr_hook.cpp` 的头注（5 条 case）：
+#   ① 窗口里别人写同一地址 ⇒ CAS 不写回 + `restore_conflicts`；② 没人写 ⇒ 恢复原 raw；
+#   ③ `instrHookSetInjectionSites(0)` ⇒ `no_injection`（⛔ 不是永远 hits=0 的假句柄）；
+#   ④ `instrHookReleaseOwner(a)` 只删 a 的；⑤ `ctx.edit` 的持久写撤销 pending（持久写赢）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（假 guest 内存 + 只填 `mem` 的 `X86`；零 AOT / 零安装 / 零 LFS）。
+add_executable(lift-instr-hook tests/instr_hook.cpp)
+target_link_libraries(lift-instr-hook PRIVATE emulator-lift-runtime)
+add_test(NAME instr-hook COMMAND lift-instr-hook)
+
 # ---- pure：时间线的 **0 点**（`--anchor-script <id>` = 首次**观察到**进入引擎脚本 <id>）----
 # ★ 顶层无条件注册 ⇒ pure 档：前半是纯 `InputScript`（四个单位直接喂），后半是裸 `Machine` +
 #   自造字节摆在 VM 循环头（⛔ 不依赖游戏安装 / LFS / 真实窗口）。

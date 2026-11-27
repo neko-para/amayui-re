@@ -277,6 +277,15 @@ private:
     //   staged input / 按住 / armed（在 `executor_.atPoint` 的第 ⑥ 步**之前**）。
     //   `finish` / `return []` **不**释放（正常收口：本读点之后那次 click 仍要落地）。
     void releaseRunInput();
+    // ★ S0（缺陷 1）：**Run 的每一条收口路径**都要释放本 Run 的 hook（`instrHookReleaseOwner`,
+    //   不是 `instrHookClear`：后者会把别人的也撤掉）。调用点见 `.cpp` 的收口表。
+    //   为什么必须是 owner 而不是 clear：hook 表是进程级的，而"本 Run 装的"是唯一正确的范围；
+    //   一次 `clear()` 在将来多 Run 时会静默撤掉另一个 Run 的 hook。
+    void releaseRunHooks();
+    // 本 Run 是否已经收口（失败 / finish / quit / runner failed / runner done）。
+    // ★ 读点入口用它兜住"发生在 `onTrigger` **返回之后**"的两类收口：`install([])` 的 done
+    //   与 install 拒绝的 failed（那时回调栈已经拿不到控制权）。
+    bool runClosed() const;
     // ★ F2：`TriggerRunner` 在 `onTrigger` 返回的集合上 `install` 失败（重复 name / Once 回放 /
     //   非法 kind）时，`failed_` 只有 runner 知道 ⇒ 这里把它同步进本类（readout 才能说 `run=failed`）。
     void syncRunnerFailure();
@@ -309,6 +318,10 @@ private:
     Context* ctx_ = nullptr;
     bool in_callback_ = false;
     bool begun_ = false;
+    // ★ S0（缺陷 1）：本 Run 的序号（Run 开始 +1）。它只用来给 `ctx.hook.at` 装的条目**归属**
+    //   （`instrHookAdd(owner,…)`）⇒ Run 收口时可以只撤自己那批。
+    //   v1 一个进程只有一个 Run，但**语义**必须已经是"at() 只属于本 Run"：v2 的多 Run 会直接建在它上面。
+    std::uint64_t run_serial_ = 0;
 
     // ★ F3：本次读点的窗口管理器（`onReadPoint` 存；`onTrigger` 里 `releaseRunInput` 要用它）。
     //   生命周期 = 宿主的 `AotHost::cpu().windows`（活到 run 之后）⇒ 非拥有指针足够；

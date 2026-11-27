@@ -1,5 +1,6 @@
 #include "runtime/instr_hook.h"
 
+#include <algorithm>
 #include <atomic>
 
 #include "runtime/engine_marker.h"   // 脚本身份（id → 名字）与位置公式的唯一来源
@@ -47,6 +48,8 @@ struct Frame {
 
 struct Entry {
     std::uint32_t id = 0;
+    // ★ S0：归属（`PluginHost` 传本 Run 的序号）⇒ Run 收口能只撤自己那批（见 `instrHookReleaseOwner`）。
+    std::uint64_t owner = 0;
     std::string script;
     std::uint32_t script_id = 0;  // 0 = 还没解析（首次命中时按名字解析并缓存）
     std::uint32_t pos = 0;
@@ -59,6 +62,7 @@ struct Entry {
     // 读数
     std::uint64_t hits = 0;
     std::uint64_t restores = 0;
+    std::uint64_t restore_conflicts = 0;  // ★ S0：CAS 判定"窗口里有人写过"的次数（不写回）
     std::uint64_t skips = 0;
     std::uint32_t last_id = 0;
     // ② 读（采样清单 + 最近一次读数）
@@ -73,7 +77,8 @@ struct Pending {
     bool active = false;
     std::uint32_t entry_id = 0;
     std::uint32_t addr = 0;
-    std::uint32_t raw = 0;
+    std::uint32_t raw = 0;      // 覆盖**之前**的 4 字节（恢复目标）
+    std::uint32_t written = 0;  // ★ S0：我**写进去**的编码值（恢复前比对它 = CAS）
 };
 
 struct State {
@@ -82,6 +87,9 @@ struct State {
     // 最近一次 probe 用到的 guest 内存（`clear()` / `remove()` 在没有 X86 时也能把未还原的写恢复）。
     GuestMemory* mem = nullptr;
     std::uint32_t next_id = 1;
+    // ★ S0（缺陷 3）：本构建注入的 `lift_instr_hook` 站点数。缺省 1 = "视作可用"
+    //   （纯 runtime / 测试夹具没有 AOT 形状；只有 AOT 的初始化路径会把它改成真实值）。
+    std::uint32_t injection_sites = 1;
 };
 
 State& state() {
@@ -103,14 +111,32 @@ bool write32(GuestMemory& mem, std::uint32_t ea, std::uint32_t raw) {
     return true;
 }
 
+// ★ S0（缺陷 2）：恢复 = **CAS**，不是无条件写回。
+//   为什么必须比对：窗口 = "写入覆盖值" → "下一条脚本指令派发前"。那一段时间里**整条指令**都在跑
+//   （shim / 读点 / 另一个 Run 回调 / 音频 feeder 都可能写同一个 dword）。无条件写回 `raw` 会把
+//   别人的写**静默抹掉**（文档里的"净变化 0"只在这个窗口没人写过时才成立）。
+//   判据：`当前值 == pending.written`（我写进去的编码值）⇒ 写回 `raw` 并计 `restores`；
+//   否则**不写**、计 `restore_conflicts`（别人的写赢）。
+//   读不到（未提交）⇒ 既不写也不计数：那不是"有人写过"，是"这个地址现在不可读"（与旧口径一致）。
 void restorePendingLocked() {
     State& st = state();
     if (!st.pending.active) return;
-    if (st.mem != nullptr && write32(*st.mem, st.pending.addr, st.pending.raw)) {
-        for (Entry& e : st.entries) {
-            if (e.id == st.pending.entry_id) {
-                e.restores += 1;
-                break;
+    Entry* owner_entry = nullptr;
+    for (Entry& e : st.entries) {
+        if (e.id == st.pending.entry_id) {
+            owner_entry = &e;
+            break;
+        }
+    }
+    if (st.mem != nullptr) {
+        std::uint32_t current = 0;
+        if (read32(*st.mem, st.pending.addr, &current)) {
+            if (current == st.pending.written) {
+                if (write32(*st.mem, st.pending.addr, st.pending.raw) && owner_entry != nullptr) {
+                    owner_entry->restores += 1;
+                }
+            } else if (owner_entry != nullptr) {
+                owner_entry->restore_conflicts += 1;
             }
         }
     }
@@ -225,11 +251,13 @@ const char* instrPatchKindName(InstrPatchKind kind) {
 
 bool instrHooksActive() { return g_active.load(std::memory_order_relaxed); }
 
-std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) {
+std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err) {
     auto fail = [err](const char* why) {
         if (err != nullptr) *err = why;
         return 0u;
     };
+    // ★ S0（缺陷 3）：注入面不存在 ⇒ **当场拒绝**（⛔ 不返回一个永远 hits=0 的句柄）。
+    if (state().injection_sites == 0) return fail("no_injection");
     if (script.empty()) return fail("script_empty");
     if (pos == 0) return fail("pos_zero");
     for (const Entry& e : state().entries) {
@@ -237,6 +265,7 @@ std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const c
     }
     Entry entry;
     entry.id = state().next_id++;
+    entry.owner = owner;
     entry.script = script;
     entry.pos = pos;
     state().entries.push_back(std::move(entry));
@@ -293,6 +322,7 @@ bool instrHookStats(std::uint32_t handle, InstrHookStatus* out) {
     s.max_hits = e->max_hits;
     s.hits = e->hits;
     s.restores = e->restores;
+    s.restore_conflicts = e->restore_conflicts;
     s.skips = e->skips;
     s.last_id = e->last_id;
     s.last_ints = e->last_ints;
@@ -315,11 +345,42 @@ bool instrHookRemove(std::uint32_t handle) {
     return false;
 }
 
+void instrHookReleaseOwner(std::uint64_t owner) {
+    State& st = state();
+    // ① 未还原的那次覆盖若属于本 owner ⇒ 先按 CAS 结算（别人的 pending 一个字节都不动）。
+    //    找不到对应 entry（不该发生）⇒ 也结算：⛔ 不许把一次待恢复的写留在 guest 里。
+    if (st.pending.active) {
+        const Entry* pending_entry = nullptr;
+        for (const Entry& e : st.entries) {
+            if (e.id == st.pending.entry_id) {
+                pending_entry = &e;
+                break;
+            }
+        }
+        if (pending_entry == nullptr || pending_entry->owner == owner) restorePendingLocked();
+    }
+    // ② 撤掉本 owner 的全部 hook（别的 owner 原样）。
+    st.entries.erase(std::remove_if(st.entries.begin(), st.entries.end(),
+                                    [owner](const Entry& e) { return e.owner == owner; }),
+                     st.entries.end());
+    if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+}
+
 void instrHookClear() {
     restorePendingLocked();
     State& st = state();
     st.entries.clear();
     g_active.store(false, std::memory_order_relaxed);
+}
+
+void instrHookSetInjectionSites(std::uint32_t n) { state().injection_sites = n; }
+
+void instrHookCancelPendingAt(std::uint32_t addr) {
+    State& st = state();
+    if (!st.pending.active || st.pending.addr != addr) return;
+    // ★ 持久写赢过瞬时覆盖：**不**写回 raw（这次写是真的），也**不**记 restore / conflict
+    //   —— 什么都没发生，只是那次待恢复作废了（见头文件的口径）。
+    st.pending.active = false;
 }
 
 std::vector<InstrHookStatus> instrHookList() {
@@ -337,6 +398,7 @@ std::vector<InstrHookStatus> instrHookList() {
         s.max_hits = e.max_hits;
         s.hits = e.hits;
         s.restores = e.restores;
+        s.restore_conflicts = e.restore_conflicts;
         s.skips = e.skips;
         s.last_id = e.last_id;
         s.last_ints = e.last_ints;
@@ -387,7 +449,9 @@ void instrHookProbe(X86& cpu) {
             e.skips += 1;
             continue;
         }
-        if (!write32(*cpu.mem, addr, encodeInt(e.value, f.key))) {
+        // ★ S0：`written` 必须留下来 —— 恢复时用它做 CAS 比对（`restorePendingLocked`）。
+        const std::uint32_t written = encodeInt(e.value, f.key);
+        if (!write32(*cpu.mem, addr, written)) {
             e.skips += 1;
             continue;
         }
@@ -395,6 +459,8 @@ void instrHookProbe(X86& cpu) {
         st.pending.entry_id = e.id;
         st.pending.addr = addr;
         st.pending.raw = raw;
+        // ★ S0：记下**我写进去的**编码值 —— 下一次恢复先比它（CAS，见 `restorePendingLocked`）。
+        st.pending.written = written;
         break;  // 一轮派发只允许一条 hook 生效（位置唯一 ⇒ 正常也只有一条命中）
     }
 }

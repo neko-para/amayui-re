@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include "runtime/engine_marker.h"
+#include "runtime/instr_hook.h"  // ★ S0：持久写赢过瞬时覆盖（见下面三处 `instrHookCancelPendingAt`）
 #include "runtime/memory.h"
 #include "runtime/value_codec.h"
 
@@ -171,6 +172,7 @@ bool writeGlobal(GuestMemory& mem, std::uint32_t id, GlobalKind kind, const Glob
         std::uint32_t bits = 0;
         std::memcpy(&bits, &f, sizeof(bits));
         mem.wr32(slot.addr, bits);
+        instrHookCancelPendingAt(slot.addr);  // ★ S0：持久写赢（同一地址的补丁不再写回）
         return set(GlobalError::None);
     }
 
@@ -178,6 +180,9 @@ bool writeGlobal(GuestMemory& mem, std::uint32_t id, GlobalKind kind, const Glob
     const GlobalError keyed = readIntKey(mem, slot.engine, &key);
     if (keyed != GlobalError::None) return set(keyed);
     mem.wr32(slot.addr, encodeInt(value.u32, key));  // ★ ENC，⛔ 不是明文
+    // ★ S0（缺陷 2 的另一半）：这次是**持久写** ⇒ 若同一地址正挂着一条 hook 的临时覆盖，
+    //   撤销那次待恢复（"持久写赢过瞬时覆盖"；⛔ 不要等下一拍 CAS 才保住这次写）。
+    instrHookCancelPendingAt(slot.addr);
     return set(GlobalError::None);
 }
 
@@ -190,6 +195,7 @@ bool writeGlobalFloatBits(GuestMemory& mem, std::uint32_t id, std::uint32_t bits
     const GlobalError located = locateSlot(mem, GlobalKind::Float, id, &slot);
     if (located != GlobalError::None) return set(located);
     mem.wr32(slot.addr, bits);  // float 是裸 32 位：逐位写，不过 codec
+    instrHookCancelPendingAt(slot.addr);  // ★ S0：与 `writeGlobal` 同一条口径
     return set(GlobalError::None);
 }
 

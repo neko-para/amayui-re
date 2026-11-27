@@ -3062,7 +3062,8 @@ std::string hexEa(std::uint32_t ea) {
 
 bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_t roots,
                  std::size_t entries, std::size_t functions,
-                 const std::vector<IntrinsicEntry>& intrinsics, std::string* err) {
+                 const std::vector<IntrinsicEntry>& intrinsics, std::size_t instr_hook_sites,
+                 std::string* err) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
         if (err) *err = "cannot write `" + path + "`";
@@ -3092,6 +3093,12 @@ bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_
             file << (i + 1 == intrinsics.size() ? "\n" : " \\\n");
         }
     }
+    // ★ S0（缺陷 3）：这一趟**实际注入**了几个 `call void @lift_instr_hook` 站点。
+    //   `--no-s7`（`structure_.enabled == false`）⇒ 注入分支前的 `ret` 提前返回 ⇒ 0；
+    //   闭包没覆盖脚本派发 EA ⇒ 也是 0。AOT 启动时把它交给 `instrHookSetInjectionSites`
+    //   ⇒ 插件侧 `ctx.hook.at` 会在**装的那一刻**响亮失败（`no_injection`），而不是静默永不命中。
+    //   ★ 仍然只有"计数"这一个事实（无时间戳 / 无路径）⇒ 同一 PE 生成逐字节相同。
+    file << "#define LIFT_AOT_PIN_INSTR_HOOK_SITES " << instr_hook_sites << "u\n";
     file.close();
     if (!file) {
         if (err) *err = "write to `" + path + "` failed";
@@ -4220,9 +4227,18 @@ int main(int argc, char** argv) {
     if (!opt.pin.empty()) {
         std::string err;
         if (!writeAotPin(opt.pin, image, roots.size(), dispatch_entries.size(), components.size(),
-                         intrinsics.entries, &err)) {
+                         intrinsics.entries, static_cast<std::size_t>(stats.s7_instr_hook_sites), &err)) {
             std::fprintf(stderr, "emulator-lift-gen: --pin failed: %s\n", err.c_str());
             return 2;
+        }
+        // ★ S0（缺陷 3）：注入站点数为 0 而这一趟真的要跑插件（`--no-s7` / 闭包没覆盖派发 EA）时
+        //   必须**说一声** —— 而且 `--quiet` 也照说：那是"插件面静默失效"的唯一构建期消息面
+        //   （运行期还有一条：`ctx.hook.at` 会响亮返回 `no_injection`）。
+        //   ⛔ 不 fail：生成器不认识插件，而且这是合法的构建形状（`--no-s7` 是既有回退档）。
+        if (stats.s7_instr_hook_sites == 0) {
+            std::fprintf(stderr,
+                         "lift-gen: [S0] 脚本派发注入站点 = 0（--no-s7 / 闭包未覆盖派发 EA）"
+                         " => 插件 ctx.hook.* 在本构建里永不命中（LIFT_AOT_PIN_INSTR_HOOK_SITES=0）\n");
         }
         if (!quiet()) std::printf("lift-gen: pin %s (sha256=%s entry=%08X)\n", opt.pin.c_str(), image.sha256.c_str(),
                     image.entry_ea);
