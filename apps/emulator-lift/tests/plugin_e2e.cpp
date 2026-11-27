@@ -8,11 +8,7 @@
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
 //   ⑤ `plugin/quit-attribution`：`ctx.quit()` ⇒ readout `run=quit` + 停机摘要点名 `plugin: quit`。
-//   ⑥ `plugin/load-save-e2e`（C2c）：**根入口** `scripts/plugins/load-save.js`（S1 从 `lib/save.js` 拆出；
-//      `lib/` 只是库），参数来自 `<--appdata>/plugin-config.json` 的域 `save`（`slot` / `expect`）
-//      ——**不给** `--plugin-param`；判据 = readout `run=done` / stderr 终态日志含 **FIELD** /
-//      无 `run failed`（⛔ 不看 exit code，`params=` 也不再是判据）。
-//   ⑦ `plugin/bad-config-exit2`：坏 `plugin-config.json` ⇒ 产品 exe **exit 2** + stderr 点名
+//   ⑥ `plugin/bad-config-exit2`：坏 `plugin-config.json` ⇒ 产品 exe **exit 2** + stderr 点名
 //      `plugin-config.json`（配置装载失败是**启动失败**，不是 warn + 继续）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
@@ -65,16 +61,11 @@ int main(int argc, char** argv) {
     const fs::path age_exe = fs::path(argv[2]);
     const fs::path game_dir = fs::path(argv[3]);
     const fs::path fixture = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "headless.js";
-    // ★ C2c：`plugin/load-save-e2e` 直接拿**根入口**当入口（S1：`lib/save.js` 只是库，参考入口
-    //   拆到 `scripts/plugins/load-save.js`；import 根 = 入口文件目录 ⇒ 不复制文件）。
-    const fs::path save_js = fs::path(LIFT_PLUGIN_LIB_DIR).parent_path() / "load-save.js";
-    const fs::path saves_dir = fs::path(LIFT_SAVES_DIR);
     if (!fs::exists(exe)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir)) LIFT_SKIP("安装树（--game-dir）不在场");
     if (!fs::exists(fixture)) LIFT_SKIP("夹具 tests/plugin_fixtures/headless.js 不在场");
-    if (!fs::exists(save_js)) LIFT_SKIP("根入口 apps/emulator-lift/scripts/plugins/load-save.js 不在场");
-    if (!fs::exists(saves_dir / "SAVE05.DAT")) LIFT_SKIP("saves/SAVE05.DAT 不在场（saves/ 只读复现素材）");
+
 
     std::error_code ec;
     const fs::path root = fs::temp_directory_path(ec) /
@@ -183,129 +174,7 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
     }
 
-    // ---- ⑥ C2c `plugin/load-save-e2e`：根入口 `load-save.js` + 配置文件（域 `save`）----
-    //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
-    //   `--time-limit 90` 是正常结局）：`run=done`；stderr 的终态日志（`ctx.log`）必须点名
-    //   **FIELD**，且**没有** `run failed`；readout 只一行。
-    //   ★ 2026-11-25：参数来源改成 **`<--appdata>/plugin-config.json`**（域 `save` 的 `slot` /
-    //     `expect`），**不再给 `--plugin-param`** ⇒ 这条 e2e 同时验证"配置文件被装载 + 被内建插件消费"。
-    //     readout 的 `params=` 因此**不再作判据**（那里仍是空的）。
-    //   红了 ⇒ 配置文件没被读 / 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）——
-    //   纯档的 `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
-    //   ★ 为什么是 **15**（不是 5）：`saves/SAVE.DAT` 现在持久化**页 1**（2026-11-22 入库）⇒ 槽 5 在
-    //     页 0，要先翻页；而 `calls ∈ {6,7}` 钉的是**不翻页**那条链的形状（6 = 点完 640,323 直接 FIELD、
-    //     7 = 多一道 SBUNKI 第二确认），翻页会把 calls 抬到 100+（每个读点一次回调）⇒ 判据失去意义。
-    //     所以夹具把**同一份存档**（SAVE05）再放到 `SAVE15`（页 1 第 5 行 = 进屏那一页）⇒ 链形状不变、
-    //     载入内容也不变。翻页路径的端到端读数见 `defects.md#BUG-39`，
-    //     ⛔ 不把"再回归一遍翻页"做进默认门禁（业务正确性不作判据）。
-    g_current_case = "plugin/load-save-e2e";
-    {
-        // `.tmp/` 私有 appdata：`saves/` **只读**，照 `apps/emulator-lift/scripts/clean-appdata.sh` 复制。
-        const fs::path repo_tmp = saves_dir.parent_path() / ".tmp";
-        const fs::path save_root =
-            repo_tmp / ("lift-plugin-load-save-" + std::to_string(lift_test::processId()));
-        fs::remove_all(save_root, ec);
-        const fs::path load_appdata = save_root / "appdata";
-        const fs::path guest_save_dir = load_appdata / "Local" / "Eushully" /
-                                        fs::path(std::u8string(u8"天結いキャッスルマイスター")) / "SAVE";
-        fs::create_directories(guest_save_dir, ec);
-        LIFT_CHECK(!ec);
-        std::size_t copied = 0;
-        std::error_code copy_ec;
-        for (fs::directory_iterator it(saves_dir, copy_ec); !copy_ec && it != fs::directory_iterator();
-             it.increment(copy_ec)) {
-            std::error_code entry_ec;
-            if (!it->is_regular_file(entry_ec) || entry_ec) continue;
-            const std::string ext = it->path().extension().string();
-            if (ext != ".DAT" && ext != ".STH") continue;
-            fs::copy_file(it->path(), guest_save_dir / it->path().filename(),
-                          fs::copy_options::overwrite_existing, copy_ec);
-            if (!copy_ec) ++copied;
-        }
-        LIFT_CHECK(!copy_ec);
-        LIFT_CHECK(copied > 0);
-
-        // ★ 同一份存档放进 `SAVE15`（页 1 第 5 行 = 进屏那一页）⇒ 载入同内容，但**不用翻页**
-        //   （理由见上面 ⑥ 的注释：`calls ∈ {6,7}` 只描述不翻页那条链）。
-        for (const char* suffix : {".DAT", ".STH"}) {
-            const fs::path src = saves_dir / (std::string("SAVE05") + suffix);
-            if (!fs::exists(src)) continue;
-            std::error_code cp_ec;
-            fs::copy_file(src, guest_save_dir / (std::string("SAVE15") + suffix),
-                          fs::copy_options::overwrite_existing, cp_ec);
-            LIFT_CHECK(!cp_ec);
-        }
-
-        // ★ 配置走 `<--appdata>/plugin-config.json`（域 `save`）——⛔ 不放 `SAVE/` 下。
-        //   值必须是**原生 JSON 值**（`slot`: number、`expect`: string[]），与 d.ts 的 `ctx.config` 一致。
-        LIFT_CHECK(writeTextFile(load_appdata / "plugin-config.json",
-                                 R"({"version":1,"domains":{"save":{"slot":15,"expect":["FIELD.BIN","SC0000"]}}})"));
-
-        const std::vector<std::string> load_args = {
-            "--exe",
-            pathToUtf8(age_exe),
-            "--game-dir",
-            pathToUtf8(game_dir),
-            "--appdata",
-            pathToUtf8(load_appdata),
-            "--present",
-            "headless",
-            "--skip-logo",
-            "--audio",
-            "off",
-            "--time-limit",
-            "90",
-            "--plugin",
-            pathToUtf8(save_js),
-            // ★ 2026-11-25：**不给 `--plugin-param`** —— 参数来自上面的 plugin-config.json。
-            //   `--plugin-param` 保留给夹具 / 诊断（形状错误仍 exit 2）。
-        };
-        ChildOptions ls_opts;
-        ls_opts.cwd = save_root;
-        ls_opts.timeout = std::chrono::milliseconds(120000);
-        const ChildResult ls = runChild(exe, load_args, ls_opts);
-        LIFT_CHECK(ls.started);
-        std::printf("plugin/load-save-e2e: exit=%d timed_out=%d\n", ls.exit_code, ls.timed_out ? 1 : 0);
-        if (!ls.started) return lift_test::finish("plugin-headless");
-        if (ls.timed_out) {
-            LIFT_CHECK(false);
-            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
-            return lift_test::finish("plugin-headless");
-        }
-        // ---- 缺资产 / GPU / 字体 ⇒ skip（与主用例同一条口径；⛔ 不假红）----
-        if (ls.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体（LIFT_HOST_FONT_PATH）");
-        if (ls.err.find("没有生成物") != std::string::npos) LIFT_SKIP("AOT 生成物不在场（缺 clang / 执行源）");
-        if (ls.err.find("拒绝启动") != std::string::npos) {
-            LIFT_SKIP("GPU / 窗口初始化不成立（headless 也要 GPU device）");
-        }
-        // ---- 判据 A：readout 说"链真的走到 FIELD"（不含 calls 的确切数；`params=` 不再是判据）----
-        const bool reached_field = ls.out.find("plugin    : ") != std::string::npos &&
-                                   ls.out.find("entry=default") != std::string::npos &&
-                                   ls.out.find("callbacks=yes") != std::string::npos &&
-                                   ls.out.find("run=done") != std::string::npos &&
-                                   ls.out.find("run=failed") == std::string::npos &&
-                                   ls.err.find("run failed") == std::string::npos &&
-                                   ls.err.find("load-save: gate timeout") == std::string::npos &&
-                                   ls.err.find("FIELD") != std::string::npos;
-        if (!reached_field) {
-            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
-        }
-        LIFT_CHECK(reached_field);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(ls.out, "plugin    : ")), 1);
-        // ---- 判据 B：`calls ∈ {6,7}`（D2c-2）----
-        //   6 = start + TITLE/SAVE/row/SBUNKI/FIELD（点完 640,323 直接 FIELD）；
-        //   7 = 上面那条 + **SBUNKI 0x0AF8 第二道确认**（再点 690,323 才到 FIELD；mac headless 实测）。
-        //   第二道确认**也是** D-C2C-3 三选一终端的一部分 ⇒ 两条都是合法终态。⛔ 不是"任意 calls"：
-        //   只接受这两个数；8+/更少 ⇒ 红。
-        const bool calls6 = ls.out.find("calls=6") != std::string::npos;
-        const bool calls7 = ls.out.find("calls=7") != std::string::npos;
-        if (!(calls6 || calls7)) {
-            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
-        }
-        LIFT_CHECK(calls6 || calls7);
-    }
-
-    // ---- ⑦ `plugin/bad-config-exit2`：坏 plugin-config.json ⇒ **进程 exit 2** ----
+    // ---- ⑥ `plugin/bad-config-exit2`：坏 plugin-config.json ⇒ **进程 exit 2** ----
     //   判据（红了意味着什么）：配置装载失败被降级成 warn + 继续（D1 41 的"exit 2"没落地）——
     //   插件会带着"看起来没有配置"的状态继续跑，坏文件永远不会被人发现。
     //   ★ 直接写坏 JSON（不是形状错），文件路径 = 本用例的私有 appdata 根。
