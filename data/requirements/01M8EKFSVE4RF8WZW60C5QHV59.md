@@ -2,8 +2,10 @@
 
 - id: REQ-01M8EKFSVE4RF8WZW60C5QHV59
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M8EKFAP4QJY9G12K7KB9YEQB
+- verify: apps/emulator-lift/tests/quickts.cpp#quickts/ts-flag-load-bearing
+- done_reason: E1 引擎移植 + .ts/.mts 端到端 + erasableSyntaxOnly 门禁已实现；enum/JSX（E2）、extensionless import、HUD .ts、MSVC、perf A/B 另立 REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB。
 - tags: [emulator-lift, plugin, qjs, typescript, quickts]
 
 ## 目标
@@ -67,5 +69,6 @@
 
 ## 进展（2026-11-28）
 
-- **S1 已实现**（dev `d4668eb` + `d819864`，合入 main）：`quickts_e1.h`（1,125 行，上游 `66e2847`，MIT，E1 only）+ `quickjs.c` 18 个插入区 + `JS_EVAL_FLAG_TYPESCRIPT`；`.js` flags off/on 字节码 16/16 恒等 + 内联 GLOBAL 13/13；examples 9/9 编译且零 module request；`.ts`/`.mts` 装载（`.js` 不加 flag、`.ts` 强制 module、moduleLoad 同 flag）；`plugin_search` 候选 `.js`→`.ts`→`.mts`；`erasableSyntaxOnly` 进 examples tsconfig；`__text` +8,243 B（+1.27%）。
-- **待做（S4/S5）**：examples 迁 v2、`plugin.d.ts` / README / 文档；extensionless import、HUD `.ts`、product-exe `.ts` e2e、MSVC 未证、enum/JSX 按需（E2）。
+- **S1 已实现**（dev `d4668eb` + `d819864`）：`quickts_e1.h`（1,125 行，上游 `66e2847`，MIT，E1 only）+ `quickjs.c` 18 个插入区 + `JS_EVAL_FLAG_TYPESCRIPT`；`.js` flags off/on 字节码 16/16 恒等 + 内联 GLOBAL 13/13；examples 9/9 编译且零 module request；`.ts`/`.mts` 装载；`plugin_search` 候选；`erasableSyntaxOnly` 常设门禁；`__text` +8,243 B。
+- **S4 已实现**（dev `6c41696`）：9 个 examples 迁 v2、`plugin.d.ts` 的 v1 面 deprecated、`scripts/plugins/README.md` 更新。
+- **未做（已另立单 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`）**：enum/JSX（E2，按需）、extensionless import、HUD `.ts`、product-exe `.ts` e2e、MSVC（cl）、perf A/B。

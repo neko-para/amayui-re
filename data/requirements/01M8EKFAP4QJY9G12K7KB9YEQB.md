@@ -2,8 +2,10 @@
 
 - id: REQ-01M8EKFAP4QJY9G12K7KB9YEQB
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
+- verify: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/global-log
+- done_reason: S0–S4 已实现并逐片复审（插件内 API：VM 指令点 + TypeScript + RunCtx/Tick/at/once/task + 全局 log + examples）；scenario/lib 迁移、C5 dispatch、perf A/B、FIELD 体验、MSVC 另立 REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB。
 - tags: [emulator-lift, plugin, qjs, typescript, design]
 
 ## 一句话
@@ -55,12 +57,14 @@
 
 ## 进展（2026-11-28）
 
-- **S0 已实现并合入 main**（dev `177e93d`）：4 条静默缺陷修完（hook 归 Run owner、全部收口路径释放；patch 恢复 = CAS + `restore_conflicts`；render 期 7 个 `ctx.hook.*` 拒绝；`--no-s7` 注入站点进 `lift_pin.h` ⇒ `no_injection`）。复审 accept-with-findings（无 S0/S1 级）。
-- **S1 已实现并合入 main**（dev `d4668eb` + `d819864`）：quickts E1 擦除进 quickjs-ng（`.js` flags off/on 字节码 16/16 恒等；examples 9/9 零 module request）；`.ts`/`.mts` 插件端到端；`tsc --erasableSyntaxOnly` 进 examples 门禁。复审 accept-with-findings。
-- **S2a 已实现并合入 main**（dev `d72afb2`）：指令点 sink（runtime→ui，无 JS 类型）+ `handle.onTick(fn)` 只读 tick + 每入口 drain（同一 CPU 预算窗）+ Run 收口释放 JS handler。复审 accept-with-findings。
-- **进行中**：S2b（`once`/`task`/timeout + Run 存活语义）→ S2c（`ctx.at` 链 + `Tick` 分层）→ S3 → S4。
-- 证据：`.tmp/plugin-v2/{plan.md,s0/,s1/,s2a/}`（含复审报告与变异读数）。
+- **S0**（dev `177e93d`）：4 条静默缺陷修完（hook owner 生命周期 / patch CAS / render 期拒绝 / `--no-s7` 可见）。
+- **S1**（`d4668eb` + `d819864`）：quickts E1 进 quickjs-ng（`.js` 字节码 16/16、examples 9/9 零 module request）+ `.ts` 端到端 + `erasableSyntaxOnly` 门禁。
+- **S2a–S2c**（`d72afb2` … `6807ada`）：指令点 sink + `onTick` + 每入口 drain；`once`/`task`/timeout/存活；`ctx.at` 五形态 + 链 + `Tick` 只读/写面 + 多槽 Pending + stale；每片独立复审（accept-with-findings，findings 均已修）。
+- **S3**（`bf3d90a`）：插件全局 `log`（Run/tick/render/timeout；classic HUD 不装）。
+- **S4**（`6c41696`）：9 个 examples 迁 v2、`plugin.d.ts` v1 面 deprecated、README 更新。
+- 门禁：`pnpm test` 181 / `typecheck` 0 / `verify` 448 pass+2 skip / `requirements` 6/6；dev 全量 `ctest` 144/144。
 
-- **S2b 已实现**（dev `24d312b` + `bc45164`）：`ctx.once` / `ctx.task` / timeout 泵 / Run 存活（tasks ∪ onces ∪ onTick 订阅）/ `start` 可单独存在；复审的 S2 四条已修。
-- **S2c-1 已实现**（dev `a5a99d5` + `5846d23`）：`ctx.at` 链（注册序 / `next()` 截断 / `off`）+ `Tick` 只读（`now/local/log`，DEC + 越界 undefined）+ stale Tick + `{opcode}` matcher；复审 S2（patch `break` 饿死同点订阅）已修。
-- **S2c-2 已实现**（dev `4f9278c` + `6807ada`）：`ctx.at` 五种 `where` + `Tick.edit/input/patch` + 多槽 `Pending`；复审 1 条 S2 已修。
+## 未做（明确，已另立单 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`）
+
+- scenario/lib 迁移、C5 dispatch / Run 实体、perf A/B（hook ≤1.5% 等）、FIELD 人工体验、MSVC（cl）。
+- 本单收口的是**插件内 API**（VM 指令点 + TypeScript + RunCtx/Tick/at/once/task）；上述四项各有自己的判据，⛔ 不在本单里虚报。

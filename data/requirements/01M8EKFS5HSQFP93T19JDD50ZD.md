@@ -2,8 +2,10 @@
 
 - id: REQ-01M8EKFS5HSQFP93T19JDD50ZD
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M8EKFAP4QJY9G12K7KB9YEQB
+- verify: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/at-chain-order
+- done_reason: 插件内 API（RunCtx/Tick、at/once/task、drain、timeout、local/edit/input/patch、全局 log）已实现并有守卫；Run 实体/dispatch busy（C5）与 scenario/lib 迁移另立 REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB。
 - tags: [emulator-lift, plugin, qjs, api, design]
 
 ## 目标
@@ -71,9 +73,7 @@
 - **输入触发点**：`node tools/opcodes.mjs --handlers` 可机械点名 114 `wait-for-input` / 205 / 257 `poll-input` / 540 `wait`（handler EA 有），但"哪条 = 输入到达"仍**待核**。
 - **timeout 没有独立泵**：只能挂读点（`plugin_host.cpp:231-259`）与 render 帧（`present_sdl.cpp:722-729`）两个既有泵；`aot_run.cpp`/`machine.cpp` 不许出现 pump 词（守卫 `input-plan-shape.test.mjs:96`）。
 - **建议顺序**：指令点 sink（只读命中）→ drain + 预算窗 → `once`/timeout → `at` 链 → `Tick` 分层。
-
 ## 进展（2026-11-28）
-- **S2a 已实现**（dev `d72afb2`）：指令点 sink + `handle.onTick` 只读 tick + 每入口 drain（同一 2 ms CPU 窗）+ Run 收口释放 JS handler；守卫 `instr-hook/sink-*` / `plugin/point-hit*` / `drain-*` + 形态 ⑦⑧ + 2 变异。
-- **待做**：S2b `once`/`task`/timeout 泵（挂读点/render 既有泵）+ Run 存活；S2c `ctx.at` 链 + `Tick` 分层；顺手补 d.ts `onTick`/`InstrTick` 与 tick 预算字段保存/恢复。
 
-- **S2b / S2c-1 / S2c-2 已实现**（dev `24d312b` / `a5a99d5` / `4f9278c`+`6807ada`）：`once`/`task`/泵/存活；`ctx.at` 五种 `where` + 链 + `off`；`Tick` 的 `now/local/edit/input/patch` + stale + 多槽 Pending。**剩余**：全局 `log`（S3）、examples 迁 v2 / 场景脚本迁移（S4）。
+- **已实现**（dev `d72afb2` → `6807ada`）：S2a sink/onTick/每入口 drain；S2b `once`/`task`/timeout/存活；S2c-1 `ctx.at` 链 + `Tick` 只读；S2c-2 `where` 五形态 + `Tick` 写面 + 多槽 `Pending`；S3 全局 `log`。守卫与变异逐片实测（red→green），复审 accept-with-findings，findings 已修。
+- **收口口径**：本单 = **插件内 API**。Run 实体 / `dispatch busy`（C5）与 scenario/lib 迁移按裁决另立 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`；不在本单里虚报。
