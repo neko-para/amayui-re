@@ -119,6 +119,10 @@ quickjs-ng 是 MIT、单层 C、可静态链进 exe（发行树不多一个 DLL�
   CTest `quickts` 的 `js-bytecode-identical`（16/16）+ `js-global-bytecode-identical`（13/13）：
   同一引擎 flags 0 / flags on 各 `JS_Eval(COMPILE_ONLY)` 一次，
   `JS_WriteObject(BYTECODE | STRIP_SOURCE)` 逐字节比较（**故意不** STRIP_DEBUG：pc2line 要在比较里）。
+- **宿主按扩展名加 flag**（S1b）：`src/ui/script_quickjs.cpp` 的 `tsFlags(origin)` 是**唯一**判定
+  （`.ts` / `.mts`，ASCII 大小写不敏感；`.js` 不加），被四处 `JS_Eval` 共用：插件入口 / module
+  loader（被 import 的 `lib/*.ts`）/ classic 探针 / 一般 `load`。`.ts` 入口强制 module
+  （`JS_DetectModule` 没有 flags 参数，宿主不拿它探测 `.ts`）。
 
 ### 来源 / 删了什么
 

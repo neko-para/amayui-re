@@ -1277,6 +1277,30 @@ bool isFilePathLike(const std::string& name) {
 
 char asciiFold(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
 
+// ASCII 大小写不敏感的**后缀**判据（`suffix` 必须是 ASCII 小写）。
+bool endsWithAsciiFold(const std::string& text, const std::string& suffix) {
+    if (text.size() < suffix.size()) return false;
+    const std::size_t at = text.size() - suffix.size();
+    for (std::size_t i = 0; i < suffix.size(); ++i) {
+        if (asciiFold(text[at + i]) != suffix[i]) return false;
+    }
+    return true;
+}
+
+// `.ts` / `.mts` 的宿主判据（**唯一实现**；ASCII 大小写不敏感）。
+// ★ 为什么只看扩展名：ng 的公开 API 没有"带 flags 的 module 探测"（`JS_DetectModule` 只收源码），
+//   而 `JS_EVAL_FLAG_TYPESCRIPT` 只能由调用方传 ⇒ 宿主只能按**来源**判。
+// ★ `.js` **永远**返回 0：这是 `.js` 行为逐字节不变的机械保证（补丁的所有钩子都在 `s->ts` 里）。
+// ★ `builtin:hud` 这类非路径 origin 没有扩展名 ⇒ 0（HUD 的 `.ts` 不在本轮范围）。
+bool hasTypeScriptExtension(const std::string& name) {
+    return endsWithAsciiFold(name, ".ts") || endsWithAsciiFold(name, ".mts");
+}
+
+// 四处 `JS_Eval` 共用：`.ts` / `.mts` ⇒ `JS_EVAL_FLAG_TYPESCRIPT`；其余（含 `.js`）⇒ 0。
+int tsFlags(const std::string& origin) {
+    return hasTypeScriptExtension(origin) ? JS_EVAL_FLAG_TYPESCRIPT : 0;
+}
+
 // resolved 是否**在 root 之下**（root 本身不算：它是目录）。空 root = "相对 cwd 的当前目录"。
 bool pathWithinRoot(const std::string& path, const std::string& root) {
     if (path.empty()) return false;
@@ -1386,8 +1410,10 @@ JSModuleDef* moduleLoad(JSContext* ctx, const char* module_name, void* opaque) {
         return nullptr;
     }
     if (impl != nullptr) impl->module_sources[name] = source;  // 先记源码：嵌套 import 的定位要用
+    // ★ S1b：按**被导入模块名**的扩展名加 TS flag（`lib/*.ts` 被当 JS 解析正是这里）。
+    //   `.js` 依赖 ⇒ 0（行为与之前逐字节相同）。
     Value fn(ctx, JS_Eval(ctx, source.c_str(), source.size(), name.c_str(),
-                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY));
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY | tsFlags(name)));
     if (fn.isException()) return nullptr;  // 异常留在 ctx 上（带被导入文件的 line:col）
     if (JS_ResolveModule(ctx, fn.raw()) < 0) {
         // ★ 不能 `JS_FreeValue` 一个 module 值：quickjs.c:7176 的 `case JS_TAG_MODULE` 是 `abort()`。
@@ -1461,8 +1487,12 @@ void appendModuleErrorAt(Impl& impl, std::string* err) {
 }
 
 // classic 能否**只编译**通过（不执行）：这是"旧语义优先"的探针 —— 能编就绝不走 module。
-bool classicParses(JSContext* ctx, const std::string& source, const std::string& origin) {    Value fn(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
-                          JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT | JS_EVAL_FLAG_COMPILE_ONLY));
+// ★ S1b：`.ts` / `.mts` 也带 TS flag（对 `.ts` 而言这条探针用不到 —— `load()` 里 `.ts` 直接判
+//   module；但"同一个判定"只有一个实现，⛔ 不留一条会按 JS 解析 `.ts` 的旁路）。
+bool classicParses(JSContext* ctx, const std::string& source, const std::string& origin) {
+    Value fn(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
+                          JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT | JS_EVAL_FLAG_COMPILE_ONLY |
+                              tsFlags(origin)));
     if (fn.isException()) {
         qjs::clearException(ctx);  // 探针失败不是错误（可能就是 module 语法），⛔ 不许把异常留到下一次
         return false;
@@ -1599,8 +1629,14 @@ public:
         // ---- 检测（文件头 §5）：classic 能编就绝不走 module（hud 回退的 classic 语义优先）；编不过才问
         //      `JS_DetectModule`（它把源码当 module 编一次）。★ 不能只看 DetectModule：0.18.0 对
         //      普通 classic 脚本也返 true（`quickjs.c:64939` 先置 `is_module = true`）。
-        const bool classic_ok = classicParses(impl->ctx, source, origin);
-        const bool is_module = !classic_ok && JS_DetectModule(source.c_str(), source.size());
+        // ★ S1b：`.ts` / `.mts` 入口**直接判 module**，跳过 classic / DetectModule ——
+        //   ng 的公开探测 API 没有 flags（`JS_DetectModule` 会把 `interface` 开头的 `.ts` 当 JS 编），
+        //   而 `--plugin` 本来就强制 module；一般 `load` 的 `.ts` 只能是 module。
+        //   `builtin:hud` 这类非路径 origin 没有扩展名 ⇒ 这条不生效（行为与之前相同）。
+        const bool ts_entry = hasTypeScriptExtension(origin);
+        const bool classic_ok = !ts_entry && classicParses(impl->ctx, source, origin);
+        const bool is_module =
+            ts_entry || (!classic_ok && JS_DetectModule(source.c_str(), source.size()));
         if (is_module) {
             impl->module_entry_is_path = isFilePathLike(origin);
             impl->module_root = pathDirName(origin);
@@ -1609,8 +1645,9 @@ public:
         }
 
         Value eval_result(impl->ctx, JS_Eval(impl->ctx, source.c_str(), source.size(), origin.c_str(),
-                                             is_module ? JS_EVAL_TYPE_MODULE
-                                                       : (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT)));
+                                             (is_module ? JS_EVAL_TYPE_MODULE
+                                                        : (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT)) |
+                                                 tsFlags(origin)));
         if (eval_result.isException()) {
             qjs::takeException(impl->ctx, origin, err);
             // resolve 期拒绝（bare / 绝对 / data: / 逃逸 / 读不到文件）没有 JS 栈 ⇒ 用源码里
@@ -4855,8 +4892,10 @@ std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const
     // ★ 诊断（`module_load_us`）：装载 = 编译 + resolve + 求值 + drain。它**在** `call()` 的预算起点
     //   **之前**完成 ⇒ 2 ms 不含装载；这个读数用来证明（而不是声称）这一点。
     const std::uint64_t module_load_start_ns = steadyNowNs();
+    // ★ S1b：`opts.origin` 是插件**绝对路径** ⇒ `.ts` / `.mts` 入口在这里拿到 flag
+    //   （`--plugin x.ts` 的必经点）；`.js` ⇒ 0（行为不变）。
     Value module_value(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
-                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY));
+                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY | tsFlags(origin)));
     if (module_value.isException()) {
         qjs::takeException(ctx, origin, err);
         appendModuleErrorAt(*impl, err);

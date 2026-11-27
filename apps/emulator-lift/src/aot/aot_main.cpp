@@ -809,8 +809,9 @@ int main(int argc, char** argv) {
             for (const std::string& candidate : resolved.searched) {
                 std::fprintf(stderr, "  %s\n", candidate.c_str());
             }
-            std::fputs("  （id 只匹配 ^[A-Za-z0-9_-]{1,64}$；含 `.` / `/` / `\\` 的写法一律按路径，"
-                       "`.js` 后缀天然是路径）\n",
+            std::fputs("  （id 只匹配 ^[A-Za-z0-9_-]{1,64}$；候选 = <id>.js / <id>.ts / <id>.mts，"
+                       "`.js` 优先；含 `.` / `/` / `\\` 的写法一律按路径，`.js` / `.ts` / `.mts` "
+                       "后缀天然是路径）\n",
                        stderr);
             return 2;
         }

@@ -7,7 +7,12 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true
+    "exactOptionalPropertyTypes": true,
+    // ★ S1b 常设门禁：插件将来要**直接在宿主 QJS 里跑**（quickts E1 只做纯类型擦除）⇒
+    //   enum / 构造参数属性 / 含值 namespace / `import =` 这类"要生成代码"的写法必须在
+    //   类型检查期就红，而不是等到运行期。`erasableSyntaxOnly` 只查"可擦"，运行期覆盖见 CTest
+    //   `plugin-runtime` 的 `plugin/ts-module` / `quickts`。
+    "erasableSyntaxOnly": true
   },
   "include": ["./*.ts", "../plugin.d.ts"]
 }

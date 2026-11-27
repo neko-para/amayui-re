@@ -135,6 +135,9 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
     //   ② 之后才是保留根（发行 → 开发回退），顺序与旧 `--overlay` 完全一致；
     //   ③ 普通根的候选**不进** `searched` 的"找不到"清单（那一层不参与保留 id 的解析）。
     if (isReservedHudId(spec)) {
+        // ★ S1b 裁决：`hud` 的遮蔽检查**保持只看 `.js`**。保留 id 解析的是内置 `scripts/ui/hud.js`
+        //   （发行件）；`.ts` HUD 不在本轮范围，让它参与遮蔽只会把 `--overlay` 变成一次静默换源
+        //   （而且没有"内置 `.ts`"可回退）⇒ 用户根里的 `hud.ts` 不触发 `ReservedShadowed`。
         const std::string shadow_name = std::string(kReservedHudId) + ".js";
         if (!roots.exe_dir.empty()) {
             push_candidate(absoluteOf(candidatePath(roots.exe_dir, shadow_name, true)));
@@ -172,15 +175,25 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
         return result;
     }
 
-    const std::string file_name = spec + ".js";
-    // ★ 顺序 = 发行优先、开发回退（与 `--overlay` 的 hud 解析同一条口径）；⛔ 不查 `lib/`、⛔ 不递归。
-    if (!roots.exe_dir.empty()) {
-        push_candidate(absoluteOf(candidatePath(roots.exe_dir, file_name, true)));
+    // ★ S1b：id 的候选扩展名 = `.js` → `.ts` → `.mts`（**扩展名优先于根**）。
+    //   裁决：同一 id 同时有 `.js` / `.ts` ⇒ **`.js` 优先**（`.js` 是历史行为、也是发行件；
+    //   `.ts` 是新增能力；⛔ 不静默换源，也⛔ 不报歧义 —— 没有任何读数能判"用户要哪一个"）。
+    //   命中第一档就停；前面 0 命中的候选仍进 `searched`（NotFound 的文案要列全试过哪些）。
+    // ⛔ 不查 `lib/`、⛔ 不递归（与之前同一条）。
+    const char* const kExtensions[] = {".js", ".ts", ".mts"};
+    for (const char* extension : kExtensions) {
+        const std::string file_name = spec + extension;
+        if (!roots.exe_dir.empty()) {
+            push_candidate(absoluteOf(candidatePath(roots.exe_dir, file_name, true)));
+        }
+        if (!roots.dev_dir.empty()) {
+            push_candidate(absoluteOf(candidatePath(roots.dev_dir, file_name, false)));
+        }
+        const std::size_t before = result.hits.size();
+        collect_hits();
+        if (result.hits.size() == before) continue;  // 本扩展名 0 命中 ⇒ 试下一个
+        break;                                       // 第一档命中：`.js` 的优先级由循环顺序决定
     }
-    if (!roots.dev_dir.empty()) {
-        push_candidate(absoluteOf(candidatePath(roots.dev_dir, file_name, false)));
-    }
-    collect_hits();
     if (result.hits.size() == 1) {
         result.path = result.hits.front();
         result.status = PluginResolveResult::Status::Ok;

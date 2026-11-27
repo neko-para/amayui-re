@@ -6,16 +6,18 @@
 //
 // ★ 机械判据只有一条（`AGENTS.md` §6 的"能机械判的写进代码，不写进散文"）：
 //     id   := `^[A-Za-z0-9_-]{1,64}$`
-//     path := 其余一切（含 `.` / `/` / `\` / `:` / 绝对路径 / UNC / 以 `.js` 结尾 / 空串）
-//   ⇒ `.js` 后缀天然是路径。
+//     path := 其余一切（含 `.` / `/` / `\` / `:` / 绝对路径 / UNC / 以 `.js` / `.ts` / `.mts` 结尾 / 空串）
+//   ⇒ `.js` / `.ts` / `.mts` 后缀天然是路径。
 //   ★ **空串在解析器层仍归 `Path`**（它不满足 id 的 `{1,64}`），但**调用方（`aot_main`）在
 //     parse 期就拒绝显式的 `--plugin ""`**（exit 2：空串既不是 id、也不是可装载路径）。
 //     ⛔ 不要靠"空 spec 走路径 ⇒ 装载失败"兜底：`plugin_path.empty()` 会被整块跳过，
 //     静默变成"没有插件"（S1 复审 minor 1 的来路）。
 //
 // ★ 搜索根**只有两处、非递归**（用户口径 2026-11-25，比设计报告 A2 更硬）：
-//     ① `<exeDir>scripts/plugins/<id>.js`（发行；与 `--overlay` 的 `<exeDir>scripts/ui/hud.js` 同形）
-//     ② `LIFT_PLUGIN_DIR/<id>.js`（开发；CMake 注入**源码** `apps/emulator-lift/scripts/plugins`）
+//     ① `<exeDir>scripts/plugins/<id>.js|.ts|.mts`（发行；与 `--overlay` 的 `<exeDir>scripts/ui/hud.js` 同形）
+//     ② `LIFT_PLUGIN_DIR/<id>.js|.ts|.mts`（开发；CMake 注入**源码** `apps/emulator-lift/scripts/plugins`）
+//   ★ S1b 候选顺序 = `.js` → `.ts` → `.mts`，**扩展名优先于根**（同 id 同时有 `.js`/`.ts` ⇒ `.js` 优先；
+//     ⛔ 不报歧义、⛔ 不静默换源）。命中第一档就停，之前 0 命中的候选仍进 `searched`。
 //   ⛔ **不查 `lib/`**（库只被 import，永远不是 `--plugin` 的 id 目标）、
 //   ⛔ **不递归子目录**、⛔ 不查 `cwd` / `PATH` / 系统目录 / `--appdata`。
 //   ★ `exe_dir` 为空（`argv[0]` 不含分隔符 / PATH 启动）⇒ 该根跳过，**只查 `LIFT_PLUGIN_DIR`**；
@@ -26,6 +28,8 @@
 //       `hud_dev_dir/hud.js`（开发回退 = 编译期 `LIFT_UI_SCRIPT_DIR`）；
 //     · 但**用户插件根里存在 `hud.js`**（`<exeDir>/scripts/plugins/hud.js` 或 `LIFT_PLUGIN_DIR/hud.js`）
 //       ⇒ `ReservedShadowed`（调用方 exit 2 并列出路径）：⛔ 不静默让用户文件被内置件遮住；
+//       ★ S1b 裁决：遮蔽检查**只看 `.js`**（`hud.ts` 不参与：保留 id 解析的是内置发行件 `hud.js`，
+//         `.ts` HUD 不在本轮范围；参与遮蔽只会把 `--overlay` 变成静默换源）。
 //     · 保留 id **不**进普通根的命中集合（普通根只在遮蔽检查里读）；
 //     · 保留 id 判据是 **ASCII 大小写不敏感**（`hud` / `HUD` / `Hud` 同一件事）；
 //     · 路径形式（含 `.js`）**不**享受保留语义 ⇒ `--plugin <...>/hud.js` 仍是普通路径（behavior 不变）。

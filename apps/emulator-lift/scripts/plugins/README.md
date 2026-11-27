@@ -21,17 +21,57 @@ scripts/plugins/
 ```
 
 - **`--plugin <id>` 只查本目录的根**（`<exeDir>/scripts/plugins/<id>.js` 与编译期
-  `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**）；⛔ 不查 `lib/`、⛔ 不递归子目录。
-  需要单独加载的东西必须在根上；库只被 `import`。
-- id 语法 `^[A-Za-z0-9_-]{1,64}$`；含 `.` / `/` / `\` 的写法**一律当路径**（所以 `x.js` 是 cwd 相对路径，
-  与旧版逐字相同）。两根都命中 ⇒ `exit 2` 并列全部候选；都不在 ⇒ `exit 2` 并列搜过的根与候选。
+  `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**；S1b 起同一 id 也试 `.ts` / `.mts`，见下节）；⛔ 不查
+  `lib/`、⛔ 不递归子目录。需要单独加载的东西必须在根上；库只被 `import`。
+- id 语法 `^[A-Za-z0-9_-]{1,64}$`；含 `.` / `/` / `\` 的写法**一律当路径**（所以 `x.js` / `x.ts` 是
+  cwd 相对路径，与旧版逐字相同）。两根都命中 ⇒ `exit 2` 并列全部候选；都不在 ⇒ `exit 2` 并列搜过的根与候选。
 - ★ **`hud` 是保留 id**（S2）：`--overlay` = 「`--plugin hud` + 要窗口」的预设，解析的是
   `scripts/ui/hud.js`（`<exeDir>/scripts/ui/` → `LIFT_UI_SCRIPT_DIR`），**不是**本目录。
   ⇒ ⛔ 不要在本目录放 `hud.js`：它会**遮蔽**保留 id ⇒ 启动 `exit 2`（列路径 + "改名或给路径"），
   而不是被静默装上（⛔ 不静默被内置件遮住，也不静默换源）。保留 id 判据 **ASCII 大小写不敏感**
   （`--plugin HUD` 同样触发遮蔽 / 同样解析内置件）。
 - import 根 = **入口文件所在目录**：入口用 `./lib/x.js`（向下，允许）；`lib/` 内部用同目录 `./x.js`。
-  ⛔ 入口不能住在库的下层（`../` 越根会被 QJS 拒）。
+  ⛔ 入口不能住在库的下层（`../` 越根会被 QJS 拒）。`.ts` / `.mts` 同形，且 specifier **必须带扩展名**
+  （loader 不补扩展名；见下节）。
+
+## `.ts` 插件（E1）
+
+宿主**直接装载** `.ts` / `.mts`，运行时不依赖 Node / tsc：`--plugin <路径>.ts`，或
+`--plugin <id>`（同一 id 依次试 `<id>.js` → `<id>.ts` → `<id>.mts`）。引擎侧 = vendored
+quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
+[`third_party/quickjs-ng/README.md`](../../third_party/quickjs-ng/README.md)。
+
+- **怎么判 TS**：只看来源的**扩展名**（ASCII 大小写不敏感）——`.ts` / `.mts` ⇒
+  `JS_EVAL_FLAG_TYPESCRIPT`；`.js` **不加**（`.js` 行为逐字节不变）。四处 `JS_Eval` 共用同一个判定：
+  插件入口 / module loader（被 import 的 `lib/*.ts`）/ classic 探针 / 一般 `load`。
+  `.ts` 入口**强制 module**（跳过 classic / `JS_DetectModule`：ng 的公开探测 API 没有 flags）。
+- **id 候选与 `.js` 优先**：`<id>.js` → `<id>.ts` → `<id>.mts`，**扩展名优先于根**；同一 id 同时有
+  `.js` / `.ts` ⇒ **`.js` 优先**（`.js` 是历史行为 / 发行件，⛔ 不静默换源、⛔ 不报歧义）。
+  保留 id `hud` 的遮蔽检查**只看 `hud.js`**（`hud.ts` 不参与；`.ts` HUD 不在本轮范围）。
+- **import 扩展名策略**：loader 按 specifier 原文解析，**不补扩展名** ⇒ 多文件 `.ts` 必须写
+  `import … from "./lib/x.ts"`（`import type` 整条擦除、不产生 module request）。写 `./lib/x` 会在
+  `moduleNormalize` 处"读不到模块"失败（与 `.js` 的现有口径相同）。
+- **支持的语法**（E1 擦除面）：`interface` / `type` 别名、注解（参数 / 变量 / 返回值 / 成员）、
+  `as` / `as const` / `satisfies`、泛型（声明 / 调用 / 类型引用 / `>>` 嵌套）、联合 / 数组 / 元组 /
+  字面量类型、`import type` / `export type`、class 修饰符与无体成员 / index signature、`declare`、
+  可选属性 `?`、非空断言 `!`、`this` 参数、重载签名、`abstract class`。
+  完整契约（`RenderCtx` / `RunCtx`）仍只看 `plugin.d.ts`。
+- **不支持**（运行期必须报错，⛔ 不静默接受）：`enum` / `const enum`、构造参数属性
+  `constructor(public x: T)`、含值的 `namespace`、JSX / `.tsx`、装饰器、`import =` / `export =`、
+  legacy `<T>x`、`accessor` 字段、`a?.<T>()`（optional-chain 调用上的类型实参）。
+  `erasableSyntaxOnly` 只查"可擦"，放行的写法仍可能运行期报错（如 `a?.<T>()`）。
+- **门禁命令**：
+
+  ```bash
+  # 类型面（tsc 只证明"可擦"；运行期覆盖见下一条）
+  pnpm typecheck     # 含 examples/tsconfig.json（已开 erasableSyntaxOnly）
+  # 运行期面（宿主 loader + 引擎）
+  ctest --test-dir apps/emulator-lift/out -R 'quickts|plugin-runtime|plugin-resolve' --output-on-failure
+  ```
+
+- **判据落点**：`tests/plugin_fixtures/ts-smoke/`（入口 + `lib/helper.ts`，`import type` 与运行期
+  import 各一次）由 `plugin-runtime` 的 `plugin/ts-module` 判；`.js` 的 `f<a>(b)` 比较语义由
+  `plugin/js-comparison-unchanged` 判；id 候选与 `.js` 优先由 `plugin-resolve` 判。
 
 ## 合同
 

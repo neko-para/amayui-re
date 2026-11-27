@@ -9,7 +9,7 @@
 //   ④ **S2 保留 id `hud`** 的解析顺序（发行 → 开发回退）或遮蔽判据被改松：`--overlay` 会静默
 //      装上"另一份 hud.js"（用户同名文件胜出 / 内置件遮住用户文件，两种都无运行期症状）。
 //
-// ★ 判据只碰 `temp_directory_path()` 下的**注入 roots**（临时目录 + 几个 `.js` 文件）：
+// ★ 判据只碰 `temp_directory_path()` 下的**注入 roots**（临时目录 + 几个 `.js` / `.ts` / `.mts` 文件）：
 //   零 exe / 零 GPU / 零资产 / 零游戏安装 ⇒ 顶层无条件注册 = pure 档（`AGENTS.md` §12.4）。
 // ★ 断言的是**分类 / 顺序 / 候选清单**，⛔ 不断言任何游戏读数、⛔ 不锚具体路径字符串（除临时根）。
 // ★ 大小写那条**运行时探测当前卷**（造两个只差 ASCII 大小写的文件、数目录项），⛔ 不按
@@ -135,19 +135,21 @@ int main() {
         const PluginResolveResult long_result = resolve(long65, roots);
         LIFT_CHECK(long_result.kind == PluginSpecKind::Path);
         LIFT_CHECK(long_result.path == long65);
-        // ★ `-x` / `--` 是 id ⇒ 走 **id 查找**（NotFound：没有 `-x.js`），⛔ 不被当成 flag / 路径。
+        // ★ `-x` / `--` 是 id ⇒ 走 **id 查找**（NotFound：没有 `-x.js` / `-x.ts` / `-x.mts`），⛔ 不被当成 flag / 路径。
         for (const char* flagish : {"-x", "--"}) {
             const PluginResolveResult r = resolve(flagish, roots);
             LIFT_CHECK(r.kind == PluginSpecKind::Id);
             LIFT_CHECK(r.status == Status::NotFound);
-            LIFT_CHECK(r.searched.size() == 2);  // exe 根 + dev 根都查过（`<id>.js`）
+            // 两个根 × 三个扩展名（`.js` → `.ts` → `.mts`）；候选清单是 NotFound 文案的唯一来源。
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 6);
         }
     }
 
-    // ---- ② 路径形式：**原样**（`.js` / `a\b` / 绝对路径 / 空串都走路径，⛔ 不绝对化） ----
+    // ---- ② 路径形式：**原样**（`.js` / `.ts` / `.mts` / `a\b` / 绝对路径 / 空串都走路径，⛔ 不绝对化） ----
     lift_test::g_current_case = "resolve/path-forms";
     {
-        const char* const kPaths[] = {"save.js", "a\\b", "a/b", "./x.js", "/abs/x.js", "C:\\x.js", "..", ""};
+        const char* const kPaths[] = {"save.js", "save.ts", "./lib/x.mts", "a\\b", "a/b", "./x.js",
+                                      "/abs/x.js", "C:\\x.js", "..", ""};
         for (const char* spec : kPaths) {
             const PluginResolveResult r = resolve(spec, roots);
             LIFT_CHECK(spec[0] == '\0' || isPluginId(spec) == false);  // 前提：这些都不是 id
@@ -215,17 +217,74 @@ int main() {
     }
 
     // ---- ⑥ 0 命中 ⇒ **NotFound** 且 `searched` 列出**每个**候选（调用方据此逐行列目录）----
+    //   ★ S1b：候选 = `<id>.js` / `<id>.ts` / `<id>.mts`，**扩展名优先于根**（`.js` 先试完两个根，
+    //     再试 `.ts`，最后 `.mts`）⇒ 顺序逐条钉住（它是 NotFound 文案的唯一来源）。
     lift_test::g_current_case = "resolve/id-not-found-lists-candidates";
     {
         const PluginResolveResult r = resolve("ghost", roots);
         LIFT_CHECK(r.status == Status::NotFound);
         LIFT_CHECK(r.path.empty());
         LIFT_CHECK(r.hits.empty());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 2);
-        if (r.searched.size() == 2) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 6);
+        if (r.searched.size() == 6) {
             LIFT_CHECK(r.searched[0] == toUtf8(exe_plugins / "ghost.js"));
             LIFT_CHECK(r.searched[1] == toUtf8(dev_root / "ghost.js"));
+            LIFT_CHECK(r.searched[2] == toUtf8(exe_plugins / "ghost.ts"));
+            LIFT_CHECK(r.searched[3] == toUtf8(dev_root / "ghost.ts"));
+            LIFT_CHECK(r.searched[4] == toUtf8(exe_plugins / "ghost.mts"));
+            LIFT_CHECK(r.searched[5] == toUtf8(dev_root / "ghost.mts"));
         }
+    }
+
+    // ---- ⑥' S1b：id 能解析到 **`.ts`**（`.js` 不存在 ⇒ 第二个候选中）----
+    lift_test::g_current_case = "resolve/id-ts-candidate";
+    {
+        LIFT_CHECK(writeFile(dev_root / "ts-only.ts"));
+        PluginResolveRoots only_dev;
+        only_dev.dev_dir = roots.dev_dir;
+        const PluginResolveResult r = resolve("ts-only", only_dev);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.hits.size()), 1);
+        LIFT_CHECK(r.path == toUtf8(dev_root / "ts-only.ts"));
+        // 试过 `.js`（不存在）→ `.ts`（命中）⇒ 恰好 2 个候选、第 2 个是 `.ts`。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 2);
+        if (r.searched.size() == 2) LIFT_CHECK(r.searched[1] == toUtf8(dev_root / "ts-only.ts"));
+    }
+
+    // ---- ⑥'' S1b：id 能解析到 **`.mts`**（第三个候选）----
+    lift_test::g_current_case = "resolve/id-mts-candidate";
+    {
+        LIFT_CHECK(writeFile(dev_root / "mts-only.mts"));
+        PluginResolveRoots only_dev;
+        only_dev.dev_dir = roots.dev_dir;
+        const PluginResolveResult r = resolve("mts-only", only_dev);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.path == toUtf8(dev_root / "mts-only.mts"));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 3);
+    }
+
+    // ---- ⑥''' S1b 裁决：同一 id 同时有 `.js` / `.ts` ⇒ **`.js` 优先**（⛔ 不是歧义、⛔ 不静默换成 .ts）----
+    lift_test::g_current_case = "resolve/id-js-priority-over-ts";
+    {
+        LIFT_CHECK(writeFile(dev_root / "both.js"));
+        LIFT_CHECK(writeFile(dev_root / "both.ts"));
+        PluginResolveRoots only_dev;
+        only_dev.dev_dir = roots.dev_dir;
+        const PluginResolveResult r = resolve("both", only_dev);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.path == toUtf8(dev_root / "both.js"));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 1);  // `.js` 命中就停
+    }
+
+    // ---- ⑥'''' S1b 裁决：扩展名优先于根 —— exe 根的 `.ts` 不压过 dev 根的 `.js` ----
+    lift_test::g_current_case = "resolve/id-js-wins-across-roots";
+    {
+        LIFT_CHECK(writeFile(exe_plugins / "cross.ts"));
+        LIFT_CHECK(writeFile(dev_root / "cross.js"));
+        const PluginResolveResult r = resolve("cross", roots);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.path == toUtf8(dev_root / "cross.js"));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 2);
     }
 
     // ---- ⑦ 空根 ⇒ 不构造假候选（`<空>/scripts/plugins/x.js` 那种噪声不许出现）----
