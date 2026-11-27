@@ -63,3 +63,4 @@
 
 - **S2b 已实现**（dev `24d312b` + `bc45164`）：`ctx.once` / `ctx.task` / timeout 泵 / Run 存活（tasks ∪ onces ∪ onTick 订阅）/ `start` 可单独存在；复审的 S2 四条已修。
 - **S2c-1 已实现**（dev `a5a99d5` + `5846d23`）：`ctx.at` 链（注册序 / `next()` 截断 / `off`）+ `Tick` 只读（`now/local/log`，DEC + 越界 undefined）+ stale Tick + `{opcode}` matcher；复审 S2（patch `break` 饿死同点订阅）已修。
+- **S2c-2 已实现**（dev `4f9278c` + `6807ada`）：`ctx.at` 五种 `where` + `Tick.edit/input/patch` + 多槽 `Pending`；复审 1 条 S2 已修。
