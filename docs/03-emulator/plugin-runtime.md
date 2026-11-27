@@ -1490,26 +1490,39 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 ### 4.15 同步订阅（S2c-1：`ctx.at` 链 + 只读 `Tick` + `local` + stale）
 
 - **`ctx.at(where, (tick, next) => …)` → 订阅 id（number）**：每条订阅 = 一条 runtime Entry（各自 handle、
-  同一 owner）；`where` 在 S2c-1 的 **JS 面只放开 `{script, pos}`**（matcher 的四种 form 已一次写全，
-  `{script,lo,hi}`/`{script}`/`{opcode}` 的 JS 暴露是 S2c-2）。`no_injection` ⇒ `undefined` + 显眼 error；
-  形状错 ⇒ TypeError；门 = `inCallback()`（Run 回调；`task` 的同步首段可以 `at`）。
+  同一 owner）；`where` 五种形态：`{script,pos}` / `{script,lo,hi}`（`[lo,hi)`）/ `{script}` / `{opcode}` /
+  `{script,opcode}`（S2c-2a 起全部对 JS 放开；形状非法 ⇒ TypeError；`no_injection` ⇒ `undefined` + 显眼 error）。
+  `{opcode}` 订阅存在时每拍多一次 `rd32(pc)`（全进程），无则不多付。门 = `inCallback()`（Run 回调；
+  `task` 的同步首段可以 `at`）。`hook.list()` 的 `kind/form/lo/hi/opcode` 可读出"装进去的是什么形状"。
 - **链**：同一次派发按 **handle 升序**（= 注册序）；只把 v2 `at` 订阅纳入链（`once` / v1 `onTick` 照跑、不参与
   `next`）；`next()` 继续、不调 = 截断；`next()` 二次 = 幂等；链外调 `next` ⇒ `next_outside_chain`；
   handler 抛错 ⇒ **摘整条订阅**（防僵尸订阅让 Run 永不收口）+ 一行 `at #N hit #M`；handler 返回 Promise ⇒
   忽略 + 一次性 warn（异步走 `task`/`once`）。
 - **`ctx.off(subscriptionId)`** → bool、幂等；门 = `call_host`（tick / render / 泵里都能撤）。
   `at` 订阅算 `hasPendingWork`（Run 不会在还有订阅时收口）；`ctx.hook.clear()` 仍全清（v1 语义）。
-- **`Tick`（只读面）** = `{ id, now, local, log }`（`now = {script,pos,opcode?}`）：
+- **`Tick`（S2c-2b 起完整）** = `{ id, now, local, edit, input, patch, log }`（`now = {script,pos,opcode?}`）：
   `local.int(i)` / `local.ptr(i)` / `local.ptrDword(i)` —— `int`/`ptrDword` 是 **DEC 语义值**，`ptr` 是地址原样；
   越界 / 未提交 / ptr 0 / **没有 codec key** ⇒ `undefined`（⛔ 不编 0）。
+  · `tick.edit.global.set` = **立即持久写**（与 v1 `ctx.edit` 同一个宿主方法/回执；走 `writeGlobal` ⇒ 自动撤销同址 pending）；
+  · `tick.input.*` = **入队、下一读点落地**（与 v1 `ctx.input` 同一个宿主方法）；
+  · `tick.patch(target, value)` = **本拍瞬时覆盖**：handler 里只登记，**`on_hits` 返回之后**才写（handler 看到打补丁前的值）；
+    失败码 `bad_target` / `no_key` / `too_many_slots` / `not_hit` / `once_tick`。
+  · 写门 = `editAttached()` / `inputAttached()`（装配，**不含** `in_callback_`；⛔ 不打开 `in_callback_`）⇒
+    tick handler 里 `ctx.fail` / `finish` / `quit` / `trigger` / `hook.*` / `profile` / `config` **仍 TypeError**。
+- **`Pending` 多槽（S2c-2b）**：`tick.patch` 与 v1 `patch` 共用一张**槽表**（上限 8 槽，超出计 `skips`）；
+  逐槽 CAS（`current == written` 才写回 raw，否则 `restore_conflicts`）；**同址合并**保留**最初** raw、`written` 取最后一次；
+  摘条目只结算该 handle / owner 的槽（别的订阅的 pending 一个字节都不动）；`ctx.edit`/控制层持久写撤销**所有**同址槽。
+  ⇒ v1 的"一条指令最多一次写、先注册者赢"被多槽取代（**有意语义变化**：每条订阅各自一个槽）。
 - **有效期**：Tick 只在**产生它的那次 tick 入口**（含该入口的 drain）内有效；跨入口用 `local.*` ⇒
   `Error("stale_tick…")`；`now`（值快照）与 `log` 仍可用。实现 = `Impl::ticks`（`serial → TickRef` 值拷贝）+
   JS 对象隐藏键 `__tick`；入口末尾 `ticks.clear()`。
-- **未做（S2c-2）**：`{script,lo,hi}`/`{script}`/`{opcode}` 的 JS 暴露、`Tick.edit/input/patch`、
-  `Pending` 单槽 → 多槽（链上多个 handler 各自 patch 会静默丢一次覆盖）、stale 的写面。
 - **门禁**：`plugin/at-chain-order` / `at-next-truncates` / `at-off` / `at-handler-error` / `tick-now` /
-  `tick-local` / `tick-stale` / `at-multi-same-pos` / `at-keeps-run`；`instr-hook/sink-hit-batch` /
-  `add-ex-shared`；变异 6 条。
+  `tick-local` / `tick-stale` / `at-multi-same-pos` / `at-keeps-run`；`at-where-{range,script,opcode,mixed}` /
+  `at-tick-id-attribution`；`tick-edit` / `tick-input` / `tick-patch-cas` / `tick-patch-limit` /
+  `tick-stale-write` / `tick-once-tick-writable`；`instr-hook/pending-{multi-slot,same-addr,remove-isolation,slot-limit}`；
+  变异十余条（`--list` 为准）。
+- **仍未做（S3/S4）**：`Tick.now.carrier`（待核）、多 Run / 逻辑 timer；examples 迁 v2、`ctx.now` 退出 RunCtx、
+  scenario/lib 迁移；全局 `log`。
 
 ---
 
@@ -1862,6 +1875,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 45 | **指令点回调只读 + 每入口 drain（S2a）**：sink 分发在 entries 遍历**之后**；`handle.onTick(fn)` 每句柄一个、tick 只有 `{id,script,pos,opcode?,log}`、`inCallback()` 恒 false；handler 失败只摘 handler（`hit #N` 一行）不 fail Run；每个 host→JS 入口在**同一 CPU 预算窗**内 drain microtask；Run 收口 `on_released` 释放 JS 值、之后 probe 不再调 JS | tick 里能改 guest / 跑 `fail`；JS 回调改 hook 表导致遍历 UB；`await` continuation 漏到下一入口；忙等 await 卡死 guest；Run 结束后仍在跑 JS | `instr-hook/sink-*` + `plugin/point-hit*` + `drain-per-entry` / `drain-budget` + `core-shape` ⑦/⑧ + 变异 `--match 'sink-hit'` / `--match 'drain'` |
 | 46 | **异步面（S2b）**：`once` 只收 `{script,pos}` + `timeoutMs>0`；超时 = reject → 泵 drain → `fail Run`；`task` 返回 Promise 才接受、rejected ⇒ fail Run；`pump` 只在读点 + `renderFrame`；Run 存活 = `tasks ∪ onces ∪ onTick 订阅` 为空才收口；`start` 可单独存在（`onTrigger` 单独仍拒） | 永不结束的 once / once 泄漏 hook；task 拒绝被静默吞；Run 提前 done 把 task 杀掉 / 或永不收口；loader 把 onTrigger-only 当可用 | `plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` / `pump-budget` / `module-start-only` + 3 条变异 |
 | 47 | **同步订阅（S2c-1）**：`ctx.at` 每条订阅一条 Entry、链按 handle 升序、`next()` 截断、二次幂等、链外抛；handler 抛错摘整条订阅；`Tick` = `{id,now,local,log}`、`local` 是 DEC 语义值、越界/无 key ⇒ undefined、跨入口 `local.*` 抛 `stale_tick`；`at` 算 Run 存活、`off` 幂等且门 = `call_host` | 链序/截断错；僵尸订阅让 Run 永不收口；stale Tick 读到别人视图；越界读编 0；`at` 不阻止 Run 提前收口 | 9 条 `plugin/at-*`/`tick-*` + `instr-hook/sink-hit-batch` + `add-ex-shared` + 6 条变异 |
+| 48 | **where 过滤 + Tick 写面 + 多槽 Pending（S2c-2）**：`where` 五形态（`{script,pos}` / `{script,lo,hi}` / `{script}` / `{opcode}` / `{script,opcode}`），`{opcode}` 才多付 `rd32(pc)`；`Tick.edit/input/patch` 走 `editAttached/inputAttached`（⛔ 不开 `in_callback_`），`tick.patch` 在 handler 之后写；`Pending` 多槽（≤8、逐槽 CAS、同址保留最初 raw、按 handle/owner 结算、持久写撤销全部同址槽）；Tick 归属本 Impl；stale 写零变化 | where 边界/形态错；`{opcode}` 让每拍多读；tick 写面把 `ctx.fail` 等一起放开；链上多 patch 静默丢一次覆盖；同址恢复抹掉别人的写；stale Tick 写 guest | `at-where-{range,script,opcode,mixed}` + `at-tick-id-attribution` + `tick-{edit,input,patch-cas,patch-limit,stale-write,once-tick-writable}` + `instr-hook/pending-{multi-slot,same-addr,remove-isolation,slot-limit}` + 变异 3 条（`--match` 实测） |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
