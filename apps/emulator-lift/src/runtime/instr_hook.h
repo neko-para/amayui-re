@@ -63,6 +63,58 @@ struct InstrHookStatus {
 };
 
 /**
+ * 一次命中现场的**只读值视图**（S2a 的反向 sink：指令点命中 → ui 层 JS 回调）。
+ * ★ 为什么是值而不是 `X86&` / `GuestMemory*`：
+ *   ① 方向是 `src/runtime` → `src/ui`；把可变 guest 句柄交出去 = 在 `EditSink` 之外开出**第二条
+ *      guest 写路径**（合同 §6 行 5/22 的口径）；
+ *   ② probe 由 AOT 注入的 `extern "C" lift_instr_hook` 调 ⇒ 传引用要担心生命周期，传纯值不会悬垂；
+ *   ③ `Tick.local`（S3）要的是"按需读"的**能力**，不是 `X86&`。
+ * ★ `int_base/int_count/ptr_base/ptr_count/codec_key` 是 S2a **不消费**的字段：它们已经在
+ *   `sampleFrame` 的 10 次读里付过钱了，留给 S3 的 `Tick.local` / capture 的按需读。
+ */
+struct InstrHit {
+    std::uint32_t handle = 0;       // 命中的 hook 句柄（== InstrHookStatus::id）
+    std::uint32_t script_id = 0;    // 本次命中的脚本文件 id（frame+0x3C）
+    const char* script = nullptr;   // **该 hook 注册时的脚本名**（生命周期 = 本次分发；见下）
+    std::uint32_t pos = 0;          // label 坐标 = 0x3C + (pc − body)
+    std::uint32_t opcode = 0;       // PC 上的 opcode（`mem.rd32(pc)`）
+    bool opcode_ok = false;         // false ⇒ 读不到（⛔ 不编 0；JS 侧缺键）
+    std::uint64_t hits = 0;         // **本次命中之后**的累计命中（== `stats().hits`）
+    // ---- S3 预留（S2a 只有值、没有读者）----
+    std::uint32_t int_base = 0;
+    std::uint32_t int_count = 0;
+    std::uint32_t ptr_base = 0;
+    std::uint32_t ptr_count = 0;
+    std::uint32_t codec_key = 0;
+};
+
+/**
+ * 反向通道（runtime → ui）。★ 签名里**一个 JS 类型都没有**：`quickjs.h` 只许出现在
+ * `ui/quickjs_value.h`（守卫 `tools/test/core-shape.test.mjs`）⇒ runtime 只能给函数指针。
+ * · `on_hit`：在 **`instrHookProbe` 的 entries 遍历结束之后**按 sink 注册序调（见 `.cpp` 的
+ *   "为什么不是遍历中"）—— 回调里即使改表（S2c 放开写能力）也不会让 `Entry&` 悬垂。
+ * · `on_released`：条目被 **remove / releaseOwner / clear** 摘掉时逐条调 ⇒ ui 释放自己那份 JS 值。
+ * · `script` 指针的生命周期 = 这次 `on_hit` 调用之内（= `Entry::script.c_str()`；条目此刻仍在表里）。
+ */
+struct InstrHookSink {
+    void* user = nullptr;
+    void (*on_hit)(void* user, const InstrHit& hit) = nullptr;
+    void (*on_released)(void* user, std::uint32_t handle) = nullptr;
+};
+
+/**
+ * 注册 / 注销。同一个 `user` 幂等（重复注册 = 替换）；
+ * 多个 sink 全部收事件（生产 1 个；测试夹具可能同时活 2 个 `Impl`）。
+ * ★ `instrHookAddSink` 不做线程同步：与 hook 表同一口径（S0 的 U2 未解，见施工图 §未证）。
+ * ★ 生命周期：ui 层在实例创建后注册、`shutdown` **第一行**注销（之后任何 probe / release
+ *   都不许回调进一个正在拆的 Impl）。
+ */
+void instrHookAddSink(const InstrHookSink& sink);
+void instrHookRemoveSink(void* user);
+/** 热路径闸门：probe 只在"有 sink"时才收集命中 id（避免每次命中都 push 一个临时 vector）。 */
+bool instrHookHasSink();
+
+/**
  * ① 触发：装一条"到点"的 hook（**纯观察**：不写、不读 guest 内存）。
  * `owner` = 这条 hook 的**归属**（`PluginHost` 传本 Run 的序号；`0` = 无主，只有纯 runtime / 测试用）。
  *   ★ 为什么需要 owner（S0 缺陷 1）：hook 表是**进程级**的，Run 结束必须能把"本 Run 装的"一次撤干净；

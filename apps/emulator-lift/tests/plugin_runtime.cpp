@@ -51,6 +51,21 @@
 //   · `plugin/callback-host-pause`        ：**宿主调用暂停** —— `ctx.profile.end` 的宿主成本（假宿主
 //                                            烧 5 ms CPU）**不进**用户 JS 的 2 ms（去掉暂停 ⇒ 本用例红）。
 //
+// S2a（`runtime/instr_hook` 的反向 sink + `handle.onTick` + 每入口 drain）：
+//   · `plugin/point-hit`                  ：假 marker / 读点上 `handle.onTick(fn)` 真的跑；tick 的
+//                                            `{id,script,pos,opcode}` 与 runtime 的 `InstrHit` 逐项一致
+//                                            （由 JS 写进 guest int、C++ 用 `readGlobal` 读回）；
+//                                            `stats().hits` 随探针次数涨（1 → 2）。
+//   · `plugin/point-hit-handler-error`    ：handler 抛错 ⇒ **一行** error（带 `hit #N`）+ handler 摘除
+//                                            + Run **不 fail**；第二次命中不再跑 JS，但 entry 仍计数。
+//   · `plugin/point-hit-after-run-end`    ：Run 收口（`return []`）后 hook 表空；再探针**不再跑 JS**。
+//   · `plugin/drain-per-entry`            ：`call()` 与 `runHookEntry()` 的 continuation 都在**本入口**
+//                                            跑完（start 的 phase=2 由下一个读点写出；tick 的 log 在
+//                                            探针返回前出现）—— 漏写 drain ⇒ continuation 落到下一个入口。
+//   · `plugin/drain-budget`               ：`while(true) await Promise.resolve()` 被**同一预算窗**打断
+//                                            （Run fail + `overran()` + reason 含 `interrupted` /
+//                                            `回调超出预算`；`pump()` 会返回 = guest 没被卡死）。
+//
 // C2b（render / ui / draw；`plugin-runtime` 的 pure 半 —— 窗口 `adopt` 是 C2b-2）：
 //   · `plugin/render-surface`             ：`RenderCtx` 的成员表 = d.ts 的 RenderCtx **减 `run`**
 //                                            （S2 起 `ui/draw/read/game/params/log/profile`；
@@ -120,6 +135,7 @@
 #include "runtime/memory.h"
 #include "runtime/script_globals.h"
 #include "runtime/value_codec.h"  // encodeInt（ENC 往返的断言；⛔ 不写死编码后的数）
+#include "runtime/x86.h"          // S2a：`instrHookProbe(X86&)` 的假 CPU（只填 mem）
 #include "ui/raster.h"            // measureText / UiBuilder / Element（C2b 的交叉读数）
 #include "ui/script.h"            // UiHostOps（C2b 复审 F2：判 profile 桥有没有被调到）
 
@@ -337,6 +353,61 @@ void dumpFail(const Fixture& f) {
     if (f.host == nullptr || !f.host->failed()) return;
     std::fprintf(stderr, "  plugin fail: name=%s reason=%s\n", f.host->failName().c_str(),
                  f.host->failReason().c_str());
+}
+
+// =====================================================================================
+// S2a · 指令点探针的**假帧**（`runtime/instr_hook.cpp` 的偏移；零 AOT / 零安装）
+//
+//   `instrHookProbe` 只读 `frame+0x{00,04,08,14,20,2C,3C}` 与 FileDB 根条目；本夹具把
+//   "一条脚本指令"摆成：body=0x4E0000、pc 指向 `pos=0x100`、opcode=114、脚本名 FIELD.BIN。
+//   ★ 地址都在 `[0x480000,0x580000)`（`makeFakeEngine` 已全量 commit）且避开 int 池
+//     （0x4A0000 + 0xB1B6×4 = 0x4CC6D8）、帧记录（0x4DD894）与 int/ptr 池（0x4D8000/0x4D9000）。
+// =====================================================================================
+constexpr std::uint32_t kInstrBody = 0x004E0000u;      // 脚本体（在 int 池之外）
+constexpr std::uint32_t kInstrName = 0x004F0000u;      // 名字表（80 字节/条）
+constexpr std::uint32_t kInstrIntBase = 0x004D8000u;   // local-int 池（S2a 只填值、不消费）
+constexpr std::uint32_t kInstrPtrBase = 0x004D9000u;   // local-ptr 槽（同上）
+constexpr std::uint32_t kInstrPos = 0x00000100u;       // label 坐标（与夹具 `POS` 同一个数）
+constexpr std::uint32_t kInstrOpcode = 114u;           // 只是**值**（⛔ 不是 opcode 语义结论）
+constexpr std::uint32_t kInstrScriptId = 3u;
+constexpr std::uint32_t kInstrPc = kInstrBody + (kInstrPos - lift::kScriptHeaderLen);
+
+bool installInstrFrame(lift::GuestMemory& mem) {
+    const std::uint32_t frame = kFxEngine + lift::kEngineFrameBase;  // = 0x4DD894
+    if (!put32(mem, kFxEngine + lift::kEngineCurOffset, 0u)) return false;  // cur = 0
+    if (!put32(mem, frame + 0x00, kInstrBody)) return false;               // body
+    if (!put32(mem, frame + 0x04, kInstrPc)) return false;                 // pc
+    if (!put32(mem, frame + 0x08, 8u)) return false;                       // int count
+    if (!put32(mem, frame + 0x20, kInstrIntBase)) return false;            // int base
+    if (!put32(mem, frame + 0x14, 2u)) return false;                       // ptr count
+    if (!put32(mem, frame + 0x2C, kInstrPtrBase)) return false;            // ptr base
+    if (!put32(mem, frame + 0x3C, kInstrScriptId)) return false;           // 统一文件 id
+    // FileDB 根条目（`engine + kFileIndexOffset` + 0x40C/0x414）与名字条目（80 字节，NUL 结尾）。
+    const std::uint32_t db = kFxEngine + lift::kFileIndexOffset;
+    if (!put32(mem, db + lift::kFileRootCountOffset, 8u)) return false;
+    if (!put32(mem, db + lift::kFileRootNameBaseOffset, kInstrName)) return false;
+    const std::uint32_t entry = kInstrName + lift::kFileNameStride * kInstrScriptId;
+    const char kName[] = "FIELD.BIN";
+    for (std::size_t i = 0; i <= sizeof(kName) - 1; ++i) {
+        mem.wr8(entry + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kName[i]));
+    }
+    // opcode 摆在 PC 上（`instrHookProbe` 用 `mem.rd32(pc)` 读）。
+    return put32(mem, kInstrPc, kInstrOpcode);
+}
+
+// 一次"脚本派发"（= AOT 注入的 `lift_instr_hook`）：摆 PC + 直接调探针。
+void dispatchInstr(Fixture& f, std::uint32_t pos) {
+    const std::uint32_t frame = kFxEngine + lift::kEngineFrameBase;
+    LIFT_CHECK(put32(f.mem, frame + 0x04, kInstrBody + (pos - lift::kScriptHeaderLen)));
+    lift::X86 cpu;  // 《只填 mem》—— 与 `tests/instr_hook.cpp` 同形
+    cpu.mem = &f.mem;
+    lift::instrHookProbe(cpu);
+}
+
+std::uint64_t instrHits(std::uint32_t handle) {
+    lift::InstrHookStatus st;
+    if (!lift::instrHookStats(handle, &st)) return 0;
+    return st.hits;
 }
 
 // ★ 脚本化的夹具**没有"进屏"这一步** ⇒ 必须把读档界面的**页号**（guest int global `0x138e`）种成
@@ -2209,6 +2280,229 @@ void caseHookReleaseOnBudget() {
 }
 
 // =====================================================================================
+// S2a · `plugin/point-hit`：真插件 `handle.onTick` + 假 marker / 读点
+//
+//   红了 = 指令点命中后 JS 回调没跑 / 参数漂（`InstrHit` 与 tick 对象之间断链）。
+//   判据（全部是客体读数，⛔ 不是"没报错"）：
+//     ① 一次探针 ⇒ log 行 **恰好 +1**（tick 里的 `tick.log`）且 `stats().hits == 1`；
+//     ② 第二次探针 ⇒ 再 +1、`hits == 2`；
+//     ③ 触发一个 `afterPosition` 读点 ⇒ onTrigger 把 `tick.{seen,pos,opcode,script,id}` 与
+//        `ctx.hook.list()[0].hits` 写进 guest int ⇒ C++ 逐项读回相等。
+//   ★ 为什么字段校验放在 onTrigger：tick 入口 `inCallback()` 恒 false ⇒ `ctx.fail` 也 TypeError
+//     （那会把"参数错"伪装成"handler 抛错"）。onTrigger 是合法的 Run 回调。
+// =====================================================================================
+constexpr std::uint32_t kTickOutSeen = 0xb100u;
+constexpr std::uint32_t kTickOutStatsHits = 0xb101u;
+constexpr std::uint32_t kTickOutPos = 0xb102u;
+constexpr std::uint32_t kTickOutOpcode = 0xb103u;
+constexpr std::uint32_t kTickOutScriptOk = 0xb104u;
+constexpr std::uint32_t kTickOutId = 0xb105u;
+
+void casePointHit() {
+    lift_test::g_current_case = "plugin/point-hit";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    const bool loaded = f.load("instr-tick.js", {{"mode", "hit"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();  // start：装 hook + onTick
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+    if (hooks.size() != 1) return;
+    const std::uint32_t handle = hooks[0].id;
+    const std::uint64_t base = f.host->logLines();
+    LIFT_CHECK(base >= 1u);  // start 的 install 日志（非空断言：hook 真装上了）
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 1);
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 2));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 2);
+
+    // 让 afterPosition 命中：onTrigger 把 tick 的字段写回 guest。
+    // ★ 先记下命中数（onTrigger 返回 `[]` ⇒ Run 收口 ⇒ hook 表会被清空，之后 `instrHookStats` 查不到）。
+    const std::uint64_t hits_before_fire = instrHits(handle);
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutSeen), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutStatsHits), 2u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutPos), kInstrPos);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutOpcode), kInstrOpcode);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutScriptOk), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutId), handle);
+    std::printf("  [%s] handle=%u hits=%llu\n", lift_test::g_current_case, handle,
+                static_cast<unsigned long long>(hits_before_fire));
+}
+
+// =====================================================================================
+// S2a · `plugin/point-hit-handler-error`：handler 抛错 ⇒ 一行 error + 摘 handler + Run 继续
+//
+//   红了 = ① 异常穿出 `extern "C"`（崩溃）/ ② 失败被升级成 Run fail / ③ handler 没被摘
+//   （第二次命中又打一行 + 再烧一次 JS）/ ④ entry 被误摘（`stats().hits` 不再涨）。
+// =====================================================================================
+void casePointHitHandlerError() {
+    lift_test::g_current_case = "plugin/point-hit-handler-error";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    const bool loaded = f.load("instr-tick.js", {{"mode", "throw"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+    if (hooks.size() != 1) return;
+    const std::uint32_t handle = hooks[0].id;
+    const std::uint64_t base = f.host->logLines();
+
+    // 第一次：handler 抛 "boom" ⇒ 恰好一行 error（消息带 `hit #1`），Run **不 fail**。
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 1);
+
+    // 第二次：handler 已摘 ⇒ 不跑 JS、不再打日志；entry 还在 ⇒ `hits == 2`。
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 2);
+}
+
+// =====================================================================================
+// S2a · `plugin/point-hit-after-run-end`：Run 收口之后探针**不再调 JS**
+//
+//   红了 = handler 的 JS 值活过 Run（`on_released` 没接上）⇒ 下一个探针还跑用户 JS，
+//   而且那时 `ctx` / 预算窗都不存在（UB 面）。判据：Run done + 表空 + log 行数不变。
+// =====================================================================================
+void casePointHitAfterRunEnd() {
+    lift_test::g_current_case = "plugin/point-hit-after-run-end";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    const bool loaded = f.load("instr-tick.js", {{"mode", "done"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();  // start 里 `return []` ⇒ install([]) 置 done ⇒ 读点入口补一次释放
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+    const std::uint64_t base = f.host->logLines();
+    LIFT_CHECK(base >= 1u);
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base));
+}
+
+// =====================================================================================
+// S2a · `plugin/drain-per-entry`：continuation 在**同一个入口**跑完；跨入口看不到中间态
+//
+//   红了 = 某个 host→JS 入口漏了 drain ⇒ continuation 落到**下一个入口**才跑（静默语义漂：
+//   它看到的是下一个读点 / 下一个 tick 的上下文）。两个方向：
+//     ① `call()`（start）：`phase` 的 continuation ⇒ 下一个读点（onTrigger）写出的必须是 2；
+//     ② `runHookEntry`（tick）：tick 里排的 continuation 必须在**探针返回前**打日志。
+// =====================================================================================
+constexpr std::uint32_t kDrainOutPhase = 0xb110u;
+
+void caseDrainPerEntry() {
+    lift_test::g_current_case = "plugin/drain-per-entry";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    const bool loaded = f.load("drain-entry.js", {{"mode", "ok"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 首点就读在 `afterPosition` 的区间上：start 装 trigger，**下一个读点**才 fire。
+    f.readings.pos = 0x1000u;
+    f.pump();  // start
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+    // ① start 入口的 drain：第二个读点 fire ⇒ 写出 phase（2 = continuation 已在 start 内跑完）。
+    //   ★ 顺序有意如此：onTrigger 之后**才**做 tick 探针 —— 否则探针自己的 drain（②）会把
+    //     start 残留的 continuation 顺手跑掉，①就变成"换个入口也能过"的假绿。
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kDrainOutPhase), 2u);
+
+    // ② runHookEntry 入口的 drain：探针返回时那一行 log 必须已经出现（同一入口内）。
+    const std::uint64_t base = f.host->logLines();
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+    std::printf("  [%s] phase=%u\n", lift_test::g_current_case, readFieldInt(f, kDrainOutPhase));
+}
+
+// =====================================================================================
+// S2a · `plugin/drain-budget`：`while(true) await Promise.resolve()` ⇒ 同一预算窗打断
+//
+//   红了 = drain 在 `cpu_deadline_ns` 清零之后跑（无 deadline ⇒ 无中断）⇒ **guest 永久卡死**
+//   （这条用例本身就是"卡死"的证据：它不会返回）。判据 = Run fail + `overran()` +
+//   reason 含 `interrupted` 与 `回调超出预算`。★ ⛔ 不断言"耗时 ≈2 ms"（`pluginThreadCpuNs()`
+//   在 Windows 上是 `QueryThreadCycleTime`，只保证能判跑飞）。
+// =====================================================================================
+void caseDrainBudget() {
+    lift_test::g_current_case = "plugin/drain-budget";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("drain-entry.js", {{"mode", "spin"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 生产值 2 ms + op_limit 不限：判的**只**是 CPU deadline（与 `plugin/callback-cpu-budget` 同形）。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();  // 不返回 = drain 没有 deadline（本用例的红就是你看到它挂住）
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->overran());
+    const std::string& reason = f.host->failReason();
+    LIFT_CHECK(reason.find("interrupted") != std::string::npos);
+    LIFT_CHECK(reason.find("回调超出预算") != std::string::npos);
+    std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
+}
+
+
+// =====================================================================================
 // C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
 //   `fail`/`finish`/`quit`/`profile.*`
 //
@@ -3126,6 +3420,12 @@ int main() {
     caseHookReleaseOnFail();
     caseHookReleaseOnDone();
     caseHookReleaseOnBudget();
+    // ---- S2a（指令点 → JS 的反向 sink + 每入口 drain + Run 收口）----
+    casePointHit();
+    casePointHitHandlerError();
+    casePointHitAfterRunEnd();
+    caseDrainPerEntry();
+    caseDrainBudget();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

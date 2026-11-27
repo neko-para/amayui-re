@@ -4530,6 +4530,65 @@ const MUTATIONS = [
       '类型注解处报错；`quickts` 的 `ts-hello` / `ts-examples-compile` 当场红',
   },
 
+  // ── S2a：指令点 → JS 的反向 sink（命中 id 的记录位置）──────────────────────────────────
+  //   ★ 代表这一类错：把"记命中 id"写在**循环体尾部**（或 `if (!e.patch) continue;` 之后）。
+  //     只读订阅（S2a 的全部订阅）没装 patch ⇒ 循环在 `continue` 走掉 ⇒ sink 永远收不到命中
+  //     —— 症状是"`handle.onTick` 装了但永不跑"，没有报错、`stats().hits` 照样涨。
+  //   ★ 红点 = `instr-hook/sink-hit-fields`（0 条 hit）；`plugin/point-hit` 也会红（同一机制）。
+  //   ★ 只为 `lift-instr-hook` 一个 target 重建。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from:
+      '        if (want_sink) {\n' +
+      '            if (n_hits < 8) {\n' +
+      '                hit_ids[n_hits++] = e.id;\n' +
+      '            } else {\n' +
+      '                hit_overflow.push_back(e.id);\n' +
+      '            }\n' +
+      '        }\n' +
+      '        if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);\n' +
+      '        if (!e.patch) continue;\n',
+    to:
+      '        if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);\n' +
+      '        if (!e.patch) continue;\n' +
+      '        if (want_sink) {  // 变异：记命中 id 挪到 `if (!e.patch) continue;` 之后\n' +
+      '            if (n_hits < 8) {\n' +
+      '                hit_ids[n_hits++] = e.id;\n' +
+      '            } else {\n' +
+      '                hit_overflow.push_back(e.id);\n' +
+      '            }\n' +
+      '        }\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '把"记命中 id"挪到 `if (!e.patch) continue;` **之后** ⇒ 只读订阅（没装 patch）在 continue 走掉、' +
+      'sink 永远收不到命中；`instr-hook/sink-hit-fields`（0 条 hit）或 `plugin/point-hit` 红',
+  },
+
+  // ── S2a：每个 host→JS 入口都 drain（这里选 `runHookEntry`）──────────────────────────────
+  //   ★ 代表这一类错：新入口（指令点 → JS）忘了 drain。QJS 的 job 队列是 per-runtime、没有
+  //     "入口"概念 ⇒ 残留的 continuation 会落到**下一个入口**才跑（那里 `tick` / `ctx` 已经
+  //     是另一个节点的），**没有任何症状**。
+  //   ★ 红点 = `plugin/drain-per-entry` 的第二个方向（tick 里排的 microtask 必须在探针返回前
+  //     打日志）；`plugin/point-hit` 不受影响（它的 tick 回调是同步的）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
+      '        //   `plugin-drain-runHookEntry` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
+      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
+    to: '        const bool drained = true;  // 变异：runHookEntry 不 drain\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '从 `runHookEntry` 删掉 drain（`const bool drained = drainPendingJobs(...)` ⇒ `= true`）⇒ ' +
+      'tick 回调里排的 continuation 落到下一个入口才跑；`plugin/drain-per-entry` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

@@ -23,6 +23,9 @@
 //      **报错**（`JS_IsException`），且进程不崩 —— 把"不做"钉成可执行判据，防止将来有人以为
 //      支持了。注意：`enum E { A }` 这类写法在 tsc 的 `erasableSyntaxOnly` 下也会被拒，
 //      但"tsc 拒"不等于"引擎拒"，所以这里必须是引擎侧读数。
+//   ⑦ ts-flag-load-bearing（S1 复审 I1 的阳性对照）：带类型注解的片段 flags 0 必须报错、
+//      TYPESCRIPT 必须求值成功（default = 42）；另一个两腿都能编的片段（`f<a>(b)`）两腿
+//      字节码必须**不同** ⇒ `s->ts=false` 的变异会当场打红，而不是只靠 examples 用例兜底。
 //
 // ★ 顶层无条件注册（`if(LIFT_BUILD_TESTS)` 之外还有一层透明条件）⇒ **pure** 档
 //   （AGENTS.md §12.4：判据 = 注册位置）。零资产：只读 `scripts/**` 里的文本，无窗口 / 无字体 /
@@ -242,6 +245,18 @@ ResolveResult compileAndResolve(const std::string& source, const char* filename,
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
     return result;
+}
+
+/** 两腿（flags 0 / TYPESCRIPT）的字节码必须**不同**（flag 真的改了编译产物）。 */
+void expectDifferent(const char* what, const CompileResult& off, const CompileResult& on) {
+    ++lift_test::g_checks;
+    if (off.bytes.size() != on.bytes.size()) return;
+    for (std::size_t i = 0; i < off.bytes.size(); ++i) {
+        if (off.bytes[i] != on.bytes[i]) return;
+    }
+    lift_test::failf(__FILE__, __LINE__,
+                     "%s: 两腿字节码逐字节相同（len=%zu）⇒ TYPESCRIPT flag 没有改变编译产物",
+                     what, off.bytes.size());
 }
 
 void expectIdentical(const char* what, const CompileResult& off, const CompileResult& on) {
@@ -681,6 +696,72 @@ void caseTsClass() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ⑦ flag 承重（**阳性对照**）：证明 `JS_EVAL_FLAG_TYPESCRIPT` 不是"加了没人读"
+//
+//   ★ 为什么需要（S1 复审 I1）：①/② 只证明 flags-on 对**合法 JS** 不改字节码 —— 把 `s->ts`
+//     钉成 false 时它们照样绿（flag 成了静默无效）。这条从反方向钉住：
+//     · 同一个带类型注解的片段：flags 0 ⇒ **必须报错**；TYPESCRIPT ⇒ 求值成功且值正确；
+//     · 一个两腿都能编的片段（`f<a>(b)`：TS = 泛型调用、JS = 两次比较）⇒ 两腿的
+//       `JS_WriteObject` 字节**必须不同**（"flag 只改了错误路径"也会被抓到）。
+//   ⚠ `f < a > (b)` 正是上游自认"flags on 会改含义"的那一处；①/② 故意不放它（那里要比的是
+//     "逐字节相同"），这里用它当**差异探针**是另一回事。
+// ---------------------------------------------------------------------------------------
+constexpr const char* kFlagLoadBearingTs = "const n: number = 41 + 1;\nexport default n;\n";
+// 两腿都能编：flags 0 = `(f < a) > (b)`（布尔）；TYPESCRIPT = `f<a>(b)`（泛型调用）。
+constexpr const char* kFlagDualParse =
+    "function f(x) { return x; }\nconst a = 1;\nconst b = 2;\nexport const r = f < a > (b);\n";
+
+void expectModuleDefaultNumber(TsModule& m, std::int32_t want) {
+    JSValue def = moduleExport(m, "default");
+    ++lift_test::g_checks;
+    if (JS_IsException(def)) {
+        lift_test::failf(__FILE__, __LINE__, "default 导出读取失败: %s", takeException(m.ctx).c_str());
+        return;
+    }
+    std::int32_t actual = 0;
+    ++lift_test::g_checks;
+    if (JS_ToInt32(m.ctx, &actual, def) < 0) {
+        lift_test::failf(__FILE__, __LINE__, "default 导出不是 int32: %s", takeException(m.ctx).c_str());
+        JS_FreeValue(m.ctx, def);
+        return;
+    }
+    JS_FreeValue(m.ctx, def);
+    ++lift_test::g_checks;
+    if (actual != want) lift_test::failf(__FILE__, __LINE__, "default: 期望 %d，得到 %d", want, actual);
+}
+
+void caseTsFlagLoadBearing() {
+    lift_test::g_current_case = "quickts/ts-flag-load-bearing";
+    // ① flags 0 ⇒ 必须报错（类型注解只有 TYPESCRIPT 解析器认识）。
+    const CompileResult off = compileOnly(kFlagLoadBearingTs, "flag-load-bearing.ts", JS_EVAL_TYPE_MODULE, 0);
+    ++lift_test::g_checks;
+    if (off.ok) {
+        lift_test::failf(__FILE__, __LINE__, "flags 0 竟然编过了（TYPESCRIPT flag 不承重）");
+    } else if (off.error.empty()) {
+        lift_test::failf(__FILE__, __LINE__, "flags 0 报错了但异常消息为空");
+    }
+    // ② TYPESCRIPT ⇒ 求值成功且 default = 42。
+    TsModule m = evalTsModule(kFlagLoadBearingTs, "flag-load-bearing.ts");
+    ++lift_test::g_checks;
+    if (!m.ok) {
+        lift_test::failf(__FILE__, __LINE__, "TYPESCRIPT 下求值失败: %s", m.error.c_str());
+        closeTsModule(&m);
+        return;
+    }
+    expectModuleDefaultNumber(m, 42);
+    closeTsModule(&m);
+    // ③ 两腿都能编的片段 ⇒ 字节码必须不同（"flag 只改了错误路径"也会被抓到）。
+    const CompileResult dual_off = compileOnly(kFlagDualParse, "flag-dual.ts", JS_EVAL_TYPE_MODULE, 0);
+    const CompileResult dual_on =
+        compileOnly(kFlagDualParse, "flag-dual.ts", JS_EVAL_TYPE_MODULE, JS_EVAL_FLAG_TYPESCRIPT);
+    ++lift_test::g_checks;
+    if (!dual_off.ok) lift_test::failf(__FILE__, __LINE__, "差异探针 flags 0 编译失败: %s", dual_off.error.c_str());
+    ++lift_test::g_checks;
+    if (!dual_on.ok) lift_test::failf(__FILE__, __LINE__, "差异探针 TYPESCRIPT 编译失败: %s", dual_on.error.c_str());
+    if (dual_off.ok && dual_on.ok) expectDifferent("f<a>(b)", dual_off, dual_on);
+}
+
+// ---------------------------------------------------------------------------------------
 // ⑥ E2 边界：TYPESCRIPT flag 下必须报错（不崩）
 // ---------------------------------------------------------------------------------------
 bool rejectsUnderTs(const char* source, const char* filename) {
@@ -732,6 +813,7 @@ int main() {
     caseTsExamplesCompile();
     caseTsHello();
     caseTsClass();
+    caseTsFlagLoadBearing();
     caseTsRejects();
     return lift_test::finish("quickts");
 }

@@ -38,6 +38,7 @@ struct Frame {
     std::uint32_t cur = 0;
     std::uint32_t id = 0;
     std::uint32_t pos = 0;
+    std::uint32_t pc = 0;  // ★ S2a：命中分发要在 PC 上读 opcode（`InstrHit::opcode`）
     std::uint32_t int_base = 0;
     std::uint32_t int_count = 0;
     std::uint32_t ptr_base = 0;
@@ -87,6 +88,9 @@ struct State {
     // 最近一次 probe 用到的 guest 内存（`clear()` / `remove()` 在没有 X86 时也能把未还原的写恢复）。
     GuestMemory* mem = nullptr;
     std::uint32_t next_id = 1;
+    // ★ S2a：反向 sink（runtime → ui）。**不拥有** `user`；分发与通知都在本文件的锁外口径上
+    //   （与 entries 同一份"无锁"事实，见施工图 §未证 1/3）。
+    std::vector<InstrHookSink> sinks;
     // ★ S0（缺陷 3）：本构建注入的 `lift_instr_hook` 站点数。缺省 1 = "视作可用"
     //   （纯 runtime / 测试夹具没有 AOT 形状；只有 AOT 的初始化路径会把它改成真实值）。
     std::uint32_t injection_sites = 1;
@@ -156,6 +160,7 @@ bool sampleFrame(X86& cpu, Frame* out) {
     if (!read32(mem, frame + kFramePcOffset, &pc)) return false;
     if (body == 0 || pc < body || (pc - body) > kMaxScriptBodyBytes) return false;
     f.pos = kScriptHeaderLen + (pc - body);
+    f.pc = pc;  // ★ S2a：命中分发要靠它读 opcode（`InstrHit::opcode`）
     if (!read32(mem, frame + kFrameArgOffset, &f.id)) return false;
     if (!read32(mem, frame + kLocalIntCount, &f.int_count)) return false;
     if (!read32(mem, frame + kLocalIntBase, &f.int_base)) return false;
@@ -235,6 +240,17 @@ Entry* find(std::uint32_t handle) {
     return nullptr;
 }
 
+/**
+ * ★ S2a：条目被摘掉时逐条通知 sink（ui 层据此释放对应的 JS handler）。
+ * 调用纪律：**必须在 `erase` / `remove_if` / `clear` 之后**调（⛔ 不要在谓词里调 ——
+ * sink 会跑 JS，JS 一旦能改表就会让遍历中的容器失效）；`id` 由调用方先存成局部值。
+ */
+void notifyReleased(std::uint32_t handle) {
+    for (const InstrHookSink& s : state().sinks) {
+        if (s.on_released != nullptr) s.on_released(s.user, handle);
+    }
+}
+
 }  // namespace
 
 const char* instrPatchKindName(InstrPatchKind kind) {
@@ -250,6 +266,27 @@ const char* instrPatchKindName(InstrPatchKind kind) {
 }
 
 bool instrHooksActive() { return g_active.load(std::memory_order_relaxed); }
+
+void instrHookAddSink(const InstrHookSink& sink) {
+    State& st = state();
+    // 同一个 `user` 幂等（重复注册 = 替换）：保证"实例重建后不会留下两条同 user 的 sink"。
+    for (InstrHookSink& s : st.sinks) {
+        if (s.user == sink.user) {
+            s = sink;
+            return;
+        }
+    }
+    st.sinks.push_back(sink);
+}
+
+void instrHookRemoveSink(void* user) {
+    State& st = state();
+    st.sinks.erase(std::remove_if(st.sinks.begin(), st.sinks.end(),
+                                  [user](const InstrHookSink& s) { return s.user == user; }),
+                   st.sinks.end());
+}
+
+bool instrHookHasSink() { return !state().sinks.empty(); }
 
 std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err) {
     auto fail = [err](const char* why) {
@@ -339,6 +376,9 @@ bool instrHookRemove(std::uint32_t handle) {
         if (it->id == handle) {
             st.entries.erase(it);
             if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+            // ★ S2a：**摘完再通知** —— sink 会跑 JS，JS 在 S2c 之后可能改表 ⇒ 不能让它在
+            //   遍历 / 谓词里被调（见 `notifyReleased` 的调用纪律）。
+            notifyReleased(handle);
             return true;
         }
     }
@@ -360,17 +400,29 @@ void instrHookReleaseOwner(std::uint64_t owner) {
         if (pending_entry == nullptr || pending_entry->owner == owner) restorePendingLocked();
     }
     // ② 撤掉本 owner 的全部 hook（别的 owner 原样）。
+    // ★ S2a：先把要摘的 id 收集到局部（⛔ 不在 `remove_if` 的谓词里调 sink）；
+    //   摘完之后逐条 `notifyReleased` ⇒ ui 释放对应的 JS handler。
+    std::vector<std::uint32_t> released;
+    for (const Entry& e : st.entries) {
+        if (e.owner == owner) released.push_back(e.id);
+    }
     st.entries.erase(std::remove_if(st.entries.begin(), st.entries.end(),
                                     [owner](const Entry& e) { return e.owner == owner; }),
                      st.entries.end());
     if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+    for (const std::uint32_t id : released) notifyReleased(id);
 }
 
 void instrHookClear() {
     restorePendingLocked();
     State& st = state();
+    // ★ S2a：同上 —— 先存 id、再 `clear`、最后逐条通知（sink 会跑 JS，⛔ 不在清表过程中调）。
+    std::vector<std::uint32_t> released;
+    released.reserve(st.entries.size());
+    for (const Entry& e : st.entries) released.push_back(e.id);
     st.entries.clear();
     g_active.store(false, std::memory_order_relaxed);
+    for (const std::uint32_t id : released) notifyReleased(id);
 }
 
 void instrHookSetInjectionSites(std::uint32_t n) { state().injection_sites = n; }
@@ -421,6 +473,15 @@ void instrHookProbe(X86& cpu) {
     Frame f;
     if (!sampleFrame(cpu, &f)) return;
 
+    // ★ S2a：有 sink 才收集命中 id。为什么**不在遍历里**直接分发：
+    //   sink 会跑 JS；JS 一旦能调 `instrHookAdd`（`push_back` ⇒ 重分配）或 `instrHookRemove`
+    //   （`erase`），遍历中的 `Entry& e` 立刻悬垂 ⇒ UB 且没有症状。把分发挪到循环结束之后，
+    //   就把它从"语义门"变成**结构保证**（S2c 放开写能力也不会踩）。
+    const bool want_sink = instrHookHasSink();
+    std::uint32_t hit_ids[8];
+    std::size_t n_hits = 0;
+    std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2a 每条指令 ≤1）
+
     for (Entry& e : st.entries) {
         if (e.pos != f.pos) continue;
         // ② 身份：首次命中按名字解析并缓存 id；之后只比 id（⛔ 不每次解析名字）。
@@ -435,6 +496,16 @@ void instrHookProbe(X86& cpu) {
 
         e.hits += 1;
         e.last_id = f.id;
+        // ★★ S2a：记命中 id 必须在**这里**（`e.hits += 1` 之后、任何 `continue` / `break` 之前）：
+        //    只读订阅（没装 patch）会在下面的 `if (!e.patch) continue;` 走掉 ⇒ 写在循环体尾部
+        //    就永远记不到（`instr-hook/sink-hit-fields` 会红）。
+        if (want_sink) {
+            if (n_hits < 8) {
+                hit_ids[n_hits++] = e.id;
+            } else {
+                hit_overflow.push_back(e.id);
+            }
+        }
         if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);
         if (!e.patch) continue;
         if (e.max_hits != 0 && e.hits > e.max_hits) continue;
@@ -463,6 +534,36 @@ void instrHookProbe(X86& cpu) {
         st.pending.written = written;
         break;  // 一轮派发只允许一条 hook 生效（位置唯一 ⇒ 正常也只有一条命中）
     }
+    if (!want_sink || (n_hits == 0 && hit_overflow.empty())) return;
+
+    // ★ 只读 opcode：**只有命中且真的有 sink** 才多付这一次 guest 读（`Frame::pc` 由此而来）。
+    //   读不到 ⇒ `opcode_ok = false`（JS 侧**缺键**，⛔ 不编一个 0 冒充真实 opcode）。
+    std::uint32_t opcode = 0;
+    const bool opcode_ok = read32(*cpu.mem, f.pc, &opcode);
+
+    const auto emit = [&](std::uint32_t id) {
+        // 重新查一遍：回调可能改表（S2a 的门不让它改，但别假设 —— 见循环外的理由）。
+        Entry* e = find(id);
+        if (e == nullptr) return;
+        InstrHit h;
+        h.handle = e->id;
+        h.script_id = f.id;
+        h.script = e->script.c_str();  // 生命周期 = 本次分发（entry 此刻仍在表里）
+        h.pos = f.pos;
+        h.opcode = opcode;
+        h.opcode_ok = opcode_ok;
+        h.hits = e->hits;
+        h.int_base = f.int_base;
+        h.int_count = f.int_count;
+        h.ptr_base = f.ptr_base;
+        h.ptr_count = f.ptr_count;
+        h.codec_key = f.key;
+        for (const InstrHookSink& s : st.sinks) {  // 注册序
+            if (s.on_hit != nullptr) s.on_hit(s.user, h);
+        }
+    };
+    for (std::size_t i = 0; i < n_hits; ++i) emit(hit_ids[i]);
+    for (const std::uint32_t id : hit_overflow) emit(id);
 }
 
 }  // namespace lift

@@ -28,6 +28,9 @@
  * ③ **`Context` 不认识 `TriggerRunner`**：`ctx.trigger` 必须是 **`TriggerFactory*`**（施工图 §4.3）。
  *    否则回调里能 `runner.atPoint(...)` 递归、或绕过"返回值完整替换集合"的语义 ——
  *    那是"一个能力两处实现"的入口，而且**没有运行期症状**。
+ * ⑦ **`instr_hook` 的代码里 0 命中 `quickjs`**（S2a）：反向 sink 只能是函数指针 + 纯值。
+ * ⑧ **每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`**（S2a）：漏 drain ⇒ continuation
+ *    落到下一个入口；全文件 `JS_Call(` 白名单 = 6 处（4 个入口 + 2 个宿主值构造），新增必须登记。
  *
  * ## 为什么现在就要它（⛔ 不要推迟到 C2/C4）
  * C1b 一落地，"核心没长出 plan VM"就是**当天**可被静默破坏的性质（下一个人给 trigger 加个
@@ -387,6 +390,108 @@ test('⑤ `quickjs.h` 的 include 图只有一条：`ui/quickjs_value.h` → `ui
   // ★ 反向自检：判据不是"walk 没读到文件"—— 至少要有几十个源文件，且必须包含那两条边的两端。
   assert.ok(files.length > 50, `walk 只读到 ${files.length} 个源文件（路径/扩展名写错了？）`);
   assert.ok(hit('#include "runtime/input.h"').length > 0, '反向自检：连 `runtime/input.h` 都读不到 ⇒ walk 坏了');
+});
+
+test('⑦ `instr_hook` 的**代码**里 0 命中 `quickjs`（反向 sink 必须是无 JS 类型的函数指针）', () => {
+  // ★ S2a：`src/runtime/instr_hook.{h,cpp}` 是"指令点 → ui 层 JS"的**反向通道**的 runtime 半。
+  //   它**不认识 JS**：sink 的签名全是 `void*` + 函数指针（`InstrHit` 是纯值）。
+  //   红了 = 有人把它写成"include quickjs 直接跑 JS" ⇒ 第二个 QJS TU + runtime 依赖 ui 层，
+  //   同时 `ui/quickjs_value.h` 的唯一消费者不再唯一（⑤ 也会跟着红，但 ⑤ 的失败文案会误导）。
+  // ★ 为什么**必须单独加**（不能只塞进 `CORE_FILES`）：`instr_hook.*` 不在那个白名单里
+  //   （它不属于 C1b/C1c 的核心集合），而 `PLUGIN_FORBIDDEN` 只对 `src/plugin/**` 生效。
+  const rels = [
+    'apps/emulator-lift/src/runtime/instr_hook.h',
+    'apps/emulator-lift/src/runtime/instr_hook.cpp',
+  ];
+  const reported = [];
+  for (const rel of rels) {
+    for (const hit of forbiddenHits(read(rel), ['quickjs'])) {
+      reported.push(`${rel}:${hit.line}: ${hit.token}  ← ${hit.text}`);
+    }
+  }
+  assert.deepEqual(
+    reported,
+    [],
+    '`instr_hook` 是 runtime 面：⛔ 不许出现 `quickjs`（sink 只能是函数指针 + 纯值；' +
+      '第二个 QJS TU / runtime→ui 依赖都从这里开始）：\n  ' +
+      reported.join('\n  '),
+  );
+  // ★ 反向自检：判据不是恒真 —— 注入一条必须被点名；且**注释**里的同名词不许命中
+  //   （头文件里必须能写出"不 include quickjs"这句解释，见 `stripComments` 的口径）。
+  assert.equal(forbiddenHits('struct quickjs_ctx;\n', ['quickjs']).length, 1, '注入 `quickjs` 必须被报出来');
+  assert.equal(forbiddenHits('// 这里不 include "quickjs.h"\n', ['quickjs']).length, 0, '注释里的 `quickjs` 不许命中');
+});
+
+test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 6）', () => {
+  // ★ S2a：host→JS 的入口清单 = `renderFrame()` / `call()` / `runHookEntry()`（classic `render()`
+  //   是第四条，见下面 ④ 的说明）。**每个入口都必须 drain**：漏一次 ⇒ continuation 落到
+  //   下一个入口才跑（静默语义漂，见 `plugin/drain-per-entry` 的两个方向）。
+  // ★ 诚实边界（与 `input-plan-shape` 同口径）：这是**源码谓词** —— 把 `JS_Call` 藏进 helper 能绕过。
+  //   补它的是行为用例（`drain-per-entry` 证明"当前入口跑完"）；谓词只负责"下一个入口忘了写
+  //   drain / 新入口没登记时**当场**红"。
+  const rel = 'apps/emulator-lift/src/ui/script_quickjs.cpp';
+  const lines = read(rel).split('\n');
+  // 花括号配对（跳过 `//` 行注释；本文件没有"字符串里含花括号"的函数签名形态）。
+  const blockRange = (startIndex) => {
+    let depth = 0;
+    let opened = false;
+    for (let i = startIndex; i < lines.length; i += 1) {
+      const code = lines[i].split('//')[0];
+      for (const ch of code) {
+        if (ch === '{') {
+          depth += 1;
+          opened = true;
+        } else if (ch === '}') {
+          depth -= 1;
+          if (opened && depth === 0) return [startIndex, i];
+        }
+      }
+    }
+    return null;
+  };
+  const entries = [
+    { name: 'renderFrame', re: /^\s*bool renderFrame\(UiBuilder& builder,.*\{\s*$/ },
+    { name: 'call', re: /^\s*bool call\(PluginCallHost& host,/ },
+    { name: 'runHookEntry', re: /^void runHookEntry\(Impl& impl, std::uint32_t handle,.*\{\s*$/ },
+  ];
+  const missing = [];
+  for (const entry of entries) {
+    const start = lines.findIndex((line) => entry.re.test(line));
+    assert.ok(start >= 0, `找不到 ${entry.name} 的函数定义（改名 / 搬走 ⇒ 本守卫会静默变瞎）`);
+    const range = blockRange(start);
+    assert.ok(range !== null, `${entry.name} 的花括号没配对上`);
+    const body = lines.slice(range[0], range[1] + 1).join('\n');
+    if (!body.includes('JS_Call(')) missing.push(`${entry.name}: 没有 JS_Call(`);
+    if (!body.includes('drainPendingJobs(')) missing.push(`${entry.name}: 没有 drainPendingJobs(`);
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    'host→JS 入口缺少 `JS_Call` / `drainPendingJobs`（漏 drain = continuation 落到下一个入口）：\n  ' +
+      missing.join('\n  '),
+  );
+
+  // ★ 全文件 `JS_Call(` 白名单：**6 处** = 4 个入口 + 2 个宿主值构造
+  //   （`Object.assign` 造 ctx / 造错误对象）。新增一处必须来这里登记（否则"入口"会悄悄多一个）。
+  const calls = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes('JS_Call(')) calls.push({ line: i + 1, text: lines[i].trim() });
+  }
+  const signatures = calls.map((c) => {
+    if (c.text.includes('impl.render.raw(), JS_UNDEFINED, 0, nullptr')) return 'classic-render';
+    if (c.text.includes('assign.raw()')) return 'object-assign';
+    if (c.text.includes('impl.plugin_render.raw(), JS_UNDEFINED, 1, argv')) return 'plugin-renderFrame';
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'runHookEntry';
+    if (c.text.includes('ctor.raw()')) return 'error-object';
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
+    return `unregistered@${c.line}: ${c.text}`;
+  });
+  assert.deepEqual(
+    signatures.sort(),
+    ['call', 'classic-render', 'error-object', 'object-assign', 'plugin-renderFrame', 'runHookEntry'],
+    '`JS_Call(` 的出现点与白名单不符（新增入口 / 宿主值构造必须来登记）：\n  ' +
+      calls.map((c, i) => `${c.line}: ${signatures[i]}  ← ${c.text}`).join('\n  '),
+  );
 });
 
 test('⑥ 覆盖检查：`src/plugin/` 下**每个** .cpp/.h 都在白名单里（新增文件不许悄悄漏掉）', () => {
