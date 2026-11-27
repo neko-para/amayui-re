@@ -10,5 +10,9 @@
   "cmake.sourceDirectory": "E:/Projects/amayui-re/apps/emulator-lift",
   "clangd.arguments": [
     "--compile-commands-dir=${workspaceFolder}/apps/emulator-lift/out"
+  ],
+  "git.repositoryScanIgnoredFolders": [
+    "node_modules",
+    ".tmp"
   ]
 }
