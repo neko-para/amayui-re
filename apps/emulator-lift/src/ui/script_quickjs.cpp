@@ -5368,6 +5368,94 @@ JSValue jsCtxLog(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCon
     }
 }
 
+// =====================================================================================
+// S3 · 独立全局 `log`（**只有插件装载路径**；⛔ 不给 classic HUD / 内部 hud 回退装）
+//
+// 需求（`REQ-01M8EKFS5HSQFP93T19JDD50ZD` §类型）："`log`：独立全局（info/warn/error/debug），
+// timeout/render/tick 都可用的"。
+//
+//   globalThis.log = {
+//     info(msg, data?) / warn(msg, data?) / error(msg, data?) / debug(msg, data?),
+//   }
+//
+// · **形状**：对象 + 四个方法；`msg` 非字符串 ⇒ 先 `String(msg)`（与 `ctx.log` 的 `data`
+//   口径一致：`data` 当前**不进日志行** —— 一行一条是硬要求）。
+// · **底层**：复用 `PluginCallHost::log`（`call_host_persistent`；**不判 `inCallback()`**）⇒
+//   与 `ctx.log` / `tick.log` 同一份格式化 / 去重 / 上限（⛔ 不复制第二套）。
+// · **可用范围**：`start` / `onTrigger`（`call_host` 非空）、tick handler（`runInstrHits`）、
+//   `render`（`renderFrame`）、timeout/pump 的 continuation（`pumpImpl`）—— 四处都设了
+//   `impl.call_host`。`call_host == nullptr`（不该发生）⇒ TypeError，⛔ 静默 no-op。
+// · **装成不可写 / 不可配置**（`defineReadOnly`）：插件写 `log = …` 在 module strict 下
+//   TypeError；`const log = …` 只是模块内 shadow（不影响本全局）。
+// · **安装点 = `makeQuickJsPlugin`（装载路径）**，⛔ 不是 `createImpl` —— 后者也是
+//   `QuickJsRuntime::load`（classic / module 的内部 hud 回退）的装配点 ⇒ 装在那里会把全局
+//   泄给非插件路径。判据是**装载路径**，不是"有没有 render"。
+// =====================================================================================
+
+/** 四个方法共用的写口：`level` 固定、`msg` 先 `String`、`data` 丢弃、底层 = 宿主 `log`。 */
+JSValue globalLogWrite(JSContext* ctx, int argc, JSValueConst* argv, const char* level) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            // 不该发生（插件路径永远有宿主来路）；⛔ 不静默 no-op。
+            return JS_ThrowTypeError(ctx, "log.%s: 不在插件上下文里（没有宿主来路）", level);
+        }
+        // `msg` 非字符串 ⇒ `String(msg)`（缺省实参 = `undefined` ⇒ "undefined"）；
+        // `data`（第二个实参）不进日志行 —— 与 `ctx.log` 同一口径。
+        std::string message;
+        if (!qjs::toString(ctx, argc >= 1 ? argv[0] : JS_UNDEFINED, &message)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "log.%s: message 必须能转成字符串", level);
+        }
+        host->log(level, message);
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "log.%s: 宿主异常（C++ exception at script boundary）", level);
+    }
+}
+
+JSValue jsGlobalLogInfo(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    return globalLogWrite(ctx, argc, argv, "info");
+}
+
+JSValue jsGlobalLogWarn(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    return globalLogWrite(ctx, argc, argv, "warn");
+}
+
+JSValue jsGlobalLogError(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    return globalLogWrite(ctx, argc, argv, "error");
+}
+
+JSValue jsGlobalLogDebug(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    return globalLogWrite(ctx, argc, argv, "debug");
+}
+
+/** 把 `globalThis.log` 装上（**只在 `makeQuickJsPlugin` 调**；见上面的头注）。 */
+bool installGlobalLog(Impl& impl, std::string* err) {
+    JSContext* ctx = impl.ctx;
+    Value global = qjs::getGlobalObject(ctx);
+    if (global.isException()) {
+        qjs::clearException(ctx);
+        if (err != nullptr) *err = "quickjs: 取 globalThis 失败";
+        return false;
+    }
+    Value log_obj = qjs::newObject(ctx);
+    if (log_obj.isException()) {
+        qjs::clearException(ctx);
+        if (err != nullptr) *err = "quickjs: 分配 log 对象失败";
+        return false;
+    }
+    bool ok = setFunction(ctx, log_obj.raw(), "info", jsGlobalLogInfo, 2, err) &&
+              setFunction(ctx, log_obj.raw(), "warn", jsGlobalLogWarn, 2, err) &&
+              setFunction(ctx, log_obj.raw(), "error", jsGlobalLogError, 2, err) &&
+              setFunction(ctx, log_obj.raw(), "debug", jsGlobalLogDebug, 2, err);
+    // ★ 不可写 / 不可配置（`defineReadOnly` = ENUMERABLE，缺 WRITABLE / CONFIGURABLE）。
+    //   变异条目（`what` 含 `installGlobalLog`）删的就是下一行；`plugin/global-log` 会红。
+    if (ok) ok = defineReadOnly(ctx, global.raw(), "log", std::move(log_obj));
+    if (!ok && err != nullptr && err->empty()) *err = "quickjs: 装 globalThis.log 失败";
+    return ok;
+}
+
 JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
@@ -6557,6 +6645,18 @@ std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const
     std::unique_ptr<Impl> impl = createImpl(origin, opts.font, err);
     if (impl == nullptr) return nullptr;
     JSContext* ctx = impl->ctx;
+
+    // ★ S3：**插件上下文**的独立全局 `log`。装在这里（装载路径）而不是 `createImpl` ——
+    //   后者也是 `QuickJsRuntime::load` 的装配点，classic / 内部 hud 回退**没有**这个全局
+    //   （负控制 = `ui-script-quickjs/sandbox` 的 `typeof log === "undefined"`）。
+    //   必须在 module 求值之前：插件顶层就可能用 `log`。
+    {
+        std::string log_err;
+        if (!installGlobalLog(*impl, &log_err)) {
+            if (err != nullptr) *err = origin + ": " + log_err;
+            return nullptr;
+        }
+    }
 
     // ---- module loader：入口 = origin（绝对路径）；相对 import 的根 = 它的目录 ----
     impl->module_entry_is_path = isFilePathLike(origin);

@@ -4074,6 +4074,110 @@ void caseAtTickIdAttribution() {
 }
 
 // =====================================================================================
+// S3 · 独立全局 `log`（info / warn / error / debug）
+//
+// 判据（每条都点名"红了 = 什么坏了"）：
+//   · `plugin/global-log`         ：四路各写一行 —— ① `start` 里 `log.info`；② `ctx.task` 的
+//                                   continuation（`await Promise.resolve()` 之后）里 `log.warn`；
+//                                   ③ tick handler（`ctx.at`）里 `log.error`；④ `render` 里
+//                                   `log.debug`。另加一行 `ctx.log`（正控制）。行数误差 = 某一路
+//                                   没写 / 写了两次；`lastLogLevel()` 错 = 四个方法共用了同一个级别。
+//   · `plugin/global-log-timeout` ：`ctx.once` 到期 ⇒ catch 在**泵**里跑，`log.error` 可用
+//                                   （随后 fail Run 是既有语义：timeout = 失败截止）。
+//   · `plugin/global-log-number`  ：`log.info(42, {…})` ⇒ 行文本 `42`（非字符串先 `String`；
+//                                   `data` 不进日志行）。
+//   ★ 负控制（**非插件路径**）在 `ui-script-quickjs/sandbox`：classic / 内部 hud 回退里
+//     `typeof log === "undefined"`。
+//   ★ 夹具 = `tests/plugin_fixtures/global-log.js`（`mode=` 分档）。
+// =====================================================================================
+bool loadGlobalLog(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("global-log.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+void caseGlobalLog() {
+    // ---- ① 四路各一行（start / task continuation / tick / render）+ `ctx.log` 正控制 ----
+    lift_test::g_current_case = "plugin/global-log";
+    {
+        Fixture f;
+        if (!loadGlobalLog(f, "all")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        const std::uint64_t base = f.host->logLines();
+        f.pump();  // start：`log.info` + `ctx.log`；task 的 continuation 在同一入口的 drain 里
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        // 四行 = `ctx.at` 的**注册**行（宿主自己的 "ctx.at … handle=N"，不是全局 log 写的）
+        //        + log.info（start）+ ctx.log（正控制；它若抛了 start 就失败）+ log.warn（task）。
+        //   任一条全局写缺席 ⇒ 少于 4 行（红）；级别错了由下面的 `lastLogLevel()` 抓。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(base + 4));
+        LIFT_CHECK(f.host->lastLogLine() == "global-log: task");
+        LIFT_CHECK(f.host->lastLogLevel() == "warn");
+
+        const std::uint64_t after_start = f.host->logLines();
+        dispatchInstr(f, kInstrPos);  // tick handler：log.error
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(after_start + 1));
+        LIFT_CHECK(f.host->lastLogLine() == "global-log: tick");
+        LIFT_CHECK(f.host->lastLogLevel() == "error");
+
+        const std::uint64_t after_tick = f.host->logLines();
+        lift::ui::UiBuilder builder;
+        lift::ui::UiFrameReadings readings;
+        std::string err;
+        LIFT_CHECK(f.host->script() != nullptr && f.host->script()->render(builder, readings, &err));
+        if (!err.empty()) std::fprintf(stderr, "  render error: %s\n", err.c_str());
+        dumpFail(f);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(after_tick + 1));
+        LIFT_CHECK(f.host->lastLogLine() == "global-log: render");
+        LIFT_CHECK(f.host->lastLogLevel() == "debug");
+    }
+
+    // ---- ② timeout 的 catch（**泵**里的 continuation）----
+    lift_test::g_current_case = "plugin/global-log-timeout";
+    {
+        Fixture f;
+        if (!loadGlobalLog(f, "timeout")) return;
+        f.pump();  // start：task 在 await ctx.once(..., timeoutMs=1)
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+        const std::uint64_t base = f.host->logLines();
+        // 超过 1 ms（墙钟；不是 2 ms 的 CPU 预算）⇒ 下一个泵必须判到期。
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        f.pump();  // 泵：reject ⇒ drain 出 catch ⇒ log.error；随后 fail Run
+        dumpFail(f);
+        LIFT_CHECK(f.host->failed());
+        LIFT_CHECK(f.host->logLines() > base);  // catch 真的跑了（不是"没超时所以没写"）
+        LIFT_CHECK(f.host->lastLogLine() == "global-log: timeout");
+        LIFT_CHECK(f.host->lastLogLevel() == "error");
+        LIFT_CHECK(f.host->failReason().find("once timeout") != std::string::npos);
+    }
+
+    // ---- ③ 非字符串参数：`log.info(42, {…})` ⇒ 行文本 `42`，`data` 不进日志行 ----
+    lift_test::g_current_case = "plugin/global-log-number";
+    {
+        Fixture f;
+        if (!loadGlobalLog(f, "number")) return;
+        const std::uint64_t base = f.host->logLines();
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(base + 1));
+        LIFT_CHECK(f.host->lastLogLine() == "42");
+        LIFT_CHECK(f.host->lastLogLevel() == "info");
+    }
+}
+
+// =====================================================================================
 // C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
 //   `fail`/`finish`/`quit`/`profile.*`
 //
@@ -5041,6 +5145,8 @@ int main() {
     caseAtWhereNullField();
     caseAtWhereBig();
     caseAtTickIdAttribution();
+    // ---- S3（独立全局 `log`：start / task / tick / render / timeout 的 catch）----
+    caseGlobalLog();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

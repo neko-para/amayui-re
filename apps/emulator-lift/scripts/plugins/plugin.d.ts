@@ -836,3 +836,25 @@ export interface HookApi {
 // 注意：sample/screenshot 不在这里——它们是 emu-ctl 的控制面组合命令，插件回调不可调用。
 // ---------------------------------------------------------------------------
 }
+
+// ---------------------------------------------------------------------------
+// S3 · 独立全局 `log`（**插件上下文**的全局；不是 `@amayui/lift-plugin` 的导出）
+//
+// ★ 与 `ctx.log` 是同一份宿主实现（`PluginCallHost::log`）：一行一条、有界、连续去重；
+//   `data` 当前**不进日志行**（结构化数据请先 `String(...)` 再传 `message`）。
+// ★ 可用范围：`start` / `onTrigger`、tick handler、`render`、timeout/pump 的 continuation
+//   —— 都不需要先从 `ctx` 上拿它。
+// ★ `message` 非字符串 ⇒ 先 `String(message)`（所以 `log.info(42)` 打 `42`）。
+// ★ 它是**不可写 / 不可配置**的全局：module 里 `log = …` 在 strict 下 TypeError；
+//   要换名字用 `const log = …`（模块作用域 shadow，不影响本全局 / 不泄漏给别的模块）。
+// ⚠ 只装在**插件装载路径**（`--plugin` 的 ES module）；经典 HUD / 内部 hud 回退脚本
+//   （`QuickJsRuntime::load`）里 `typeof log === "undefined"` —— 类型声明只描述插件上下文。
+// ---------------------------------------------------------------------------
+interface LogGlobal {
+    info(message: unknown, data?: unknown): void;
+    warn(message: unknown, data?: unknown): void;
+    error(message: unknown, data?: unknown): void;
+    debug(message: unknown, data?: unknown): void;
+}
+declare const log: LogGlobal;
+
