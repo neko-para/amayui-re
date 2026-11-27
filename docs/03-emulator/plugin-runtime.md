@@ -1149,14 +1149,17 @@ cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/A
 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当唯一合法值。
 
 - **loader**：读 ES module 的 **default 导出**（`PluginModule` 对象）；`render`/`start`/`onTrigger` 都可选，
-  至少一个；有 `start` 就必须有 `onTrigger`，反之亦然；类型不是函数 ⇒ `exit 2` + `file:line`。
+  至少一个；★ **S2b 起 `start` 可以单独存在**（v2 插件用 `ctx.task` / `ctx.once` 驱动，不返回 armed 集合）；
+  `onTrigger` 单独存在仍拒绝（永远没人调它）；类型不是函数 ⇒ `exit 2` + `file:line`。
   ⛔ 不再读 `globalThis.render/start/onTrigger`/命名导出。
 - **`initialState`**：`PluginModule<State>` 可选字段；宿主在 `start` **之前**初始化 `ctx.state: State`；
   省略 ⇒ `{} as State`（有必填字段的插件必须提供 initialState）；`start`/`onTrigger` 首次读也保证有值。
 - **泛型 state**：`PluginModule<State>` / `RunCtx<State>`，`ctx.state: State`（per-Run，只放数据）；
   用 `satisfies PluginModule<State>` + `import type` 做编译期检查（不用运行时 `definePlugin`）；
   `render` 的 per-plugin 状态用模块级变量（与 Run 的 `ctx.state` 区分）。
-- **同步**：`start`/`onTrigger` 必须同步返回；返回 Promise/async ⇒ 明确错误（D10 没有跨帧 async）。
+- **同步（入口本身）**：`start`/`onTrigger` 必须同步返回；返回 Promise/async ⇒ 明确错误。
+  ★ **S2b 起异步只经 `ctx.task` / `ctx.once`**（协程 / Promise<Tick>），不是在 `start` 上 `await`：
+  入口仍是同步的，"异步"是入口内注册、由后续入口的 drain/泵推进（见 §4.14）。
 - **按操作类**：`ctx.input.click/move/down/up` → IntentQueue（串行）；`ctx.edit.global.set` → EditSink（立即）；
   `ctx.read.*` → EngineRead（只读/无暂停）；`sample/screenshot` 不暴露（emu-ctl 组合）；
   ⛔ 没有 `input::*`/`writeGlobal`/`wm.*` 宿主函数（不是“插件只读”，而是操作类/唯一路径）。
@@ -1466,6 +1469,23 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
   形态守卫 `core-shape` ⑦（`instr_hook` 代码里 0 个 quickjs 词）/ ⑧（每个入口 `JS_Call` 后必须 `drainPendingJobs`）。
 - **未做（S2b/S2c）**：`once`/`task`/timeout、`at` 链与 `next()`、`{script,lo,hi}`/`{opcode}` 过滤、
   `Tick` 的 `now/local/edit/input/patch`、全局 `log`。
+
+### 4.14 异步面（S2b：`ctx.once` / `ctx.task` / timeout 泵 / Run 存活）
+
+- **`ctx.once({script, pos}, {timeoutMs})` → `Promise<Tick>`**（`where` 只有 `{script,pos}`；S2c 再加 `{script,lo,hi}` /
+  `{opcode}`）。`timeoutMs` **必填且 > 0**（⛔ 不提供"永不结束的等待"）。实现 = 一条临时 hook（owner = 本 Run）+
+  一张 `once` 账；命中在 sink 里 resolve 同一形状的 tick、随后撤 hook；超时 reject 后在**泵入口** drain（`catch` 可
+  `log`），随后 **`fail Run`（`once-timeout`）** —— timeout 是**失败截止**，不是可恢复等待（父级裁决）。
+- **`ctx.task(async (ctx) => …)`**：调 `fn(ctx)` 并跟踪返回的 Promise（非 Promise ⇒ TypeError）；每个 host→JS 入口
+  drain 之后检查 settle：fulfilled 移除、rejected **fail Run**、pending 保留。tick / pump / render 里调 ⇒ TypeError。
+- **timeout 泵**：`PluginScript::pump(host, budget)` 是**唯一**概念，调用点 = 读点入口（`syncRunnerFailure` 之后、
+  `runClosed` 判断之前）与 `renderFrame` 开头；没有独立 timer、⛔ 不在 `aot_run.cpp`/`machine.cpp` 里加 pump 词。
+- **Run 存活 = 所有 task settled + 没有 sync 订阅**：`hasPendingWork() = tasks ∪ onces ∪ onTick 订阅`；
+  `runClosed()` 要求 `runner.done() && !hasPendingWork()`。**普通 `ctx.hook.at` 不算**（v1 观察，不能被当成"Run 还活着"）。
+  ⇒ v2 插件可以 `start` 返回 `null`，只有 `task`/`once`/`onTick` 时 Run 才继续；settle 后同一个读点收口。
+- **loader**：`start` 可单独存在（无 `onTrigger`）；`onTrigger` 单独仍拒绝；`start` 返回 Promise 仍报错。
+- **门禁**：`plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` /
+  `pump-budget` / `module-start-only`；变异覆盖 `call()` drain / `once` deadline / `hasPendingWork`。
 
 ---
 
@@ -1816,6 +1836,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / 内部 hud 回退（`--overlay` + 无 render 的插件）三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 八成员（含 `config` 与 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（八成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
 | 44 | **指令点钩子的收口 / CAS / 注入可见性（S0）**：hook 归 **Run owner**，Run 的每条收口路径都 `instrHookReleaseOwner`；`patch` 恢复 = **CAS**（当前值仍是我写的编码值才写回），否则计 `restore_conflicts`；持久写（`ctx.edit` / 控制层 `global-set`）**主动撤销** pending；render 期 7 个 `ctx.hook.*` trampoline 一律 TypeError；`--no-s7` / 注入站点 0 ⇒ `at()` 返回 `no_injection`（⛔ 不是永远 hits=0 的假句柄） | Run 结束后仍按条改 guest；窗口里别人的写被静默抹掉；render 里改 hook；插件"装上了但永不命中"且无消息 | `instr-hook`（`patch-restore-cas` / `patch-restore-clean` / `no-injection` / `owner-release` / `patch-edit-cancels-pending`）+ `plugin/hook-release-{fail,done,budget}` + `plugin/render-stored-runctx-rejected`（OPS 含 hook）+ 变异 `--match instr-hook` |
 | 45 | **指令点回调只读 + 每入口 drain（S2a）**：sink 分发在 entries 遍历**之后**；`handle.onTick(fn)` 每句柄一个、tick 只有 `{id,script,pos,opcode?,log}`、`inCallback()` 恒 false；handler 失败只摘 handler（`hit #N` 一行）不 fail Run；每个 host→JS 入口在**同一 CPU 预算窗**内 drain microtask；Run 收口 `on_released` 释放 JS 值、之后 probe 不再调 JS | tick 里能改 guest / 跑 `fail`；JS 回调改 hook 表导致遍历 UB；`await` continuation 漏到下一入口；忙等 await 卡死 guest；Run 结束后仍在跑 JS | `instr-hook/sink-*` + `plugin/point-hit*` + `drain-per-entry` / `drain-budget` + `core-shape` ⑦/⑧ + 变异 `--match 'sink-hit'` / `--match 'drain'` |
+| 46 | **异步面（S2b）**：`once` 只收 `{script,pos}` + `timeoutMs>0`；超时 = reject → 泵 drain → `fail Run`；`task` 返回 Promise 才接受、rejected ⇒ fail Run；`pump` 只在读点 + `renderFrame`；Run 存活 = `tasks ∪ onces ∪ onTick 订阅` 为空才收口；`start` 可单独存在（`onTrigger` 单独仍拒） | 永不结束的 once / once 泄漏 hook；task 拒绝被静默吞；Run 提前 done 把 task 杀掉 / 或永不收口；loader 把 onTrigger-only 当可用 | `plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` / `pump-budget` / `module-start-only` + 3 条变异 |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
