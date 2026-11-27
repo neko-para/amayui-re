@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -27,6 +28,7 @@
 #include "plugin/readings.h"         // C2a：生产 ReadingsSource（marker + 鼠标）
 #include "runtime/capability.h"      // ★ 能力面（`caps=` 的**唯一真源**：与 hello 同一张表）
 #include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
+#include "runtime/experience_lock.h"  // `--user-run`：机器级体验锁（header-only；⛔ 不加 CMake 源文件）
 #include "runtime/guest_exit.h"       // guest 退出码 → 宿主退出码（与解释器臂**同一份**映射；纯头）
 #include "runtime/font.h"             // `--baseline-lift` / `--baseline-lift-by-size`（任何 FontEngine 之前）
 #include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
@@ -115,6 +117,7 @@ void usage() {
         "  --frame-log             每次 Present 打一行帧号 + guest 后缓冲哈希（缺省关）\n"
         "  --region-log            启动 readout 末尾追加 guest 区域表（缺省关；需 --log-level info）\n"
         "  --no-intrinsics         关掉构建期库内建闸门（缺省 = 开；只给 A/B 与诊断）\n"
+        "  --user-run              标记「用户本人正在体验」：写机器级体验锁，构建/测试工具据此让路（缺省关）\n"
         "\n"
         "★ 控制层（缺省不启动；需显式 --control-root）：\n"
         "  --control-root <dir>      端点文件目录\n"
@@ -212,6 +215,13 @@ int main(int argc, char** argv) {
     // ★ `--input-plan-trace`（opt-in，缺省关；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）：只影响
     //   `InputPlan` 的 step 事件输出（`plan:<文件>:<行> …`），⛔ 不改任何 guest 可见状态。
     bool input_plan_trace = false;
+    // ★ `--user-run`（纯开关，缺省关）：标记「用户本人正在体验」—— 只在宿主侧写一个**机器级**
+    //   锁文件（`runtime/experience_lock.h`），⛔ 不改任何模拟语义。读端 / 守卫 =
+    //   `tools/experience.mjs`（构建 / 测试 / 变异自检据此让路）。
+    bool user_run = false;
+    // ★ `--help` 不在这里立刻 return：锁必须在**解析后立刻**写（`--user-run --help` 也要能证明
+    //   "锁在进程存活期间存在"）⇒ 只记下来，解析循环结束后先写锁、再打 usage。
+    bool help_requested = false;
     std::string audio_mode = "off";  // ★ 本臂缺省 off（不开设备 / 不跑混音：与改动前逐位相同）
     // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。它**不是档位**：给了它而档位是 off ⇒
     //   引擎走"设备无关的 dump 路径"（墙钟游标；档位仍写 off、摘要 device=none）。
@@ -339,6 +349,10 @@ int main(int argc, char** argv) {
             // ★ 纯开关（不带值）。没有 `--input-plan` 时本参数只是"没有 step 事件可打"——
             //   ⛔ 不报错、⛔ 不静默改成别的语义（配方是唯一的生产者，见 `InputPlan::setTrace`）。
             input_plan_trace = true;
+        } else if (a == "--user-run") {
+            // ★ 纯开关（不带值）。锁在**解析循环之后立刻**写（那时 `game_dir` / `appdata` 才是
+            //   解析后的值）；只置一个 bool，⛔ 不影响任何模拟语义、⛔ 不与任何参数互斥。
+            user_run = true;
         } else if (a == "--max-frames") {
             std::string v;
             if (!needValue("--max-frames", &v)) return 2;
@@ -652,13 +666,35 @@ int main(int argc, char** argv) {
             }
             scale_spec.filter = parsed.filter;
         } else if (a == "--help" || a == "-h") {
-            usage();
-            return 0;
+            // ★ 只记下来、**不在这里 return**：`--user-run` 的锁要在"解析之后、打 usage 之前"写
+            //   （见循环后的那一段）；否则 `--user-run --help` 根本证明不了锁的存在。
+            help_requested = true;
         } else {
             std::fprintf(stderr, "emulator-lift-aot: 未知参数：%s\n", a.c_str());
             usage();
             return 2;
         }
+    }
+    // =====================================================================================
+    // ★ 用户体验锁（`--user-run`）：**解析后立刻写**，在 `--help` / 任何校验 / bring-up 之前。
+    //   ⇒ "用户正在体验"从进程一开始就在盘上（`tools/experience.mjs` 的 status / guard 与命令行
+    //     兜底都认它），agent 哪怕只抢到一小段时间也能看见并让路。
+    //   ★ 已有别的**活**锁 ⇒ 只 warn + 覆盖，⛔ 不拒绝启动（用户开第二个实例是用户的事）。
+    //   ★ 退出删锁：RAII（栈上对象析构）+ `std::atexit` 兜底，**都核对 pid**（被覆盖后不删别人的）。
+    //   ★ 写不进去不致命：打一行 warn 继续（锁是让路信号，⛔ 不是启动前提）。
+    lift::experience::UserRunLock user_run_lock;
+    if (user_run) {
+        std::error_code cwd_ec;
+        const std::string cwd_text =
+            lift::experience::pathToUtf8(std::filesystem::current_path(cwd_ec));
+        user_run_lock.acquire(args.empty() ? std::string() : args.front(), cwd_text, game_dir,
+                              appdata_dir, args);
+    }
+    // ★ `--help` 放到锁之后：`--user-run --help` 也能证明"锁在进程存活期间存在、退出后消失"
+    //   （本进程立刻退出，锁由 RAII / atexit 删掉）。其余参数的错误仍在前面就 exit 2。
+    if (help_requested) {
+        usage();
+        return 0;
     }
     // ★ **开发者读数的唯一门**（`--log-level info` 及以上；缺省 warn ⇒ 关）。
     //   为什么用 `--log-level` 而不是新开 `--readout`：那会与 `--log-level` 语义重叠

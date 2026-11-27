@@ -54,6 +54,9 @@ import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// ★ 用户体验锁（`--user-run`）的唯一判据（读锁 + 命令行兜底都在这一个模块里）。
+//   ⛔ 不在这里复制一份读锁逻辑（两份判据必然分叉）。
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // ★ CTest 类守卫：行为断言在 `apps/emulator-cxx` 的 CTest 里，`node --test` 跑不了它。
@@ -2867,8 +2870,10 @@ const MUTATIONS = [
   },
 
   // ── 输入投递层 S1（`REQ-01M7G7EMX3JR272D8FVM7JFY9D`；守卫 `tools/test/input-plan-shape.test.mjs`）──
-  //   ★ 三条都只跑 `node --test`（⛔ 不加重建整棵树的 CTest 条目）：判据是**源码形态**，
-  //     改一处文本就够；C++ 侧的关系断言（CTest `input-plan-read-points`）已由普通 CTest 覆盖。
+  //   ★ 两条都只跑 `node --test`（⛔ 不加重建整棵树的 CTest 条目）：判据是**源码形态**，
+  //     改一处文本就够 ⇒ 不需要 `buildDir` / `ctest`。
+  //   ★ 2026-11-27（`REQ-01M875NDRETPPNN68VCE3VMCT1`）：旧的第三条（钉 `tests/input_plan.cpp` 的
+  //     关系断言 / CTest `input-plan-read-points`）随 `--input-plan` 退役**已删**（守卫 ③ 一起删）。
   {
     // 守卫 ①：把"投递/推进"塞回 `Machine::run` 的块边界 `if`（= 用户点名的旧错误）。
     file: 'apps/emulator-lift/src/runtime/machine.cpp',
@@ -2891,92 +2896,7 @@ const MUTATIONS = [
       '删掉 `shimGetAsyncKeyState` 的 `input::deliverLevel(...)` ⇒ 这条读点绕过投递层（"读影子键电平"=真，' +
       '"调了投递入口"=假）⇒ input-plan-shape ② 红并点名 `user32!GetAsyncKeyState`',
   },
-  {
-    // 守卫 ③：把关系断言写成恒真（两侧抄同一个表达式）⇒ "两个独立来源"退化成一份。
-    file: 'apps/emulator-lift/tests/input_plan.cpp',
-    from: '    const std::uint64_t shim_calls = defs[i] != nullptr ? defs[i]->call_count : 0;\n',
-    to: '    const std::uint64_t shim_calls = delivered;  // 变异：关系断言退化成恒真\n',
-    guard: 'tools/test/input-plan-shape.test.mjs',
-    what:
-      '把 CTest `input-plan-read-points` 的 `shim_calls` 直接抄成 `delivered`（`ShimDef::call_count` 那一侧消失）' +
-      '⇒ 关系断言 \(deliverCalls == call_count\) 变成恒真 ⇒ input-plan-shape ③ 红',
-  },
 
-  // ── S4 + S2′（`--input-plan` 的 CLI 面 / 门 + 待抬起；守卫是**两条 CTest**）──
-  //   ★ 两条都只改一处文本，然后重建 + 跑那一条 CTest（`buildDir` = 唯一那棵 lift 树）。
-  {
-    // CLI 面：计划文件不存在 ⇒ **exit 2 + 点名路径**（⛔ 不许静默忽略）。
-    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
-    from:
-      '    if (f == nullptr) {\n' +
-      '        if (err) *err = "打不开配方：" + path;\n' +
-      '        clear();\n' +
-      '        return false;\n' +
-      '    }\n',
-    to:
-      '    if (f == nullptr) {\n' +
-      '        // 变异：打不开的配方被静默吞掉（当空配方继续跑）\n' +
-      '        clear();\n' +
-      '        return true;\n' +
-      '    }\n',
-    guard: 'ctest:cli-aot-flags',
-    ctest: 'cli-aot-flags',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-cli-aot-flags',
-    what:
-      '`InputPlan::loadFile` 打不开文件时返回 true（空计划）⇒ `--input-plan /nonexistent` 不再 exit 2、' +
-      'stderr 也不点名路径 ⇒ cli-aot-flags 的 `input-plan-missing-file` 红（"以为按了、其实没按"）',
-  },
-  {
-    // ★ **端到端接线**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23` · 判据 4 的自检 · stress 档）：
-    //   上面那条只证明 `recipeOutcomeExitCode` 这个**函数**返回 5；它证明不了 `aot_main` 的
-    //   **收口点**用了它。把调用点改成 `return 0;` ⇒ 配方没走完也只打一行 stderr、exit 0
-    //   （= 完成度判据在 AOT 臂上重新变成假绿面）。
-    //   ★ 只有 `ctest:aot-stress-plan-exit5` 能抓：规则级两条用例（`input-plan-read-points`、
-    //     `recipe-driver-parity` 用例 3）读的是函数本身，**不经过** `aot_main`；
-    //     `aot-quit-exit` 的配方 pending=0（不受影响）。
-    //   ★ 条目带 `optInEnv`：该 CTest 注册在 `if(DEFINED ENV{LIFT_STRESS})` 里 ⇒ 没设 `LIFT_STRESS`
-    //     时本工具记「不可判定（本机未启用）」，⛔ 不混进「守卫不存在」（见 §配置期 opt-in）。
-    //     要跑它：`$env:LIFT_STRESS=1` + 重新 configure + 构建，再
-    //     `node tools/mutate-check.mjs --match 'aot-stress-plan-exit5'`。
-    file: 'apps/emulator-lift/src/aot/aot_main.cpp',
-    from:
-      '        return lift::recipeOutcomeExitCode(plan_outcome);  // = 5（recipe.h 的 kRecipeIncompleteExitCode）\n',
-    to: '        return 0;  // 变异：配方没走完也 exit 0（完成度判据在 AOT 收口点断线）\n',
-    guard: 'ctest:aot-stress-plan-exit5',
-    ctest: 'aot-stress-plan-exit5',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-stress-plan-exit5',
-    optInEnv: 'LIFT_STRESS',
-    what:
-      '把 `aot_main` 对"配方没走完"的收口点从 `recipeOutcomeExitCode(plan_outcome)`（= 5）改成恒 0 ⇒ ' +
-      '`aot-stress-plan-exit5` 红（它 spawn 真 AOT + 永不满足门的夹具，断言 exit 5 + stderr 点名 ' +
-      '`<夹具>:<门行>` + `pending != 0`）',
-  },
-  {
-    // ★ **行内 `timeout` 真的被记下来**（2026-11-16 起 `timeout` 只能写在 `await …` 那一行的末尾；
-    //   旧的跨行写法已删）。把"挂到 step 上"改成丢弃 ⇒ 门永远没有守卫 ⇒
-    //   ① `input-plan/parse-errors` 的 `stepAt(0)->timeout_ms == 2500` 红；
-    //   ② `input-plan/step-timeout` 的"超 1 ms 判到期"永远不发生 ⇒ 红。
-    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
-    from:
-      '                s.kind = StepKind::AwaitScript;\n' +
-      '                s.script = tok[2];\n' +
-      '                s.timeout_ms = inline_timeout;  // 行尾 `timeout <ms>`（0 = 没写）\n',
-    to:
-      '                s.kind = StepKind::AwaitScript;\n' +
-      '                s.script = tok[2];\n' +
-      '                (void)inline_timeout;  // 变异：行尾 timeout 被忽略（门永远没有守卫）\n',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '把行尾 `timeout` 的落点丢掉（`s.timeout_ms = inline_timeout` → `(void)inline_timeout`）⇒ ' +
-      '`await script TITLE timeout 2500` 的守卫恒 0 ⇒ input-plan-read-points 的 ' +
-      '`input-plan/parse-errors`（解析后 `timeout_ms` 应为 2500）与 `input-plan/step-timeout`' +
-      '（超 1 ms 应判到期）红',
-  },
   {
     // fixtures 目录白名单：**OS 元数据**必须放过（Finder 会在 `corpus/fixtures/` 里重新生成 `.DS_Store`）。
     //   ★ 判据改成恒 false ⇒ 点文件 / `Thumbs.db` / `desktop.ini` 重新撞穿白名单，
@@ -3665,14 +3585,13 @@ const MUTATIONS = [
       'ui-script-modules 的 module-throw-surfaced 在 err 里看不到 `module-boom` ⇒ 红',
   },
 
-  // ── 注入闸门（2026-11-19 裁决；守卫 = `tests/input_inject_visible.cpp` +
-  //    `tests/input_plan.cpp`）──
+  // ── 注入闸门（2026-11-19 裁决；守卫 = `tests/input_inject_visible.cpp`）──
   //   ★ 代表"按下没被按键电平读到就抬起"这一类**静默**失效：`inputSampleCount()` 把 `GetCursorPos`
   //     也算样本 ⇒ 位置读点满足闸门、`GetAsyncKeyState` 一次都没读过按下（现场读数
   //     `reason=forced samples==press_samples`）。这正是本轮要修掉的根因。
-  //   ★ 判据不变的红/绿：改回总样本数之后，喂 ≥2 个**位置**读点（每个都 `noteInputSample` +1）
-  //     就会抬起 ⇒ `inject/click-two-phase` 的"位置读点再多也不许抬起"当场红
-  //     （`input-plan-read-points` 的 `gates-and-releases` ⑤ 同步红）。
+  //   ★ **2026-11-27**（`REQ-01M875NDRETPPNN68VCE3VMCT1`）：`InputPlan` 驱动的那几条子用例已删；
+  //     今天本条由**插件路径**的 `inject/executor-click-crosses-callback` 抓住（实测：改回总样本数
+  //     ⇒ 同一个回调里就抬起 ⇒ 该用例的"同回调凑满闸门① 仍不许抬"当场红；CTest 退出码 8）。
   {
     // ★ C1a（2026-11-19）：闸门①的实现从 `input_plan.cpp` 搬进了 `PointerCore::releaseDue`
     //   （`runtime/pointer_core.cpp`），读数改走 `PointerPoint::key_level_reads` ⇒ 本条 `file`/`from`
@@ -3687,16 +3606,17 @@ const MUTATIONS = [
     buildTarget: 'lift-input-inject-visible',
     what:
       '抬起闸门从"按下之后至少 N 个 **KeyLevel** 读点"退回"总样本数前进两拍"（`inputSampleCount`，' +
-      '它把 `GetCursorPos` 也算样本）⇒ 位置读点就能满足抬起 ⇒ input-inject-visible 的 ' +
-      '`inject/click-two-phase`（位置读点再多也不许抬起）当场红',
+      '它把 `GetCursorPos` 也算样本）⇒ 同一个回调里凑满两拍样本就抬起 ⇒ input-inject-visible 的 ' +
+      '`inject/executor-click-crosses-callback`（插件路径：同回调凑满闸门① / 过墙钟兜底都不许抬）当场红',
   },
 
   // ── 注入闸门 ②'：抬起必须**跨过一个完整 guest 回调**（2026-11-21；守卫 = `tests/input_inject_visible.cpp`）──
   //   ★ 代表"按下与抬起落在同一个 guest 回调里"这一类**静默**失效：闸门① 的 2 个 KeyLevel 读点
   //     可以全在同一个回调里满足（实测失败臂 press→release 只跨 6 个读点、frames 244→244），
   //     回调体的状态机一次也没看到按下电平 ⇒ 单发 `click … right` 4/5 成。
-  //   ★ 判据不变的红/绿：把 `callback_ok` 改成恒 true ⇒ `inject/click-crosses-callback` 在
-  //     "同一个回调里把墙钟推过 kReleaseFallbackMs 仍不许抬起"那一拍当场红（实测 12 failures）。
+  //   ★ 判据不变的红/绿：把 `callback_ok` 改成恒 true ⇒ `inject/executor-click-crosses-callback`
+  //     在"同一个回调里凑满闸门① / 墙钟过兜底仍不许抬起"那一拍当场红（`InputPlan` 驱动的那条
+  //     同名正例已随 `--input-plan` 退役，2026-11-27）。
   {
     file: 'apps/emulator-lift/src/runtime/pointer_core.cpp',
     from: '        const bool callback_ok = !pt.callback_boundary ||\n' +
@@ -3707,9 +3627,9 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-input-inject-visible',
     what:
-      'click-crosses-callback：抬起不再要求跨过 guest 回调（`callback_ok` 恒 true）⇒ ' +
-      'input-inject-visible 的 `inject/click-crosses-callback`（同一回调里墙钟过 500 ms 仍不许抬起 / ' +
-      '下一个回调的按键读点必须仍读到按下）当场红',
+      '抬起不再要求跨过 guest 回调（`callback_ok` 恒 true）⇒ input-inject-visible 的 ' +
+      '`inject/executor-click-crosses-callback`（同一回调里凑满闸门① + 墙钟过兜底仍不许抬起 / ' +
+      '帧 N+1 仍不许抬起）当场红',
   },
 
   // ── UI 命中顺序（切片 2 后半；守卫 = `tests/ui_hit.cpp`）──
@@ -4196,45 +4116,13 @@ const MUTATIONS = [
   //   ★ 不选 `:1118` 提前返回那一条：那只证明真后端/`gpu-raster` 会红，而它需要 GPU 设备
   //     （无 GPU 的机器上 SKIP 77 ⇒ 变异自检会变成"不可判定"）。
 
-  // ── C3：`runRecipe` 把 `await position` 的左边界翻错（`scripts/plugins/lib/recipe.js`）──────
-  //   ★ 代表"配方 → trigger 的翻译漂了"这一类错：`posFrom → posFrom+1` 之后，driver arm 的那道门
-  //     与 `.plan` 的 `[FROM,TO)` **不再是同一个区间**（区间内部的读数照旧命中 ⇒ 光看"链走完了 /
-  //     `run=done`"抓不到）。红点 = `recipe-driver-parity` 的 `armed 与 oracle 那一步不符`
-  //     （`translation_mismatch`）：oracle 卡在 `await position …` 那一步，driver 却 arm 了不同的 lo。
-  //   ★ 落在 **JS 库**里（不是 C++）：`recipe-driver-parity` 在运行期按 `LIFT_PLUGIN_LIB_DIR` 直接读
-  //     该文件 ⇒ 不需要重编；`buildTarget` 只是让自检走同一条"重建守卫 exe + 跑 ctest"的路径
-  //     （重建是空操作），语义与 `save.js` 那条一致。
-  {
-    file: 'apps/emulator-lift/scripts/plugins/lib/recipe.js',
-    from: '            return ctx.trigger.afterPosition(step.script, step.posFrom, step.posTo,\n',
-    to:
-      '            // 变异：把 `await position` 的左边界挪 1（门的区间与 `.plan` 不再是同一个）\n' +
-      '            return ctx.trigger.afterPosition(step.script, step.posFrom + 1, step.posTo,\n',
-    guard: 'ctest:recipe-driver-parity',
-    ctest: 'recipe-driver-parity',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-recipe-driver-parity',
-    what:
-      '`runRecipe` 的 `await position` 左边界 `posFrom → posFrom+1` ⇒ driver arm 的门与 `.plan` 的 ' +
-      '`[FROM,TO)` 不一致（`recipe-driver-parity` 红在 `armed 与 oracle 那一步不符`；链仍能走完 ⇒ ' +
-      '只看 `run=done` 的断言抓不到）',
-  },
+  // ── 2026-11-27：C3 的 `runRecipe` 左边界变异随守卫一起删 ──
+  //   守卫是 `ctest:recipe-driver-parity`（含 12 份 `.plan` 的逐条 replay）；按用户裁决
+  //   `REQ-01M875NDRETPPNN68VCE3VMCT1`（`--input-plan` / `.plan` 整体退役），该 CTest 本批删除。
 
-  // ── 配方等待策略（★ 新 `wait` 静默混进 `.plan` ⇒ 又有场景在拿墙钟当门）──────────────
-  //   ★ 这一类错长什么样：某个场景"等 1 s 再点"能跑通，于是时间被当成门的替代品；
-  //     换机器 / 换负载就变成偶发（`plugin/load-save-e2e` 的两种形态就是这个形状）。
-  //   ★ 守卫 = `tools/test/recipe-wait-policy.test.mjs`（白名单集合相等；棘轮只降）。
-  //     ⛔ 不选"删一条 wait"当变异：删掉也照样能跑 —— 那是白名单 stale 的方向，已被用例 ③ 覆盖。
-  {
-    file: 'apps/emulator-lift/scripts/recipes/save07-battle.plan',
-    from: 'await position BTL 0x4A84 0x4AE4 timeout 180000\nquit',
-    to: 'await position BTL 0x4A84 0x4AE4 timeout 180000\nwait 777\nquit',
-    guard: 'tools/test/recipe-wait-policy.test.mjs',
-    what:
-      '往一份"已经没有 wait"的配方里加一条 `wait 777` ⇒ 白名单里没有它 ⇒ ' +
-      '`recipe-wait-policy/wait-set-equal` 红（"又有一个配方在拿时间当等待条件"；' +
-      '而这条配方照旧能跑完 ⇒ 只看 exit 0 / pending=0 的判据抓不到）',
-  },
+  // ── 2026-11-27：配方等待策略变异随守卫一起删 ──
+  //   守卫 `tools/test/recipe-wait-policy.test.mjs`（`scripts/recipes/*.plan` 的 wait 白名单）
+  //   只对 `.plan` 有意义 ⇒ 与本批的 `--input-plan` 退役一起删除（`.plan` 文件本身下一批删）。
 
   // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.js`）──
   //   ★ 这一类错长什么样：某次调试把"从 trace 抄来的区间"直接写进消费方（`save.js` / 场景文件），
@@ -4632,6 +4520,20 @@ const MUTATIONS = [
       '（页面无症状，盘上坏值）⇒ `ui-settings-page` 的 `number-clamp-*` 红',
   },
 
+  // ── 用户体验锁（`--user-run` · AGENTS §17）：判活被短路 ⇒ 用户正在体验也判 INACTIVE ──
+  //   ★ 代表这一类错：`classifyLock` 永远把锁当 stale ⇒ `status` / `guard` 都放行，agent 照常
+  //     构建 / 跑测 / kill，用户被再次打断 —— 正是 §17 要防的那件事，而且**没有任何症状**
+  //     （`status` 也显示 INACTIVE，看起来像"用户没在跑"）。
+  {
+    file: 'tools/lib/experience.mjs',
+    from: '  const byLock = classifyLock(read, { alive });',
+    to: '  const byLock = classifyLock(read, { alive: () => false });',
+    guard: 'tools/test/experience.test.mjs',
+    what:
+      '判活被短路（锁永远 stale）⇒ 用户正在体验时 `status` / `guard` 都报 INACTIVE ⇒ agent 再次打断用户' +
+      '（`pid 活着 ⇒ active` 红）',
+  },
+
 ];
 
 let mutationRunSeq = 0;
@@ -4997,6 +4899,10 @@ export async function main(argv = process.argv.slice(2)) {
     );
     return 0;
   }
+
+  // ★ 用户体验锁（`--user-run`）**不挡变异自检**（用户口径 2026-11-27：体验构建永远走 `out-user/`，
+  //   本工具在 `out/` 里改文件 / 构建不会影响体验）。锁只用于**杀进程前认人**：
+  //   `node tools/experience.mjs status`（AGENTS §17）。⛔ 不要在这里加"让路"阻塞。
 
   const results = [];
   // ★ 信号恢复要看的"当前已施加"清单 + journal 里的条目（两者同源，顺序一致）

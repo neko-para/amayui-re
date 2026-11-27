@@ -581,3 +581,34 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
   - **删除**：低价值用例直接删（`tools/mutate-check.mjs` 的对应条目一起删）。删 / 禁 CTest 后**必须
     reconfigure**，否则 `mutate-check --list` 会报"守卫不存在"（它读 `out/CTestTestfile.cmake`）。
 ★ 只有"变了就是静默 bug"才配守卫（§10 三问）；守卫的门槛不因为"删了很多测试"而放宽。
+
+---
+
+## 17. 用户体验标记（--user-run）—— **只防误杀，不拦构建**
+
+★ 起因（2026-11-27）：用户本人在跑游戏体验时，agent 的 `kill` / `ctest` 把他打断了。
+★ **用户口径（2026-11-27 修订）**：体验产物**永远**用 `out-user/` 构建（两台设备都是）⇒ agent 在 `out/`
+  构建 / 跑测 / 变异自检**不会影响体验** ⇒ ⛔ **不要**拿"用户正在体验"去阻塞构建或测试。
+  锁的唯一用途 = **agent 动手杀进程之前先认人**。
+
+- **用户侧**：跑游戏时加 `--user-run`（`apps/emulator-lift/src/aot/aot_main.cpp`，纯开关）。
+  它写一个**机器级**锁 `<os temp>/amayui-re-experience.json`（`{"pid","started_at","exe","cwd","game_dir","appdata","argv"}`），
+  并打一行 `[experience] 用户正在体验（pid=…，lock=…）⇒ 杀进程前先看这里（--user-run）`；
+  进程退出（正常 / 异常）由 RAII + `std::atexit` 删锁（删之前核对 pid，被别的实例覆盖时不删别人的）。
+  锁**不改任何模拟语义**；已有别的活锁只 warn + 覆盖，不拒绝启动；flag 在进程命令行里可见。
+- **kill 纪律（硬线，比锁本身重要）**：
+  - ⛔ **永远不要** `pkill` / `killall` / 按名字或命令行**宽匹配**杀进程（`pkill -f emulator-lift` 会连用户正在玩的实例一起杀）；
+    ⛔ 不要"先过滤出候选再杀"——进程名 / 命令行都会撞。
+  - 只允许 kill **本会话自己启动的、pid 明确的**子进程；杀之前先跑
+    ```bash
+    node tools/experience.mjs status
+    ```
+    ACTIVE 且目标 pid 在锁或 `--user-run` 命令行里 ⇒ **不杀**，报给用户。
+  - 超时 / 挂住的子进程：先 kill 你**自己启动的那个 pid**，⛔ 不要连带进程组 / 树。
+- `node tools/experience.mjs status|guard|clear` 保留：`status` 是动手前的人机读数；`guard` 是同一判据的退出码版
+  （ACTIVE ⇒ 2），**不再**前置到 `pnpm test` / `verify` / `test:mutation`，也**不再**挡 `mutate-check`。
+- **判活口径**：`process.kill(pid, 0)` —— `ESRCH` = 死（锁是残留，`clear` 可清）、`EPERM` = 活。
+  用户 `std::_Exit(3)`（guest fault）会留下锁，但 pid 已死 ⇒ `status` 判 **INACTIVE**，不是误报 ACTIVE。
+- **锁缺失也认**：`status` 兜底扫命令行里含 `--user-run` 的进程（POSIX `pgrep -fl -- '--user-run'`；
+  win32 `Get-CimInstance Win32_Process`）—— 用旧二进制跑游戏时 flag 仍在。⛔ 兜底只**读**，不 kill。
+- **机器级、两个工作树共用**（§14.5）：锁在 `<os temp>`，不随工作树走（mac 上只有一棵树，口径相同）。
