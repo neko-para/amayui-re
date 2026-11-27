@@ -242,6 +242,15 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     // ★ F2：`onTrigger` 返回的集合由 **runner** `install`；失败（重复 name / Once 回放 / 非法 kind）
     //   只会写进 runner 的账 ⇒ 不同步出来的话 readout 会说 `run=waiting`（生产上只能等 --time-limit）。
     syncRunnerFailure();
+    // ★ S2b：async 泵（**没有独立 timer**；`PluginScript::pump` 是语言无关的唯一概念）。位置有意：
+    //   `syncRunnerFailure()` 之后、`runClosed()` 判断**之前** —— 泵可能在**本读点**把最后一个 task
+    //   settle 掉 / 把 once 超时处理掉 ⇒ 同一个读点就要能收口（顺序 pump → runClosed → release）。
+    //   ★ 已经 failed / finished / quit / runner failed 时**不再**跑用户 JS（Run 已收口；残余 job
+    //   交给 `Impl::shutdown` 的兜底 drain）。`runner.done()` **不是**跳过条件：task / once 正在
+    //   等它的时候，泵就是唯一的推进点。
+    if (script_ != nullptr && !failed_ && !finished_ && !quit_requested_ && !runner_.failed()) {
+        script_->pump(*this, runner_.budget());
+    }
     // ★ S0（缺陷 1）：`onTrigger` 返回 `[]` ⇒ `install` 把 runner 置 done，**这发生在回调返回之后**
     //   ⇒ `onTrigger` / `runCallback` 自己看不到。这里是读点入口里唯一能看到那个状态的地方。
     if (runClosed()) releaseRunHooks();
@@ -274,7 +283,11 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
 void PluginHost::releaseRunHooks() { lift::instrHookReleaseOwner(run_serial_); }
 
 bool PluginHost::runClosed() const {
-    return failed_ || finished_ || quit_requested_ || runner_.failed() || runner_.done();
+    // ★ S2b：`runner.done()` 不再是唯一条件 —— 还有**待推的异步工作**（task / once / onTick 订阅）时
+    //   Run 必须活着（否则 `return []` 会把一个还在 `await ctx.once(...)` 的 Run 收口掉）。
+    //   `hasPendingWork` 只认那三样：普通 `ctx.hook.at` 是 v1 观察，⛔ 不算。
+    const bool pending = script_ != nullptr && script_->hasPendingWork();
+    return failed_ || finished_ || quit_requested_ || runner_.failed() || (runner_.done() && !pending);
 }
 
 // =====================================================================================
@@ -705,7 +718,9 @@ std::string PluginHost::readout() const {
         state = "quit";
     } else if (finished_) {
         state = "finished";
-    } else if (runner_.done()) {
+    } else if (runner_.done() && !(script_ != nullptr && script_->hasPendingWork())) {
+        // ★ S2b：`runner.done()` + **仍有待推的异步工作** ⇒ Run 还活着 ⇒ 读数是 `run=waiting`
+        //   （⛔ 不写 `run=done`：那会让"还在等 ctx.once 的 Run"看起来已经收口）。
         state = "done";
     }
     out += std::string(" run=") + state;

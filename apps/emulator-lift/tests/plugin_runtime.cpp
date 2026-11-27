@@ -7,8 +7,10 @@
 //   · `plugin/initial-state`              ：`initialState` 在 `start` 之前注入；无 `initialState` ⇒ `{}`；
 //                                            `ctx.state` 是 per-Run 的（同一 Run 的第二个回调看得到）。
 //   · `plugin/concurrent-arm`             ：一读点最多一个（注册顺序）；返回数组**完整替换**；`[]`=done。
-//   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
-//                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
+//   · `plugin/module-default`（+ start-only / onTrigger-only）：只读 `export default`；default 不是
+//                                            对象 ⇒ **装载失败并点名**；`start` **可单独存在**
+//                                            （S2b：v2 用 ctx.task / ctx.once 驱动）；`onTrigger`
+//                                            单独存在 ⇒ 装载失败（没有 start 就永远没人调它）。
 //   · `plugin/ts-module`（S1b）           ：入口 `.ts` 经 `initFromFile`（路径形式）+ `lib/helper.ts`
 //                                            运行期 import（宿主按扩展名加 `JS_EVAL_FLAG_TYPESCRIPT`）；
 //                                            click 坐标 = helper 的**运行期**导出（⛔ 不是"没报错"）。
@@ -1893,11 +1895,30 @@ void caseModuleContract() {
         LIFT_CHECK(!f.load("bad-default.js"));
         LIFT_CHECK(f.load_error.find("export default") != std::string::npos);
     }
-    lift_test::g_current_case = "plugin/module-start-onTrigger-pair";
+    lift_test::g_current_case = "plugin/module-start-only";
     {
+        // ★ S2b（v2 兼容层第一处放宽）：`start` 单独存在（没有 `onTrigger`）⇒ **合法**。
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        const bool loaded = f.load("start-only.js");
+        LIFT_CHECK(loaded);
+        if (loaded) {
+            LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRun());
+            LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->hasRender());
+            f.pump();
+            dumpFail(f);
+            LIFT_CHECK(!f.host->failed());
+            LIFT_CHECK(f.host->runner().done());
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+            LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        }
+    }
+    lift_test::g_current_case = "plugin/module-onTrigger-only";
+    {
+        // 反方向仍拒绝：`onTrigger` 单独存在（没有 start 就永远没人调它）⇒ 装载失败并点名。
         Fixture f;
         LIFT_CHECK(!f.load("bad-pair.js"));
-        LIFT_CHECK(f.load_error.find("成对") != std::string::npos);
+        LIFT_CHECK(f.load_error.find("onTrigger") != std::string::npos);
     }
     lift_test::g_current_case = "plugin/module-render-only";
     {
@@ -2501,6 +2522,201 @@ void caseDrainBudget() {
     std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
 }
 
+
+// =====================================================================================
+// S2b · `ctx.once` / `ctx.task` / timeout 泵 / Run 存活
+//
+// 判据（每条都点名"红了 = 什么坏了"）：
+//   · `plugin/once-resolve`   ：once 命中 ⇒ resolve 的 Tick 与 `onTick` 同形（pos/script/id/opcode），
+//                                临时 hook 命中即撤；task 的 continuation 在**泵**里跑完。
+//   · `plugin/once-timeout`   ：不命中 + 短 timeout ⇒ 泵先 reject（catch 能 log）**随后** fail Run；
+//                                `instrHookList()` 空、无 hook 残留、readout `run=failed`。
+//   · `plugin/task-await`     ：task 的 phase=1→2 在**同一入口**完成（跨入口看到 1 = 红）；settle 后收口。
+//   · `plugin/task-await-close`：start 返回 null + task 立即 settle ⇒ readout `run=done`。
+//   · `plugin/task-keeps-run` ：task `await ctx.once(长 timeout)` ⇒ `runner.done()` 但 Run 不收口；
+//                                once 命中 ⇒ task 结束 ⇒ 收口。
+//   · `plugin/task-reject`    ：task 抛 boom ⇒ run=failed + reason 含 boom。
+//   · `plugin/pump-budget`    ：泵里 `while(true) await Promise.resolve()` ⇒ 预算中断、Run fail、不卡死。
+// =====================================================================================
+constexpr std::uint32_t kS2bOutPos = 0xb120u;
+constexpr std::uint32_t kS2bOutScriptOk = 0xb121u;
+constexpr std::uint32_t kS2bOutId = 0xb122u;
+constexpr std::uint32_t kS2bOutOpcodeOk = 0xb123u;
+constexpr std::uint32_t kS2bOutHooks = 0xb124u;
+constexpr std::uint32_t kS2bOutPhase = 0xb125u;
+
+bool loadS2b(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("s2b-async.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+void caseOnceResolve() {
+    lift_test::g_current_case = "plugin/once-resolve";
+    Fixture f;
+    if (!loadS2b(f, "once-resolve")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：注册 once（临时 hook）+ task
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+    if (hooks.size() != 1) return;
+    const std::uint32_t handle = hooks[0].id;
+    const std::uint64_t base = f.host->logLines();
+
+    // 命中：resolve + 撤临时 hook（探针本身不 drain；continuation 由下一个泵推进）。
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->instrHookList().empty());
+
+    // 泵：task 的 continuation 跑完（模块变量 lastTick 记下 Tick 字段，并 log 一行）。
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+
+    // 下一次合法 Run 回调把 lastTick 写回 guest（Run 还活着：armed 的 dump trigger）。
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutPos), kInstrPos);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutScriptOk), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutId), handle);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutOpcodeOk), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutHooks), 0u);
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+}
+
+void caseOnceTimeout() {
+    lift_test::g_current_case = "plugin/once-timeout";
+    Fixture f;
+    if (!loadS2b(f, "once-timeout")) return;
+    f.pump();  // start：task 里 `await ctx.once(..., timeoutMs=1)`
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    const std::uint64_t base = f.host->logLines();
+    // 超过 1 ms（墙钟；不是 2 ms 的 CPU 预算）⇒ 下一个泵必须判到期。
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    // ① reason 点名 timeout（父级裁决：timeout = 失败截止，用户 catch 了也照样 fail）。
+    const std::string& reason = f.host->failReason();
+    LIFT_CHECK(reason.find("once timeout") != std::string::npos);
+    // ② catch 在**泵**里 drain 到了（那行 log 是 catch 打的，证明"先 reject 再 fail"的顺序）。
+    LIFT_CHECK(f.host->logLines() > base);
+    // ③ 临时 hook 与条目一起消失（无 hook 残留）。
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+    LIFT_CHECK(f.host->readout().find("run=failed") != std::string::npos);
+    std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
+}
+
+void caseTaskAwait() {
+    // ---- ① 跨入口看不到 phase=1：continuation 必须在 start 的入口末尾跑完 ----
+    lift_test::g_current_case = "plugin/task-await";
+    {
+        Fixture f;
+        if (!loadS2b(f, "task-await")) return;
+        f.pump();  // start：task 写 phase=1、await，然后在本入口末尾续到 2
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        // start 一行 + continuation 一行（continuation 若漏 drain，这一行会落到第二个读点之后）。
+        LIFT_CHECK(f.host->logLines() >= 2u);
+        f.readings.pos = 0x1000u;
+        f.pump();  // onTrigger 把模块变量 phase 写进 guest
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutPhase), 2u);
+        LIFT_CHECK(f.host->runner().done());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    }
+    // ---- ② task settle ⇒ Run 收口（start 返回 null；没有 armed trigger 也能 done）----
+    lift_test::g_current_case = "plugin/task-await-close";
+    {
+        Fixture f;
+        if (!loadS2b(f, "task-close")) return;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        // start 一行 + task 续到结尾一行（证明 task 真的跑了，不是"没登记也刚好 done"）。
+        LIFT_CHECK(f.host->logLines() >= 2u);
+        LIFT_CHECK(f.host->runner().done());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    }
+}
+
+void caseTaskKeepsRun() {
+    lift_test::g_current_case = "plugin/task-keeps-run";
+    Fixture f;
+    if (!loadS2b(f, "task-keeps-run")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start 返回 null（runner done），但 task 还在 await once ⇒ Run 必须活着
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    // ★ 判据：Run 还活着 —— once 的临时 hook 还在；readout 不能写 `run=done`。
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    const std::uint64_t base = f.host->logLines();
+
+    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ 撤 hook、enqueue task continuation
+    LIFT_CHECK(f.host->instrHookList().empty());
+    f.pump();  // 泵：task 续到结尾并 settle ⇒ Run 收口
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+}
+
+void caseTaskReject() {
+    lift_test::g_current_case = "plugin/task-reject";
+    Fixture f;
+    if (!loadS2b(f, "task-reject")) return;
+    f.pump();  // start 里 `ctx.task(async () => { throw new Error("boom"); })`
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK(f.host->failReason().find("boom") != std::string::npos);
+    LIFT_CHECK(f.host->readout().find("run=failed") != std::string::npos);
+    std::printf("  [%s] reason=%s\n", lift_test::g_current_case, f.host->failReason().c_str());
+}
+
+void casePumpBudget() {
+    lift_test::g_current_case = "plugin/pump-budget";
+    Fixture f;
+    if (!loadS2b(f, "pump-budget")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    // 生产值 2 ms + op_limit 不限：判的**只**是泵的 CPU deadline（与 `plugin/drain-budget` 同形）。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();  // start：task 在 await once（不 spin）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ 下一次泵的 drain 会续到 while(true)
+    LIFT_CHECK(f.host->instrHookList().empty());
+    const std::uint64_t base = f.host->logLines();
+    f.pump();  // 不返回 = 泵的 drain 没有 deadline（本用例的红就是挂住）
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    // 泵里的 task 真的 resume 了（"about to spin" 那行），否则"没 fail"可能是"根本没跑到"。
+    LIFT_CHECK(f.host->logLines() > base);
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->overran());
+    const std::string& reason = f.host->failReason();
+    LIFT_CHECK(reason.find("interrupted") != std::string::npos);
+    LIFT_CHECK(reason.find("泵里的异步状态超出预算") != std::string::npos);
+    std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
+}
 
 // =====================================================================================
 // C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
@@ -3426,6 +3642,13 @@ int main() {
     casePointHitAfterRunEnd();
     caseDrainPerEntry();
     caseDrainBudget();
+    // ---- S2b（`ctx.once` / `ctx.task` / timeout 泵 / Run 存活）----
+    caseOnceResolve();
+    caseOnceTimeout();
+    caseTaskAwait();
+    caseTaskKeepsRun();
+    caseTaskReject();
+    casePumpBudget();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

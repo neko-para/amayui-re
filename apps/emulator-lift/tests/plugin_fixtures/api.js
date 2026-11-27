@@ -13,6 +13,10 @@ const REQUIRED = [
     "input",
     "read",
     "trigger",
+    "hook",
+    // ★ S2b：异步面（`once` 返回 Promise<InstrTick>；`task` 登记协程）。
+    "once",
+    "task",
     "ui",
     "profile",
     "state",
@@ -27,6 +31,9 @@ const REQUIRED = [
 ];
 
 const FORBIDDEN = ["draw", "run", "dispatch", "sample", "screenshot"];
+
+// `ctx.once` 的形状探针用（**只喂非法参数** ⇒ 不会真的装 hook）。
+const SCRIPT_FOR_SHAPE = "FIELD.BIN";
 
 const plugin = {
     start(ctx) {
@@ -120,6 +127,39 @@ const plugin = {
                 }
                 if (!threw) bad.push("config.domain:no-appdata-did-not-throw");
             }
+        }
+
+        // ---- S2b：异步面的**输入校验**（都是 TypeError，⛔ 不静默接受）----
+        //   `once`：where 必须是 {script,pos}；script 非空、pos > 0；timeoutMs **必填且 > 0**。
+        //   ★ 这里只喂**非法**参数 ⇒ 校验在 `instrHookAdd` 之前抛，不会留下真的临时 hook。
+        const badOnce = [
+            () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }),
+            () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, {}),
+            () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, { timeoutMs: 0 }),
+            () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, { timeoutMs: -1 }),
+            () => ctx.once({ script: "", pos: 0x100 }, { timeoutMs: 1 }),
+            () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0 }, { timeoutMs: 1 }),
+        ];
+        for (const call of badOnce) {
+            let threw = false;
+            try {
+                call();
+            } catch (e) {
+                threw = true;
+                if (!e || e.name !== "TypeError") bad.push("once.bad-arg.error:" + String(e));
+            }
+            if (!threw) bad.push("once.bad-arg.accepted");
+        }
+        //   `task`：fn 必须返回 Promise（普通函数 ⇒ TypeError；⛔ 不把返回值当 task）。
+        {
+            let threw = false;
+            try {
+                ctx.task(() => 1);
+            } catch (e) {
+                threw = true;
+                if (!e || e.name !== "TypeError") bad.push("task.non-promise.error:" + String(e));
+            }
+            if (!threw) bad.push("task.non-promise.accepted");
         }
 
         if (bad.length !== 0) {
