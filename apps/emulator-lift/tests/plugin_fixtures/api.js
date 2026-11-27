@@ -214,6 +214,12 @@ const plugin = {
                 () => ctx.at({ script: SCRIPT_FOR_SHAPE, opcode: -1 }, () => {}),
                 () => ctx.at({ script: SCRIPT_FOR_SHAPE, opcode: 4294967296 }, () => {}),
                 () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, 1),
+                // ★ S2c-2 复审 F1：键**存在**但值是 null/undefined ⇒ TypeError（⛔ 不算"没给"）。
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: undefined }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: null }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: null, hi: 0x108 }, () => {}),
+                () => ctx.at({ script: null }, () => {}),
+                () => ctx.at({ opcode: undefined }, () => {}),
             ];
             for (const call of badAt) {
                 let threw = false;

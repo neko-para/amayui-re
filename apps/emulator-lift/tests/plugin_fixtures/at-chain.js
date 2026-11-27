@@ -24,8 +24,12 @@
 //     ⇒ 读得到值、**不** stale（`ticks.clear()` 若挪到 drain 之前，这里就 stale）。
 //   · `where-range`     ：`{script,lo,hi}` = `[lo,hi)`：lo 命中 / hi-1 命中 / hi 不命中 / lo-1 不命中。
 //   · `where-script`    ：`{script}` = 整本脚本的每条指令（两个不同 pos 都命中；换脚本 ⇒ 0）。
-//   · `where-opcode`    ：`{opcode:114}` 在两条不同 pos 都命中；`{script,opcode}` 只在该脚本命中。
+//   · `where-opcode`    ：`{opcode:114}` 在两条不同 pos 都命中；`{script,opcode}` 只在该脚本命中；
+//     `{opcode:0}` 在**未提交 pc** 上不命中（⛔ 不编 0）、在真读到 0 时命中（正控制）。
 //   · `where-mixed`     ：同拍 `{script}` + `{script,pos}` + `{opcode}` 按注册序成一条链。
+//   · `where-big`       ：`{script,lo,hi}` 的 `lo/hi > 2^31` 从 `hook.list()` **原样**读回（uint32 口径）。
+//   · `where-null-field`：where 的键**存在但值是 null/undefined** ⇒ TypeError（⛔ 不静默退化）+
+//     合法形态仍装得上（`hook.list()` 不新增条目）。
 //   · `tick-id`         ：多 Impl 同活时 `tick.id` 必须是本实例自己的句柄（⛔ 不是 `hits[0]`）。
 //   · `tick-edit`       ：tick 里 `edit.global.set` ⇒ guest int 立即变；同一 handler 里 `ctx.fail` 仍
 //     TypeError（"写面不是把 in_callback_ 打开"的读数）。
@@ -35,6 +39,8 @@
 //   · `tick-patch-limit`：9 个不同地址 + 1 个越界 ⇒ 前 8 条生效、第 9 条 `too_many_slots` + `skips=1`、
 //     越界 target ⇒ `bad_target`。
 //   · `once-tick-writable`：`once` resolve 的 `.then` 里 `tick.local` / `tick.edit` 可用（同一入口 drain）。
+//   · `once-tick-patch` ：同一个 `.then` 里 `tick.patch` ⇒ 回执 `code:"once_tick"`（⛔ 不是 no_such_hook）、
+//     guest 零变化；`tick.local` / `tick.edit` 仍可用。
 //
 // ★ Tick 入口的**写面**（S2c-2）：`tick.edit` / `tick.input` / `tick.patch` 可用；从 RunCtx 调的
 //   `ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 仍 TypeError。
@@ -67,6 +73,7 @@ let phase = 0;
 let h1 = null;
 let h2 = null;
 let h3 = null;
+let h0 = null;          // `where-opcode`：`{opcode:0}` 的订阅
 let hNow = null;
 let v1 = null;
 let selfSub = null;
@@ -84,6 +91,11 @@ let whereRan = 0;       // 命中次数（range / script）
 let wherePos = [];      // range / script 形态下每次命中的 `tick.now.pos`
 let opAllRuns = 0;      // `{opcode:114}` 的命中次数（全局）
 let opScopedRuns = 0;   // `{script,opcode:114}` 的命中次数（只在该脚本）
+let opZeroRuns = 0;     // `{opcode:0}` 的命中次数（未提交 pc 上一拍都不许涨）
+let bigRan = 0;         // `where-big`：大区间订阅的命中次数（不派发 ⇒ 0）
+let nullThrew = 0;      // `where-null-field`：非法形态抛了几条
+let nullType = 0;       // 其中是 TypeError 的条数
+let nullSub = 0;        // 正控制：合法形态拿到的 id（> 0 ⇒ 合法面没坏）
 let seenTickId = 0;     // `tick-id`：本实例看到的 `tick.id`
 let seenTickRuns = 0;   // 它跑了几次
 
@@ -103,6 +115,10 @@ let patchSubs = [];         // 它们的句柄（第 9 条 = too_many_slots 的�
 let onceLocal = UNDEF;      // `once-tick-writable`：continuation 读到的 local.int(0)
 let onceEdit = 0;           // 它的 tick.edit 回执 accepted&&applied
 let onceErr = 0;
+// ---- S2c-2 复审 F2：`once` 的 Tick 调 `tick.patch`（必须回执 `once_tick`）----
+let oncePatchCode = "";
+let oncePatchAccepted = 0;
+let oncePatchApplied = 0;
 
 function note(value) {
     return value === undefined ? UNDEF : value;
@@ -250,6 +266,13 @@ const plugin = {
                     typeof l.ptr !== "function" || typeof l.ptrDword !== "function") {
                     throw new Error("local: tick.local 形状错");
                 }
+                // ★ S2c-2 复审 F9：index 必须是整数 ⇒ 小数 TypeError（⛔ 不截断到相邻槽）。
+                let fracType = 0;
+                try {
+                    l.int(0.5);
+                } catch (e) {
+                    fracType = (e && e.name === "TypeError") ? 1 : 2;
+                }
                 localRec = {
                     int0: l.int(0),
                     int7: l.int(7),
@@ -258,6 +281,7 @@ const plugin = {
                     ptrDword0: l.ptrDword(0),
                     ptr2: l.ptr(2),
                     ptrDword1: l.ptrDword(1),
+                    intFracType: fracType,
                 };
             });
             if (typeof hNow !== "number") throw new Error("local: at failed");
@@ -359,7 +383,12 @@ const plugin = {
             h2 = ctx.at({ script: SCRIPT, opcode: 114 }, () => {
                 opScopedRuns += 1;
             });
-            if (typeof h1 !== "number" || typeof h2 !== "number") {
+            // ★ S2c-2 复审 F3：`opcode == 0` 的订阅 —— 未提交 pc（读不到 opcode）时**一拍都不许命中**。
+            //   修前的断言用的订阅值不是 0，所以"读失败 ⇒ 编 0"那条错它区分不出来。
+            h0 = ctx.at({ opcode: 0 }, () => {
+                opZeroRuns += 1;
+            });
+            if (typeof h1 !== "number" || typeof h2 !== "number" || typeof h0 !== "number") {
                 throw new Error("where-opcode: at failed");
             }
             ctx.log("info", "at-chain: installed mode=where-opcode");
@@ -382,6 +411,41 @@ const plugin = {
                 throw new Error("where-mixed: at failed");
             }
             ctx.log("info", "at-chain: installed mode=where-mixed");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "where-big") {
+            // ★ S2c-2 复审 F10：`lo/hi` 是 uint32 语义 ⇒ > 2^31 的值必须从 hook.list() **原样**读回
+            //   （int32 出口会变成负数；C++ 侧回写 guest 再读回看不出来，所以判据在这里）。
+            h1 = ctx.at({ script: SCRIPT, lo: 0x90000000, hi: 0x90000010 }, () => {
+                bigRan += 1;
+            });
+            if (typeof h1 !== "number") throw new Error("where-big: at failed");
+            ctx.log("info", "at-chain: installed mode=where-big");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "where-null-field") {
+            // ★ S2c-2 复审 F1：键**存在**但值是 null/undefined ⇒ TypeError（与"没给这个键"区分）。
+            //   修前 `{script, pos: undefined}` 会静默变成 `{script}` 整本脚本订阅（表里多一条）。
+            const bad = [
+                { script: SCRIPT, pos: undefined },
+                { script: SCRIPT, pos: null },
+                { script: SCRIPT, lo: null, hi: 0x108 },
+                { script: SCRIPT, lo: 0x100, hi: undefined },
+                { script: SCRIPT, opcode: undefined },
+                { script: null },
+            ];
+            for (const where of bad) {
+                try {
+                    ctx.at(where, () => {});
+                } catch (e) {
+                    nullThrew += 1;
+                    if (e && e.name === "TypeError") nullType += 1;
+                }
+            }
+            // 正控制：合法形态仍装得上（"表里只剩一条"不是"at 整个坏了"）。
+            nullSub = ctx.at({ script: SCRIPT, pos: POS }, () => {});
+            if (typeof nullSub !== "number") throw new Error("where-null-field: good at failed");
+            ctx.log("info", "at-chain: installed mode=where-null-field");
             return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
         }
         if (mode === "tick-id") {
@@ -508,6 +572,29 @@ const plugin = {
             ctx.log("info", "at-chain: installed mode=once-tick-writable");
             return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
         }
+        if (mode === "once-tick-patch") {
+            // ★ S2c-2 复审 F2：`once` 的 Tick **不允许** `tick.patch`（订阅在 resolve 时已结算）⇒
+            //   回执 `code:"once_tick"`（⛔ 不是 `no_such_hook`，那是"句柄不存在"的错误读数）。
+            //   同一个 `.then` 里 `local` / `edit` 仍可用（写面不是把 in_callback_ 打开）。
+            const pending = ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
+            pending.then((tick) => {
+                onceRan += 1;
+                try {
+                    const v = tick.local.int(0);
+                    onceLocal = v === undefined ? UNDEF : v;
+                    const e = tick.edit.global.set("int", TICK_TARGET, 0x77);
+                    onceEdit = (e.accepted && e.applied) ? 1 : 0;
+                    const p = tick.patch({ localInt: 0 }, PATCH_VALUE);
+                    oncePatchCode = p.code === undefined ? "" : String(p.code);
+                    oncePatchAccepted = p.accepted ? 1 : 0;
+                    oncePatchApplied = p.applied ? 1 : 0;
+                } catch (err) {
+                    onceErr = 1;
+                }
+            });
+            ctx.log("info", "at-chain: installed mode=once-tick-patch");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
     onTrigger(ctx) {
@@ -602,6 +689,7 @@ const plugin = {
             put(ctx, OUT_F0, r.ptrDword0);
             put(ctx, OUT_F1, r.ptr2);
             put(ctx, OUT_F2, r.ptrDword1);
+            put(ctx, OUT_F3, r.intFracType);  // 1 = 小数 index 抛 TypeError（⛔ 不是截断成 int(0)）
             ctx.off(hNow);
             return [];
         }
@@ -683,6 +771,15 @@ const plugin = {
             put(ctx, OUT_B, wherePos[0]);
             put(ctx, OUT_C, wherePos[1]);
             put(ctx, OUT_N, wherePos.length);
+            // ★ S2c-2 复审 F4：`hook.list()` 的**形状面**逐字段（修前 JS 只断 kind / hits）。
+            const row = hooks.length === 1 ? hooks[0] : null;
+            put(ctx, OUT_F0, row !== null ? 1 : 0);
+            put(ctx, OUT_F1, row !== null && row.kind === "sub" ? 1 : 0);
+            put(ctx, OUT_F2, row !== null && row.form === "range" ? 1 : 0);
+            put(ctx, OUT_F3, row !== null ? row.lo : -1);
+            put(ctx, OUT_F4, row !== null ? row.hi : -1);
+            put(ctx, OUT_F5, row !== null ? row.opcode : -1);
+            put(ctx, OUT_F6, row !== null ? row.pos : -1);
             ctx.off(h1);
             return [];
         }
@@ -696,8 +793,19 @@ const plugin = {
         if (mode === "where-opcode") {
             put(ctx, OUT_A, opAllRuns);
             put(ctx, OUT_B, opScopedRuns);
+            put(ctx, OUT_N, opZeroRuns);  // {opcode:0} 的 handler 次数（只在真读到 0 时涨）
+            // ★ S2c-2 复审 F4/F10：`{opcode}` 两形态 + `{opcode:0}` 的 hook.list() 逐字段。
+            const okLen = hooks.length === 3;
+            put(ctx, OUT_F0, okLen ? 1 : 0);
+            put(ctx, OUT_F1, okLen && hooks[0].form === "opcode" ? 1 : 0);
+            put(ctx, OUT_F2, okLen ? hooks[0].opcode : -1);
+            put(ctx, OUT_F3, okLen && hooks[1].form === "opcode" && hooks[1].script === SCRIPT ? 1 : 0);
+            put(ctx, OUT_F4, okLen ? hooks[1].opcode : -1);
+            put(ctx, OUT_F5, okLen && hooks[2].form === "opcode" ? 1 : 0);
+            put(ctx, OUT_F6, okLen ? hooks[2].opcode : -1);
             ctx.off(h1);
             ctx.off(h2);
+            ctx.off(h0);
             return [];
         }
         if (mode === "where-mixed") {
@@ -708,6 +816,26 @@ const plugin = {
             ctx.off(h1);
             ctx.off(h2);
             ctx.off(h3);
+            return [];
+        }
+        if (mode === "where-big") {
+            const row = hooks.length === 1 ? hooks[0] : null;
+            put(ctx, OUT_A, row !== null ? row.lo : 0);
+            put(ctx, OUT_B, row !== null ? row.hi : 0);
+            put(ctx, OUT_C, row !== null && row.form === "range" ? 1 : 0);
+            put(ctx, OUT_N, bigRan);
+            // ★ 这一位是判据：int32 出口会把 0x90000000 读成 -1879048192 ⇒ 0。
+            put(ctx, OUT_F0, row !== null && row.lo === 0x90000000 ? 1 : 0);
+            put(ctx, OUT_F1, row !== null && row.hi === 0x90000010 ? 1 : 0);
+            ctx.off(h1);
+            return [];
+        }
+        if (mode === "where-null-field") {
+            put(ctx, OUT_A, nullThrew);
+            put(ctx, OUT_B, nullType);
+            put(ctx, OUT_C, hooks.length);  // 6 条非法形态一条都不许装进来（只剩正控制那条）
+            put(ctx, OUT_N, nullSub);
+            ctx.off(nullSub);
             return [];
         }
         if (mode === "tick-id") {
@@ -824,6 +952,17 @@ const plugin = {
             put(ctx, OUT_B, onceLocal);
             put(ctx, OUT_C, onceEdit);
             put(ctx, OUT_N, onceErr);
+            return [];
+        }
+        if (mode === "once-tick-patch") {
+            put(ctx, OUT_A, onceRan);
+            put(ctx, OUT_B, oncePatchCode === "once_tick" ? 1 : 0);  // ★ 明确的 once_tick
+            put(ctx, OUT_C, oncePatchAccepted);
+            put(ctx, OUT_N, onceLocal);                              // local 仍可用（7）
+            put(ctx, OUT_F0, onceEdit);                              // edit 仍可用
+            put(ctx, OUT_F1, oncePatchApplied);
+            put(ctx, OUT_F2, oncePatchCode === "" ? 1 : 0);          // 0 = 回执带了 code（不是抛、不是空）
+            put(ctx, OUT_F3, onceErr);                               // 0 = 没有异常
             return [];
         }
         ctx.fail("mode", "unexpected onTrigger for " + String(mode));

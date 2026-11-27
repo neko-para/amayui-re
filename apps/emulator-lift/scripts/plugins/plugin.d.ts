@@ -630,6 +630,8 @@ export interface InstrHookStats {
     readonly kind?: "v1" | "sub" | "once";
     /** `form` 决定哪个字段有意义（`pos` 只在 `"pos"` 形态下非 0）。 */
     readonly form?: "pos" | "range" | "script" | "opcode";
+    /** ★ `lo` / `hi` / `opcode` 是 **uint32** 语义（区间端点 / opcode 可 > 2^31）：JS 出口用
+     *  double，⛔ 不按 int32 截成负数。非 Opcode 形态 `opcode` 恒为 0（不是"缺键"）。 */
     readonly lo?: number;
     readonly hi?: number;
     readonly opcode?: number;
@@ -641,6 +643,8 @@ export interface InstrHookStats {
  *  · `{opcode}` / `{script,opcode}`：opcode == 该值（可选按脚本收窄；opcode 0..2^32-1）。
  *  ★ `pos` / `lo` / `hi` / `opcode` 必须是**整数**（小数 ⇒ TypeError，⛔ 不截断）；
  *    `script` 必须是**非空字符串**（数字不会被 toString）。
+ *  ★ 键**存在**但值是 `null` / `undefined` ⇒ TypeError（与"没给这个键"区分；⛔ 不把 null/undefined
+ *    当"没给" —— 那会把 `{script, pos: undefined}` 静默变成 `{script}` 整本脚本订阅）。
  *  ★ 模糊形状（空对象 / 只有 `pos` / `pos` 与 `lo/hi` 或 `opcode` 同给 / `lo` 与 `hi` 缺一）⇒ TypeError。 */
 export type AtWhere =
     | { readonly script: string; readonly pos: number }
@@ -654,7 +658,9 @@ export interface TickNow {
     /** 读不到 ⇒ **缺键**（⛔ 不是 0：0 是真实 opcode；与 `InstrTick.opcode` 同口径）。 */
     readonly opcode?: number;
 }
-/** `Tick.local`：**活读** guest（语义值 = DEC）。有效期 = 产生 Tick 的那次入口（含其 drain）。 */
+/** `Tick.local`：**活读** guest（语义值 = DEC）。有效期 = 产生 Tick 的那次入口（含其 drain）。
+ *  ★ `index` 必须是 **0..2^32-1 的整数**：小数 / NaN ⇒ TypeError（⛔ 不截断到相邻槽）；
+ *    越界 / 不可读 / 指针 0 / 没有 ENC key ⇒ `undefined`（边界，不是类型错）。 */
 export interface TickLocal {
     /** `local-int index` 的**语义值**；越界 / 不可读 / 没有 ENC key ⇒ `undefined`。 */
     int(index: number): number | undefined;
@@ -691,7 +697,9 @@ export interface Tick {
      *  · handler 里读到的是**打补丁前**的值（写发生在 `on_hits` 返回之后）；
      *  · 回执：成功 `{accepted:true, applied:true}`；失败 `code` = `bad_target` / `no_key` /
      *    `too_many_slots`（本拍不同地址已到 8）/ `not_hit` / `no_such_hook`；
-     *  · `once` 的 Tick 调 `patch` ⇒ `code:"once_tick"`（条目在 resolve 后立刻撤，覆盖无处落地）。
+     *  · `once` 的 Tick 调 `patch` ⇒ `{accepted:false, applied:false, code:"once_tick"}`（once 的
+     *    临时条目在 resolve 时已经结算 ⇒ 覆盖无处落地）。这个判据在**进 runtime 之前**，⛔ 不会因为
+     *    条目已撤而退回 `no_such_hook`（那是"句柄不存在"的读数）。`local` / `edit` / `input` 仍可用。
      */
     patch(target: InstrHookTarget, value: number): Receipt;
     log(level: string, message: string, data?: unknown): void;

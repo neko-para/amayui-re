@@ -4899,8 +4899,8 @@ const MUTATIONS = [
   //   ★ 红点 = `plugin/at-tick-id-attribution`（B 实例的 `tick.id` 必须是 hB，修前 = hA）。
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '        if (!makeTickObject(impl, hits[owner_first], &tick)) {\n',
-    to: '        if (!makeTickObject(impl, hits[0], &tick)) {  // 变异：不判归属（用全局 hits[0]）\n',
+    from: '        if (!makeTickObject(impl, hits[owner_first], /*once=*/false, &tick)) {\n',
+    to: '        if (!makeTickObject(impl, hits[0], /*once=*/false, &tick)) {  // 变异：不判归属（用全局 hits[0]）\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4962,7 +4962,7 @@ const MUTATIONS = [
   //   ★ 红点 = `plugin/tick-stale-write`（edit 不抛 + guest 目标槽被改）。
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '            if (tickStaleError(ctx, this_val, impl, "tick.edit.global.set")) return JS_EXCEPTION;\n',
+    from: '            if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;\n',
     to: '            // 变异：不查 stale（先写后查）\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
@@ -4971,6 +4971,40 @@ const MUTATIONS = [
     what:
       '`tick.edit.global.set` 不查 `tickRefOf`（stale 门缺失）⇒ 捕获的旧 Tick 跨入口仍写 guest；' +
       '`plugin/tick-stale-write` 红（`throwEdit` / 消息 / 零变化三处）',
+  },
+
+  // ── S2c-2 复审 F1：`where` 的键**存在但值是 null/undefined** 不能当"没给" ──────────────────────
+  //   ★ 代表这一类错：`{script, pos: undefined}` 静默退化成 `{script}` 整本脚本订阅 —— 每拍命中、
+  //     每拍一个 Tick（成本面最大的形态），而且**没有任何症状**（用户以为自己装的是单点）。
+  //   ★ 红点 = `plugin/at-where-null-field`（6 条非法形态必须全抛；`hook.list()` 不许新增条目）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (has != 0) {\n',
+    to: '        if (has != 0 && false) {  // 变异：null/undefined 当"没给"\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`where` 把"键存在但值是 null/undefined"当"没给"（`{script,pos:undefined}` 静默变成 `{script}` ' +
+      '整本脚本订阅）⇒ `plugin/at-where-null-field` 红（表里多条目 + 抛的条数不足）',
+  },
+
+  // ── S2c-2 复审 F2：`once` 的 Tick 调 `tick.patch` 必须回执 `once_tick` ──────────────────────────
+  //   ★ 代表这一类错：不判 `TickRef::once`，落到 runtime 时 once 的临时条目已撤 ⇒ 回执
+  //     `no_such_hook`（"句柄不存在"的误导读数；d.ts / 合同点名的是 `once_tick`）。
+  //   ★ 红点 = `plugin/tick-patch-once-tick`（`code === "once_tick"` 的那一位）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (tick->once) {\n',
+    to: '        if (tick->once && false) {  // 变异：once 的 Tick 落到 runtime ⇒ no_such_hook\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`once` 的 Tick 调 `tick.patch` 不判 once（落到 runtime 的 `no_such_hook`，而不是该有的 `once_tick`）⇒ ' +
+      '`plugin/tick-patch-once-tick` 红（`code === "once_tick"` 那一位 = 0）',
   },
 
 ];

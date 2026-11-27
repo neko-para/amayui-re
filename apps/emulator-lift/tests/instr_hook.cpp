@@ -40,7 +40,10 @@
 //   ⑬ `instr-hook/add-ex-script`（S2c-2）：`{script}` 命中整本脚本的任意指令、换脚本 ⇒ 0。
 //      红了 = 脚本过滤被忽略（别的脚本也命中）。
 //   ⑭ `instr-hook/add-ex-opcode-gate`（S2c-2）：`has_opcode_entry` 闸门的正/负控制（`g_access`）+
-//      `{script,opcode}` 的脚本过滤 + 未提交 pc **不**命中。红了 = 闸门恒 true/false 或 opcode 编 0。
+//      `{script,opcode}` 的脚本过滤 + 未提交 pc **不**命中（★ 用 `{opcode:0}` 订阅区分"编 0"）。
+//      红了 = 闸门恒 true/false 或 opcode 编 0。
+//   ⑮ `instr-hook/global-int-last-id`（S2c-2 复审 F7）：GlobalInt 的下标边界 = `index < count`
+//      （`count` 是槽数）⇒ `index == count` 不许写。红了 = off-by-one 把覆盖写到池外一格。
 //
 // ★ 夹具形状：一块假 `GuestMemory`（假 Engine / 帧记录 / 名字表 / int 池 / ptr local）+
 //   一个只填了 `mem` 的 `X86` + 直接调 `instrHookProbe` —— ⛔ 不需要 AOT、不需要游戏安装 / LFS。
@@ -195,6 +198,9 @@ std::uint32_t targetGlobalAddr() {
 
 // ★ S2c-2（多槽）：local-int N 的地址（`frame+0x20` = kIntPool、`4 * N`）。
 std::uint32_t localIntAddr(std::uint32_t index) { return kIntPool + 4u * index; }
+
+// ★ S2c-2 复审 F7：全局池 id 的地址（`engine + kScriptGlobalIntBase` = kIntPool、槽 = 4 字节）。
+std::uint32_t globalIntAddr(std::uint32_t id) { return kIntPool + L::kScriptGlobalSlotBytes * id; }
 
 // =====================================================================================
 // ① 窗口里"别人写" ⇒ CAS 拒绝写回 + 记 restore_conflicts
@@ -969,10 +975,30 @@ void caseAddExOpcodeGate() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
 
     // ⑤ 未提交 pc（`rd32` 读不到）⇒ **不命中**（⛔ 不编 0：0 是合法 opcode）。
+    //   ★ 复审 F3（S3）：只订 0x72 的形态区分不出"读失败编 0"（0 ≠ 0x72 照样不命中）⇒ 这里再装
+    //     一条 **opcode == 0** 的订阅：正确实现在未提交 pc 上一拍都不命中，编 0 会假命中。
+    bool zero_ok = false;
+    const std::uint32_t zero_h = addExHook(0x63u, L::InstrHookForm::Opcode, std::string(), 0u, 0,
+                                           L::InstrHookKind::Sub, &zero_ok);
+    LIFT_CHECK(zero_ok);
     constexpr std::uint32_t kUncommittedPos = L::kScriptHeaderLen + 0xC0000u;
     dispatchAt(mem, cpu, kUncommittedPos);
     LIFT_CHECK(L::instrHookStats(op_h, &os));
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
+    L::InstrHookStatus zs;
+    LIFT_CHECK(L::instrHookStats(zero_h, &zs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(zs.hits), 0);  // ★ 编 0 ⇒ 这里红
+
+    // ⑤b 正控制：**真读到 0** 时那条订阅必须命中（证明 ⑤ 的 0 不是"订阅是死的"）。
+    LIFT_CHECK(put32(mem, kPcA, 0u));
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::instrHookStats(zero_h, &zs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(zs.hits), 1);
+    LIFT_CHECK(L::instrHookStats(op_h, &os));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);  // 0 ≠ 0x72
+    LIFT_CHECK(put32(mem, kPcA, kOpX));
+    // 撤掉 opcode==0 的订阅（否则 ⑥ 的"没有 {opcode} 条目 ⇒ 不读 pc"判不了）。
+    LIFT_CHECK(L::instrHookRemove(zero_h));
 
     // ⑥ 撤掉 `{opcode}` 条目 ⇒ `has_opcode_entry` 归 false（`recomputeGates` 真维护）⇒ 不再读 pc。
     LIFT_CHECK(L::instrHookRemove(op_h));
@@ -980,7 +1006,7 @@ void caseAddExOpcodeGate() {
     LIFT_CHECK(L::g_access.ea != kPcA);
     L::InstrHookStatus ps;
     LIFT_CHECK(L::instrHookStats(pos_h, &ps));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 6);  // ①2 + ②2 + ③1 + ⑥1（④⑤不中）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 7);  // ①2 + ②2 + ③1 + ⑤b1 + ⑥1（④⑤不中）
 
     // ⑦ `releaseOwner` 也要重算：装一条全局 `{opcode}`（空 script ⇒ 不解析名字，正控制干净）⇒ 读 pc；
     //   释放 owner ⇒ 归 false ⇒ 不再读。
@@ -1201,6 +1227,54 @@ void casePendingSlotLimit() {
     LIFT_CHECK(L::instrHookList().empty());
 }
 
+// =====================================================================================
+// ⑲ S2c-2 复审 F7 · `instr-hook/global-int-last-id`：GlobalInt 的下标边界（count 是槽数）
+//
+//   红 = 判据写成 `index > count`（off-by-one）⇒ `{globalId: count}` 通过校验并写到**池外一格**。
+//   判据：`index == count-1` 命中（写到最后一个合法槽）；`index == count` **不命中**（skips += 1、
+//        池外那一格一个字节都不动）；下一拍合法槽恢复回最初 raw。
+// =====================================================================================
+void caseGlobalIntLastId() {
+    lift_test::g_current_case = "instr-hook/global-int-last-id";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    // 池的槽数 = kIntCount（`makeFakeEngine` 摆的 `kScriptGlobalIntCountOffset`）⇒ 合法 id 0..kIntCount-1。
+    const std::uint32_t last = kIntCount - 1u;
+    LIFT_CHECK(put32(mem, globalIntAddr(last), enc(3u)));
+    // 池外一格：放一个可辨认的初值 ⇒ 越界写会被看见（⛔ 不靠"读到 0"判）。
+    LIFT_CHECK(put32(mem, globalIntAddr(kIntCount), enc(11u)));
+
+    bool a_ok = false;
+    bool b_ok = false;
+    const std::uint32_t a = addExHook(0x75u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &a_ok);
+    const std::uint32_t b = addExHook(0x75u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &b_ok);
+    LIFT_CHECK(a_ok);
+    LIFT_CHECK(b_ok);
+    const char* err = nullptr;
+    LIFT_CHECK(L::instrHookSetPatch(a, true, L::InstrPatchKind::GlobalInt, last, 7u, 0u, &err));
+    LIFT_CHECK(L::instrHookSetPatch(b, true, L::InstrPatchKind::GlobalInt, kIntCount, 13u, 0u, &err));
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(mem.rd32(globalIntAddr(last)), enc(7u));       // 最后一个合法 id：命中
+    LIFT_CHECK_EQ_U32(mem.rd32(globalIntAddr(kIntCount)), enc(11u)); // ★ 池外一格：不动
+    L::InstrHookStatus as;
+    L::InstrHookStatus bs;
+    LIFT_CHECK(L::instrHookStats(a, &as));
+    LIFT_CHECK(L::instrHookStats(b, &bs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(as.skips), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.skips), 1);  // 越界 ⇒ skip（有回执、不静默）
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_U32(mem.rd32(globalIntAddr(last)), enc(3u));  // 恢复最初 raw
+    L::instrHookReleaseOwner(0x75u);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1229,5 +1303,7 @@ int main() {
     casePendingSameAddr();
     casePendingRemoveIsolation();
     casePendingSlotLimit();
+    // ---- S2c-2 复审收口（GlobalInt 下标边界 / opcode 0 的"编 0"判据见 add-ex-opcode-gate ⑤）----
+    caseGlobalIntLastId();
     return lift_test::finish("instr-hook");
 }

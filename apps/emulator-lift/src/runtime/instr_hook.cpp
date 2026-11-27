@@ -350,7 +350,9 @@ bool targetAddressIn(GuestMemory& mem, const Frame& f, InstrPatchKind kind, std:
             std::uint32_t count = 0;
             if (!read32(mem, f.engine + kGlobalIntBase, &base) || base == 0) return false;
             if (!read32(mem, f.engine + kGlobalIntCount, &count)) return false;
-            if (index > count) return false;
+            // ★ S2c-2 复审 F7：`count` 是**槽数**，合法 id = 0..count-1 ⇒ 判 `>=`（与 LocalInt /
+            //   PtrDword 同口径）。修前是 `>`：`{globalId: count}` 通过校验，随后写到池外一格。
+            if (index >= count) return false;
             *addr = base + 4 * index;
             return true;
         }
@@ -531,6 +533,9 @@ bool instrHookSetTickPatch(std::uint32_t handle, InstrPatchKind kind, std::uint3
     if (e == nullptr) return fail("no_such_hook");
     // ★ once 的临时条目在 resolve 之后立刻撤（`runOnceResolve`）⇒ 这次覆盖没有落地的地方。
     //   ⛔ 不假装收下（那会让回执说 true、guest 却没变）。
+    //   ★ S2c-2 复审 F2：**JS 面已经先在 `TickRef::once` 上判**（`tick.patch` ⇒ 回执 `once_tick`，
+    //   ⛔ 不再等条目被撤之后退回 `no_such_hook`）。这条保留为 runtime 的兜底（非 JS 调用方 /
+    //   将来别的入口在条目还活着时调进来）。
     if (e->hook_kind == InstrHookKind::Once) return fail("once_tick");
     State& st = state();
     if (!st.dispatching || st.probe_frame == nullptr || st.probe_mem == nullptr) return fail("not_hit");

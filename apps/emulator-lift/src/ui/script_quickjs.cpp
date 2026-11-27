@@ -199,6 +199,10 @@ struct TickRef {
     bool opcode_ok = false;
     std::string script;
     lift::InstrLocalView local;
+    // ★ S2c-2 复审 F2：这个 Tick 是 `ctx.once` resolve 交出来的。一旦 `once` 命中，临时条目在
+    //   resolve 之后**立刻**撤（`runOnceResolve`）⇒ 覆盖没有落地的地方。`tick.patch` 必须据这位
+    //   回执 `once_tick`（⛔ 不退化成 `no_such_hook` —— 那是"句柄不存在"，会误导插件作者去查 id）。
+    bool once = false;
 };
 
 struct Impl {
@@ -3158,42 +3162,45 @@ JSValue editGlobalSetTrampoline(JSContext* ctx, JSValueConst this_val, int argc,
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
         Impl* impl = implOf(ctx);
+        // ★ S2c-2 复审 F8：错误文案必须点名**调用它的那条面**（tick 面写 `tick.*`，⛔ 不让用户
+        //   看到 `ctx.edit.global.set` 的报错却查 `ctx`）。
+        const char* api = tick_mode ? "tick.edit.global.set" : "ctx.edit.global.set";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, impl, "tick.edit.global.set")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;
             if (host == nullptr || !host->editAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.edit.global.set: 宿主没有接 EditSink（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 EditSink（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->editWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 宿主没有接 EditSink（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 EditSink（⛔ 不静默 no-op）", api);
         }
-        if (argc < 3) return JS_ThrowTypeError(ctx, "ctx.edit.global.set(kind, id, value)");
+        if (argc < 3) return JS_ThrowTypeError(ctx, "%s(kind, id, value)", api);
         lift::GlobalKind kind = lift::GlobalKind::Int;
         std::string why;
-        if (!parseGlobalKindArg(ctx, argv[0], &kind, &why)) return JS_ThrowTypeError(ctx, "ctx.edit.global.set: %s", why.c_str());
+        if (!parseGlobalKindArg(ctx, argv[0], &kind, &why)) return JS_ThrowTypeError(ctx, "%s: %s", api, why.c_str());
         std::int64_t id = 0;
         double d = 0.0;
         if (!qjs::toDouble(ctx, argv[1], &d) || !std::isfinite(d)) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: id 必须是数字");
+            return JS_ThrowTypeError(ctx, "%s: id 必须是数字", api);
         }
         id = static_cast<std::int64_t>(d);
         if (id < 0 || id > 0xFFFFFFFFll) {
-            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: id 越界（0..0xFFFFFFFF）");
+            return JS_ThrowTypeError(ctx, "%s: id 越界（0..0xFFFFFFFF）", api);
         }
         lift::GlobalValue value;
         value.kind = kind;
         if (kind == lift::GlobalKind::Float) {
             if (!qjs::toDouble(ctx, argv[2], &value.f64) || !std::isfinite(value.f64)) {
                 qjs::clearException(ctx);
-                return JS_ThrowTypeError(ctx, "ctx.edit.global.set: float 值必须是有限数字");
+                return JS_ThrowTypeError(ctx, "%s: float 值必须是有限数字", api);
             }
         } else if (kind == lift::GlobalKind::String) {
-            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 'string' 型 global 本实现未实现");
+            return JS_ThrowTypeError(ctx, "%s: 'string' 型 global 本实现未实现", api);
         } else {
             std::uint32_t u = 0;
             if (!qjs::toUint32(ctx, argv[2], &u)) {
                 qjs::clearException(ctx);
-                return JS_ThrowTypeError(ctx, "ctx.edit.global.set: int/uint 值必须是数字");
+                return JS_ThrowTypeError(ctx, "%s: int/uint 值必须是数字", api);
             }
             value.u32 = u;
         }
@@ -3203,11 +3210,12 @@ JSValue editGlobalSetTrampoline(JSContext* ctx, JSValueConst this_val, int argc,
         Value out = makeReceiptObject(ctx, accepted, false, accepted, code, 0, 0);
         if (out.isException()) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 回执对象写入失败");
+            return JS_ThrowTypeError(ctx, "%s: 回执对象写入失败", api);
         }
         return out.take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.edit.global.set" : "ctx.edit.global.set");
     }
 }
 
@@ -3566,7 +3574,14 @@ JSValue jsCtxTask(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 //     `readPluginInt` 会截断 —— 那是已发布语义，v2 新面用更严的判据，见复审 F10）。
 // =====================================================================================
 
-/** 读一个 `where` 字段：缺失 / `null` ⇒ `present=false`；读失败 ⇒ 返回 false。 */
+/**
+ * 读一个 `where` 字段：**键不存在** ⇒ `present=false`；键存在但值是 `null` / `undefined` ⇒
+ * `bad_where`（返回 false + `why`）；读失败 ⇒ 返回 false。
+ *
+ * ★ S2c-2 复审 F1：`null` / `undefined` **不是**"没给"。把两者混为一谈会让
+ *   `{script, pos: undefined}` 静默退化成 `{script}` 整本脚本订阅（每拍命中、每拍一个 Tick ——
+ *   成本面最大的形态），且**没有任何症状**。判据因此是"键在不在"，不是"值空不空"。
+ */
 bool readAtWhereField(JSContext* ctx, JSValueConst obj, const char* name, bool* present, Value* out,
                       std::string* why) {
     Value v = qjs::getProperty(ctx, obj, name);
@@ -3576,6 +3591,23 @@ bool readAtWhereField(JSContext* ctx, JSValueConst obj, const char* name, bool* 
         return false;
     }
     if (v.isUndefined() || v.isNull()) {
+        const JSAtom atom = JS_NewAtom(ctx, name);
+        if (atom == JS_ATOM_NULL) {
+            *why = std::string(name) + " 读取失败";
+            return false;
+        }
+        const int has = JS_HasProperty(ctx, obj, atom);
+        JS_FreeAtom(ctx, atom);
+        if (has < 0) {
+            qjs::clearException(ctx);
+            *why = std::string(name) + " 读取失败";
+            return false;
+        }
+        if (has != 0) {
+            *why = std::string("where.") + name + (v.isNull() ? " 是 null" : " 是 undefined") +
+                   "（键存在但值为空；不要这个条件就**省略**这个键 —— ⛔ 不把 null/undefined 当没给）";
+            return false;
+        }
         *present = false;
         return true;
     }
@@ -3924,6 +3956,17 @@ JSValue jsTickPatch(JSContext* ctx, JSValueConst this_val, int argc, JSValueCons
             qjs::clearException(ctx);
             return JS_ThrowTypeError(ctx, "tick.patch: value 必须是有限数字");
         }
+        // ★ S2c-2 复审 F2：`once` 的 Tick **不允许** `tick.patch`（订阅在 resolve 时已经结算 ⇒
+        //   覆盖无处落地）。判在进 runtime **之前**，回执形状与其它 `tick.patch` 失败一致
+        //   （`accepted:false` + `code`）。⛔ 不退化成 runtime 的 `no_such_hook`。
+        if (tick->once) {
+            Value out = makeReceiptObject(ctx, false, false, false, "once_tick", 0, 0);
+            if (out.isException()) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "tick.patch: 回执对象写入失败");
+            }
+            return out.take();
+        }
         const char* code = nullptr;
         const bool ok = host->instrHookSetTickPatch(handle, kind, index,
                                                     static_cast<std::uint32_t>(
@@ -4122,6 +4165,11 @@ JSValue tickLocalRead(JSContext* ctx, JSValueConst this_val, int argc, JSValueCo
             qjs::clearException(ctx);
             return JS_ThrowTypeError(ctx, "%s(index): index 必须是 0..2^32-1 的整数", fn);
         }
+        // ★ S2c-2 复审 F9：小数**不截断**（与 `readAtWhereU32` 同一口径；越界仍是 `undefined`，
+        //   见下 —— 那是边界，不是类型错）。修前 `int(1.5)` 被 static_cast 成 1，读到相邻槽。
+        if (d != std::floor(d)) {
+            return JS_ThrowTypeError(ctx, "%s(index): index 必须是整数（⛔ 不截断小数）", fn);
+        }
         std::uint32_t value = 0;
         if (!host->readLocal(tick->local, kind, static_cast<std::uint32_t>(d), &value)) {
             // 越界 / 未提交 / 指针 0 / 没有 key ⇒ **undefined**（⛔ 不编 0：0 是合法值）。
@@ -4146,8 +4194,10 @@ JSValue jsTickLocalPtrDword(JSContext* ctx, JSValueConst this_val, int argc, JSV
     return tickLocalRead(ctx, this_val, argc, argv, lift::InstrLocalKind::PtrDword, "tick.local.ptrDword");
 }
 
-/** 组一个 Tick（值表 + JS 对象）；失败 ⇒ false（调用方一行 error，不 fail Run）。 */
-bool makeTickObject(Impl& impl, const lift::InstrHit& hit, Value* out) {
+/** 组一个 Tick（值表 + JS 对象）；失败 ⇒ false（调用方一行 error，不 fail Run）。
+ *  `once` = 这个 Tick 由 `runOnceResolve` 造（`ctx.once` 的 resolve 值）⇒ `tick.patch` 回执
+ *  `once_tick`（S2c-2 复审 F2）。`onTick` / `ctx.at` 的 Tick 一律 `once=false`。 */
+bool makeTickObject(Impl& impl, const lift::InstrHit& hit, bool once, Value* out) {
     JSContext* ctx = impl.ctx;
     // ★ 先把**值**拷进表（Tick 的唯一 owner）：⛔ 不存 `InstrHit*` / `hit.script` 指针 ——
     //   条目可能在本次入口内被摘（`off` / once resolve / handler 失败）⇒ 必悬垂。
@@ -4165,6 +4215,7 @@ bool makeTickObject(Impl& impl, const lift::InstrHit& hit, Value* out) {
     ref.local.ptr_count = hit.ptr_count;
     ref.local.codec_key = hit.codec_key;
     ref.local.has_key = hit.codec_ok;
+    ref.once = once;
     try {
         impl.ticks[serial] = std::move(ref);
     } catch (...) {
@@ -4257,7 +4308,7 @@ void runOnceResolve(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit)
     const auto entry = impl.onces.find(handle);
     if (entry == impl.onces.end()) return;
     Value tick;
-    if (!makeTickObject(impl, hit, &tick)) {
+    if (!makeTickObject(impl, hit, /*once=*/true, &tick)) {
         // 组 Tick 失败（宿主分配失败）⇒ 与"注册失败"同一口径：reject + 撤 hook（⛔ 不 fail Run）。
         rejectOnceValue(impl.ctx, entry->second.reject.raw(), "ctx.once: 组 Tick 失败");
         impl.onces.erase(entry);
@@ -4517,7 +4568,7 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     //   ★ F2：一律取**本实例的第一条命中**（`owner_first`）—— `hits[0]` 可能是别的 Impl 的句柄。
     Value tick;
     if (need_tick) {
-        if (!makeTickObject(impl, hits[owner_first], &tick)) {
+        if (!makeTickObject(impl, hits[owner_first], /*once=*/false, &tick)) {
             if (impl.call_host_persistent != nullptr) {
                 impl.call_host_persistent->log("error", "ctx.at: 组 Tick 失败（本拍不跑 handler）");
             }
@@ -4721,13 +4772,15 @@ Value hookStatusObject(JSContext* ctx, const lift::InstrHookStatus& r) {
     if (ok) ok = defineReadOnly(ctx, row.raw(), "pos", qjs::newInt32(ctx, static_cast<std::int32_t>(r.pos)));
     // ★ S2c 的形状面：`kind` 决定"这行是 v1 / at 订阅 / once"，`form` 决定哪个字段有意义
     //   （非 Pos ⇒ pos 保持 0，lo/hi/opcode 才是读数）。
+    // ★ S2c-2 复审 F10：`lo` / `hi` / `opcode` 是 **uint32** 语义（区间端点是 label 坐标，可 > 2^31）
+    //   ⇒ 用 double 出口（JS number 精确到 2^53）；`newInt32` 会把大值读成负数。`pos` 保持
+    //   int32（v1 已发布口径，不动）。
     if (ok) ok = defineReadOnly(ctx, row.raw(), "kind", qjs::newString(ctx, lift::instrHookKindName(r.hook_kind)));
     if (ok) ok = defineReadOnly(ctx, row.raw(), "form", qjs::newString(ctx, lift::instrHookFormName(r.form)));
-    if (ok) ok = defineReadOnly(ctx, row.raw(), "lo", qjs::newInt32(ctx, static_cast<std::int32_t>(r.lo)));
-    if (ok) ok = defineReadOnly(ctx, row.raw(), "hi", qjs::newInt32(ctx, static_cast<std::int32_t>(r.hi)));
+    if (ok) ok = defineReadOnly(ctx, row.raw(), "lo", qjs::newDouble(ctx, static_cast<double>(r.lo)));
+    if (ok) ok = defineReadOnly(ctx, row.raw(), "hi", qjs::newDouble(ctx, static_cast<double>(r.hi)));
     if (ok) {
-        ok = defineReadOnly(ctx, row.raw(), "opcode",
-                            qjs::newInt32(ctx, static_cast<std::int32_t>(r.opcode)));
+        ok = defineReadOnly(ctx, row.raw(), "opcode", qjs::newDouble(ctx, static_cast<double>(r.opcode)));
     }
     if (ok) ok = defineReadOnly(ctx, row.raw(), "patch", qjs::newBool(ctx, r.patch));
     if (ok) ok = defineReadOnly(ctx, row.raw(), "hits", qjs::newInt64(ctx, static_cast<std::int64_t>(r.hits)));
@@ -4791,28 +4844,30 @@ JSValue inputClickTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JS
                              bool tick_mode) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
+        // ★ S2c-2 复审 F8：消息点名调用面（tick 面写 `tick.*`）。
+        const char* api = tick_mode ? "tick.input.click" : "ctx.input.click";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), "tick.input.click")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
             if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.input.click: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->inputWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.input.click: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
         }
-        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.input.click(x, y, button?)");
+        if (argc < 2) return JS_ThrowTypeError(ctx, "%s(x, y, button?)", api);
         double x = 0.0;
         double y = 0.0;
         if (!qjs::toDouble(ctx, argv[0], &x) || !qjs::toDouble(ctx, argv[1], &y) || !std::isfinite(x) ||
             !std::isfinite(y)) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.click: x / y 必须是有限数字");
+            return JS_ThrowTypeError(ctx, "%s: x / y 必须是有限数字", api);
         }
         lift::MouseButton button = lift::MouseButton::Left;
         if (argc >= 3 && !JS_IsUndefined(argv[2])) {
             std::string text;
             if (!qjs::toString(ctx, argv[2], &text)) {
                 qjs::clearException(ctx);
-                return JS_ThrowTypeError(ctx, "ctx.input.click: button 必须是 'left' | 'right' | 'middle'");
+                return JS_ThrowTypeError(ctx, "%s: button 必须是 'left' | 'right' | 'middle'", api);
             }
             if (text == "left") {
                 button = lift::MouseButton::Left;
@@ -4821,17 +4876,18 @@ JSValue inputClickTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JS
             } else if (text == "middle") {
                 button = lift::MouseButton::Middle;
             } else {
-                return JS_ThrowTypeError(ctx, "ctx.input.click: button 只能是 'left' | 'right' | 'middle'");
+                return JS_ThrowTypeError(ctx, "%s: button 只能是 'left' | 'right' | 'middle'", api);
             }
         }
         Value out = makeInputReceipt(ctx, host->inputClick(static_cast<int>(x), static_cast<int>(y), button));
         if (out.isException()) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.click: 回执对象写入失败");
+            return JS_ThrowTypeError(ctx, "%s: 回执对象写入失败", api);
         }
         return out.take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.input.click: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.input.click" : "ctx.input.click");
     }
 }
 
@@ -4847,30 +4903,32 @@ JSValue inputMoveTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSV
                             bool tick_mode) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
+        const char* api = tick_mode ? "tick.input.move" : "ctx.input.move";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), "tick.input.move")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
             if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.input.move: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->inputWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.input.move: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
         }
-        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.input.move(x, y)");
+        if (argc < 2) return JS_ThrowTypeError(ctx, "%s(x, y)", api);
         double x = 0.0;
         double y = 0.0;
         if (!qjs::toDouble(ctx, argv[0], &x) || !qjs::toDouble(ctx, argv[1], &y) || !std::isfinite(x) ||
             !std::isfinite(y)) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.move: x / y 必须是有限数字");
+            return JS_ThrowTypeError(ctx, "%s: x / y 必须是有限数字", api);
         }
         Value out = makeInputReceipt(ctx, host->inputMove(static_cast<int>(x), static_cast<int>(y)));
         if (out.isException()) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.move: 回执对象写入失败");
+            return JS_ThrowTypeError(ctx, "%s: 回执对象写入失败", api);
         }
         return out.take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.input.move: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.input.move" : "ctx.input.move");
     }
 }
 
@@ -4905,26 +4963,28 @@ JSValue inputDownTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSV
                             bool tick_mode) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
+        const char* api = tick_mode ? "tick.input.down" : "ctx.input.down";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), "tick.input.down")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
             if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.input.down: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->inputWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.input.down: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
         }
         lift::MouseButton button = lift::MouseButton::Left;
         if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
-            return JS_ThrowTypeError(ctx, "ctx.input.down(button)：button 只能是 'left' | 'right' | 'middle'");
+            return JS_ThrowTypeError(ctx, "%s(button)：button 只能是 'left' | 'right' | 'middle'", api);
         }
         Value out = makeInputReceipt(ctx, host->inputDown(button));
         if (out.isException()) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.down: 回执对象写入失败");
+            return JS_ThrowTypeError(ctx, "%s: 回执对象写入失败", api);
         }
         return out.take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.input.down: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.input.down" : "ctx.input.down");
     }
 }
 
@@ -4940,26 +5000,28 @@ JSValue inputUpTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSVal
                           bool tick_mode) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
+        const char* api = tick_mode ? "tick.input.up" : "ctx.input.up";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), "tick.input.up")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
             if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.input.up: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->inputWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.input.up: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
         }
         lift::MouseButton button = lift::MouseButton::Left;
         if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
-            return JS_ThrowTypeError(ctx, "ctx.input.up(button)：button 只能是 'left' | 'right' | 'middle'");
+            return JS_ThrowTypeError(ctx, "%s(button)：button 只能是 'left' | 'right' | 'middle'", api);
         }
         Value out = makeInputReceipt(ctx, host->inputUp(button));
         if (out.isException()) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.up: 回执对象写入失败");
+            return JS_ThrowTypeError(ctx, "%s: 回执对象写入失败", api);
         }
         return out.take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.input.up: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.input.up" : "ctx.input.up");
     }
 }
 
@@ -4975,24 +5037,26 @@ JSValue inputStatusTrampoline(JSContext* ctx, JSValueConst this_val, int argc, J
                               bool tick_mode) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
+        const char* api = tick_mode ? "tick.input.status" : "ctx.input.status";
         if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), "tick.input.status")) return JS_EXCEPTION;
+            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
             if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "tick.input.status: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
             }
         } else if (host == nullptr || !host->inputWired()) {
-            return JS_ThrowTypeError(ctx, "ctx.input.status: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+            return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
         }
-        if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.input.status(id)");
+        if (argc < 1) return JS_ThrowTypeError(ctx, "%s(id)", api);
         double d = 0.0;
         if (!qjs::toDouble(ctx, argv[0], &d) || !std::isfinite(d) || d < 0.0) {
             qjs::clearException(ctx);
-            return JS_ThrowTypeError(ctx, "ctx.input.status: id 必须是非负数字");
+            return JS_ThrowTypeError(ctx, "%s: id 必须是非负数字", api);
         }
         const auto state = host->inputStatus(static_cast<std::uint64_t>(d));
         return qjs::newString(ctx, lift::ui::pluginInputStateName(state)).take();
     } catch (...) {
-        return JS_ThrowTypeError(ctx, "ctx.input.status: 宿主异常（C++ exception at script boundary）");
+        return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
+                                 tick_mode ? "tick.input.status" : "ctx.input.status");
     }
 }
 
