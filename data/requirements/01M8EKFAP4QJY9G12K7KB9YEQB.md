@@ -2,7 +2,7 @@
 
 - id: REQ-01M8EKFAP4QJY9G12K7KB9YEQB
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
 - tags: [emulator-lift, plugin, qjs, typescript, design]
 

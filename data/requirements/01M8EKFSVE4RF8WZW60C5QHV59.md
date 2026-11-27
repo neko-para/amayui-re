@@ -2,7 +2,7 @@
 
 - id: REQ-01M8EKFSVE4RF8WZW60C5QHV59
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M8EKFAP4QJY9G12K7KB9YEQB
 - tags: [emulator-lift, plugin, qjs, typescript, quickts]
 
