@@ -1443,6 +1443,30 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **未做 / 待核**：extensionless `import './lib/x'`（当前必须写扩展名）、HUD 的 `.ts` 来源、
   product-exe 的 `.ts` e2e、win32/MSVC 以外的平台、深嵌套类型栈预算的压测。
 
+### 4.13 指令点回调（S2a：`handle.onTick` = `Tick` 的只读前身）
+
+- **入口**：`runtime/instr_hook` 的 sink（`InstrHookSink{user,on_hit,on_released}`，**不含任何 JS 类型**；
+  `quickjs.h` 仍只在 `ui/quickjs_value.h`）。probe 在 **entries 遍历结束之后**才分发（结构保证：
+  JS 回调里改 hook 表不会让遍历迭代器失效）；命中 id 在 `hits += 1` 之后、patch 的 `continue` 之前记；
+  `opcode` 只在"命中且有 sink"时多读一次 PC。
+- **JS 面**：`handle.onTick(fn)`（每个句柄**恰好一个** handler；重复 = 替换；`null`/`undefined` = 撤）。
+  tick 对象 = `{id, script, pos, opcode?, log}`；`opcode` 读不到时**缺键**（⛔ 不编 0）。
+- **tick 入口是只读的**：`inCallback()` 恒 false ⇒ `edit` / `input` / `trigger` / `fail` / `finish` / `quit` /
+  `profile` / `config` / `hook.*` 一律 TypeError；只有 `tick.log` 与经存下来的 RunCtx 的只读查询可用。
+  ⇒ 与 `start`/`onTrigger` 的"写类出口"是**两个入口**，不是同一个 ctx 换了张皮。
+- **失败语义**：handler 抛错 / 超预算 ⇒ **摘 handler + 一行 error**（消息带 `hit #N`，避免 `PluginHost::log`
+  的连续去重把第二次失败吞掉），**不 fail Run**（tick 是观察者）。`call()` / `render()` 的失败口径不变。
+- **drain-to-quiescence**：每个 host→JS 入口（`call` / `renderFrame` / tick 入口 / 经典 `render`）
+  在**同一个 CPU 预算窗**内把 microtask 队列 drain 到静止（`await Promise.resolve()` 的 continuation
+  在当前入口跑完）；`cpu_deadline_ns` 在 drain **之后**才清。忙等 await 循环 ⇒ 预算中断（不会卡死 guest）。
+- **生命周期**：Run 收口（S0 的 owner 路径）逐条发 `on_released` ⇒ 释放 `Impl::hook_handlers` 里的 JS 值；
+  `shutdown` 先摘 sink 再 `JS_FreeContext`。Run 结束后 probe 不再调 JS。
+- **门禁**：`instr-hook/sink-hit-fields` / `sink-release-events`；`plugin/point-hit` /
+  `point-hit-handler-error` / `point-hit-after-run-end` / `drain-per-entry` / `drain-budget`；
+  形态守卫 `core-shape` ⑦（`instr_hook` 代码里 0 个 quickjs 词）/ ⑧（每个入口 `JS_Call` 后必须 `drainPendingJobs`）。
+- **未做（S2b/S2c）**：`once`/`task`/timeout、`at` 链与 `next()`、`{script,lo,hi}`/`{opcode}` 过滤、
+  `Tick` 的 `now/local/edit/input/patch`、全局 `log`。
+
 ---
 
 ## §5 迁移切片 C0–C5
@@ -1791,6 +1815,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 42 | **内建插件参数来源 = config > params > 默认**（`has()` 判"给了"，falsy 也算）；没有 config 时**完全回退**到旧 params 行为 | 内建插件仍只认 `--plugin-param`（用户口径的迁移没发生）；或 `on:0` 被当成"没给" | `plugin/load-save-e2e`（⑥ 用 `plugin-config.json`、**不带** `--plugin-param`）+ `control-script/config-roundtrip` + 三个库文件的域表（`scripts/plugins/README.md`） |
 | 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / 内部 hud 回退（`--overlay` + 无 render 的插件）三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 八成员（含 `config` 与 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（八成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
 | 44 | **指令点钩子的收口 / CAS / 注入可见性（S0）**：hook 归 **Run owner**，Run 的每条收口路径都 `instrHookReleaseOwner`；`patch` 恢复 = **CAS**（当前值仍是我写的编码值才写回），否则计 `restore_conflicts`；持久写（`ctx.edit` / 控制层 `global-set`）**主动撤销** pending；render 期 7 个 `ctx.hook.*` trampoline 一律 TypeError；`--no-s7` / 注入站点 0 ⇒ `at()` 返回 `no_injection`（⛔ 不是永远 hits=0 的假句柄） | Run 结束后仍按条改 guest；窗口里别人的写被静默抹掉；render 里改 hook；插件"装上了但永不命中"且无消息 | `instr-hook`（`patch-restore-cas` / `patch-restore-clean` / `no-injection` / `owner-release` / `patch-edit-cancels-pending`）+ `plugin/hook-release-{fail,done,budget}` + `plugin/render-stored-runctx-rejected`（OPS 含 hook）+ 变异 `--match instr-hook` |
+| 45 | **指令点回调只读 + 每入口 drain（S2a）**：sink 分发在 entries 遍历**之后**；`handle.onTick(fn)` 每句柄一个、tick 只有 `{id,script,pos,opcode?,log}`、`inCallback()` 恒 false；handler 失败只摘 handler（`hit #N` 一行）不 fail Run；每个 host→JS 入口在**同一 CPU 预算窗**内 drain microtask；Run 收口 `on_released` 释放 JS 值、之后 probe 不再调 JS | tick 里能改 guest / 跑 `fail`；JS 回调改 hook 表导致遍历 UB；`await` continuation 漏到下一入口；忙等 await 卡死 guest；Run 结束后仍在跑 JS | `instr-hook/sink-*` + `plugin/point-hit*` + `drain-per-entry` / `drain-budget` + `core-shape` ⑦/⑧ + 变异 `--match 'sink-hit'` / `--match 'drain'` |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
