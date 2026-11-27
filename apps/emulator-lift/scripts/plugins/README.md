@@ -77,9 +77,11 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 
 - 模块 specifier：`@amayui/lift-plugin`（`plugin.d.ts` 是 ambient module）。
 - 插件文件 = ES module：`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
+  ★ v2 的 `start(ctx)` 返回 `void`（只做 `ctx.at` / `ctx.once` / `ctx.task` 注册）；`onTrigger` 是
+  **deprecated 兼容层**（只有 start 返回了 v1 Trigger 集合时才会被调用）。
 - 宿主 QJS 装载后只读 **default 导出**；不再读 `globalThis.render/start/onTrigger`，也没有运行时 `definePlugin`。
 - `sample` / `screenshot` 不在插件 API 里（它们是 `emu-ctl` 的控制面组合）；插件读 `scriptPos` 用 `ctx.read.scriptPos`。
-- **`ctx.hook.at(script, pos)` + `handle.patch(target, value)`**（只 `RunCtx`）：在**某条脚本指令执行前**覆盖它读到的一个 dword，**下一条脚本指令派发前恢复** ⇒ 净变化 0（⛔ 不是持久写；持久写是 `ctx.edit.global.set`）。`spec` 三选一目标（`ptrLocal` / `localInt` / `globalId`）+ `value`；`captureInts` / `capturePtrs` 采样本帧 local（`status()` 读）。合同见 `docs/03-emulator/plugin-runtime.md` §4.5。
+- **v1（deprecated）`ctx.hook.at(script, pos)` + `handle.patch(target, value)`**（只 `RunCtx`）：在**某条脚本指令执行前**覆盖它读到的一个 dword，**下一条脚本指令派发前恢复** ⇒ 净变化 0（⛔ 不是持久写；持久写是 `ctx.edit.global.set`）。`spec` 三选一目标（`ptrLocal` / `localInt` / `globalId`）+ `value`；`captureInts` / `capturePtrs` 采样本帧 local（`status()` 读）。v2 的触发面用 `ctx.at` / `ctx.once`，本拍瞬时覆盖用 `tick.patch`。合同见 `docs/03-emulator/plugin-runtime.md` §4.5 / §4.15。
 
 ## 内建插件的配置域
 
@@ -173,16 +175,35 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 
 ## 示例
 
-`examples/` 下的 `.ts` 是**参考插件**（旧 plan 翻译、global 读改写、HUD show/hide、dispatch、具名多 trigger、
-rearm、timeout、并发）。它们**在** `pnpm typecheck` 的最后一档（`tsc -p …/plugins/examples/tsconfig.json`，
-flags 比 base 更严：`noUncheckedIndexedAccess` / `exactOptionalPropertyTypes`），但**不参与构建**；
-改动 API 时单独跑同一条命令：
+`examples/` 下的 `.ts` 是 **v2 API 的参考插件**（一个文件一个教学点）。它们**不参与构建**，
+但在 `pnpm typecheck` 的最后一档（`tsc -p …/plugins/examples/tsconfig.json`，flags 比 base 更严：
+`noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` / `erasableSyntaxOnly`），并且由 CTest
+`quickts` 的 `ts-examples-compile` 逐个编译（要求 `import type` 整条擦掉、零 module request）。
+改动 API 时单独跑这几条：
 
 ```bash
+pnpm typecheck
 node_modules/.bin/tsc -p apps/emulator-lift/scripts/plugins/examples/tsconfig.json
+ctest --test-dir apps/emulator-lift/out -R 'quickts' --output-on-failure
 ```
 
-- 示例里的数值都是占位；不要直接当生产脚本。
+| 文件 | 演示什么（v2） |
+|---|---|
+| `concurrent.ts` | 一个 Run 里多个 `ctx.once` + `Promise.race` / `Promise.all`（不新开 Run） |
+| `dispatch.ts` | **没有 dispatch**：dispatch 属控制层；子流程用 `ctx.task` 组合、停用 `ctx.off` |
+| `global-edit.ts` | `ctx.at` + `tick.edit.global.set`（立即持久写；读旧值走 `ctx.read`） |
+| `hud-at-pos.ts` | tick 只改模块数据；`render(rctx)` 读数据 + `rctx.ui` / `rctx.draw`（tick 不碰 UI） |
+| `keep-others.ts` | 多条 `ctx.at` 订阅 + 选择性 `ctx.off`（没有 armed 集合替换） |
+| `load-save.ts` | `ctx.task` + 顺序 `await ctx.once(...)` + `tick.input.click` + task settle 收口 |
+| `maxfires.ts` | `ctx.at` + 自己计数 + 到量 `ctx.off`（没有 maxFires） |
+| `rearm.ts` | `ctx.off` + 新 `ctx.at`（新订阅）；v2 没有 Once / Reenter mode |
+| `timeout.ts` | `ctx.once(where, { timeoutMs })` + `try/catch`；timeout = 失败截止（catch 里只能 log） |
+
+- ★ **v1 的 `start` 返回 Trigger / `onTrigger` 是 deprecated 兼容层**（`plugin.d.ts` 里各成员都带
+  `@deprecated`）：v2 的 `start(ctx)` 返回 `void`，只做 `ctx.at` / `ctx.once` / `ctx.task` 的注册；
+  组合用 task、切换 Run 由控制层做。v1 兼容层仍按原语义工作（不要因此把新插件写成 v1）。
 - 示例只依赖 `plugin.d.ts` 的类型，不需要运行时 shim。
-- ★ `script` 名是 **marker 文件名（含 `.BIN`）**、宿主**精确相等** ⇒ 示例里 `"TITLE"` / `"SBUNKI"`
-  这类裸名字只是**占位**，照抄进真插件会永不命中（`plugin.d.ts` 的用法段已改成 `.BIN` 写法）。
+- ★ `script` 名是 **marker 文件名（含 `.BIN`）**、宿主**精确相等** ⇒ 示例里的 `"TITLE.BIN"` 等仍是
+  **占位**，照抄进真插件要换成真实脚本名；`pos` 真实值从 1 开始、区间必须 `lo < hi`。
+- 示例里的 0 坐标 / 0 区间 / 空颜色串同样是占位：运行期会被形状校验拒（`pos_zero` / `lo >= hi`），
+  这是有意的 —— 示例只证明「只看 `plugin.d.ts` 能写出 v2 插件」。

@@ -1,115 +1,64 @@
-// 重 arm 语义表（v5.3.2）的活例子：
-//   Once        : 触发后=耗尽；再返回同一对象 ⇒ 运行期 fail；要重复 ⇒ 新对象。
-//   Reenter     : last_inside 跨 arm 保留；重新 arm 需先有效“外”再“内”，不会立刻再触发；
-//                 maxFires 续计。
-//   maxFires 耗尽后再返回同一对象一律 fail；新对象才有新预算。
+// 重 arm（v2）：v1 的 Once / Reenter 两种 mode 与「把旧对象重新 arm」都不存在了。
 //
-// 类型上无法表达"已耗尽"：Once 的旧对象仍是 Trigger，`return [oldOnce, reenter]` 照样过 tsc，
-// 只有宿主会 fail。下面用两种正确写法绕开：
-//   - Once 重复 → 每次触发后造**新对象**；
-//   - Reenter 耗尽 → 从返回数组里**去掉**旧对象。
+// 演示什么
+//   · v1 = Trigger 有 `mode`（once / reenter）和 `maxFires`；重新 arm = 把同一个对象再放进返回数组。
+//   · v2 = `ctx.at` 订阅**默认每次命中都跑**；「只响一次」自己 `ctx.off`，「响 N 次」自己计数后 off；
+//     「重新 arm」= 新的 `ctx.at(...)`（新订阅 / 新 id），不是复用旧对象。
 //
-// ⛔ 数值全是占位。
+// v2 新写法
+//   · `ctx.at` 返回订阅 id；`ctx.off(id)` 幂等、tick handler 里也能调（只减）。
+//   · 同一个点上可以有**多条**订阅，各自独立计数 / 各自 off（本文件装两条来对照 once / reenter 的等价物）。
+//
+// ⚠ v2 的门：`ctx.at` 只能在 **Run 回调**里调用（`start` / `onTrigger`；`ctx.task` 的同步首段也在
+//   Run 回调里）。tick handler / task continuation 里再 `ctx.at` 会 TypeError —— 那里的写面只有
+//   `tick.edit` / `tick.input` / `tick.patch`，加上只减的 `ctx.off`。
+//   ⇒ 纯 v2 插件只有 `start` 一个 Run 回调：想在「一轮之后再来一轮」，
+//     (a) 在 start 里把几轮要用的订阅都装好，用 `ctx.off` 选择谁在生效；或
+//     (b) 结束当前 Run，由**下一个 Run 的 start** 重新装（跨 Run 的 re-arm）。
+//
+// 本文件演示 (a)：同一个点上装两条**新订阅**，各自独立计数 / 各自 `off`。
+//
+// 占位值
+//   · script / label 坐标 / 次数全是占位；`pos` 真实值从 1 开始、`script` 含 .BIN。
 
-import type {
-    FiredEvent,
-    PluginModule,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
 
-const ONCE = "rearm:once";
-const REENTER = "rearm:reenter";
+const POINT = { script: "TITLE.BIN", pos: 0x00000000 } as const; // 占位
 
-const ONCE_SCRIPT = "TITLE";
-const REENTER_SCRIPT = "FIELD";
-const POS_LO = 0x00000000;
-const POS_HI = 0x00000000;
+const ONCE_HITS = 1; // 占位：第一条订阅只响一次（v1 Once）
+const REENTER_HITS = 3; // 占位：第二条订阅响三次后停（v1 Reenter + 自己数 maxFires）
 
-const REENTER_MAX_FIRES = 2;
+let onceId: number | undefined;
+let reenterId: number | undefined;
+let onceHits = 0;
+let reenterHits = 0;
 
-interface RearmState {
-    once?: Trigger;
-    reenter?: Trigger;
-    onceFires: number;
-    reenterFires: number;
-    reenterDone: boolean;
-}
-
-function makeOnce(ctx: RunCtx<RearmState>): Trigger {
-    return ctx.trigger.afterPosition(ONCE_SCRIPT, POS_LO, POS_HI, {
-        name: ONCE,
-        mode: "once",
-    });
-}
-
-function makeReenter(ctx: RunCtx<RearmState>): Trigger {
-    return ctx.trigger.afterPosition(REENTER_SCRIPT, POS_LO, POS_HI, {
-        name: REENTER,
-        mode: "reenter",
-        maxFires: REENTER_MAX_FIRES,
-    });
-}
-
-function start(ctx: RunCtx<RearmState>): Trigger[] {
-    const once = makeOnce(ctx);
-    const reenter = makeReenter(ctx);
-    ctx.state.once = once;
-    ctx.state.reenter = reenter;
-    // onceFires / reenterFires 由 initialState 给 0，首读即有值。
-    return [once, reenter];
-}
-
-function onTrigger(ctx: RunCtx<RearmState>, ev: FiredEvent | TimeoutEvent): Trigger[] | null {
-    if (ev.kind === "timeout") {
-        ctx.finish(5, `rearm: gate timeout (${ev.name})`);
-        return null;
-    }
-
-    const { once, reenter } = ctx.state;
-    if (once === undefined || reenter === undefined) {
-        ctx.fail(undefined, "rearm: state not initialized");
-        return null;
-    }
-
-    switch (ev.name) {
-        case ONCE: {
-            ctx.state.onceFires += 1;
-
-            // Once 触发后旧对象已耗尽；**不能**把旧对象再放进返回数组：
-            //   return [once, reenter];   // 类型合法，运行期 fail
-            // 要再来一次，只能造新对象（新边沿/新预算）。
-            const next = makeOnce(ctx);
-            ctx.state.once = next;
-            // Reenter 可能已经耗尽并被移出集合 ⇒ 不能再把旧对象放回去（运行期 fail）。
-            return ctx.state.reenterDone ? [next] : [next, reenter];
+function start(ctx: RunCtx): void {
+    // 「重新 arm」= 新的 at 调用 ⇒ 新订阅（新 id）。两条订阅互相独立。
+    onceId = ctx.at(POINT, (tick, next) => {
+        onceHits += 1;
+        tick.log("info", "rearm: once-sub hit " + String(onceHits));
+        if (onceHits >= ONCE_HITS && onceId !== undefined) {
+            ctx.off(onceId); // v1 Once 的等价物：命中即撤
         }
+        next(); // 继续链（第二条订阅是另一个 id，仍会跑）
+    });
 
-        case REENTER: {
-            ctx.state.reenterFires += 1;
-
-            if (ctx.state.reenterFires < REENTER_MAX_FIRES) {
-                // 同一对象重新 arm：last_inside 跨 arm 保留 ⇒ 必须先出区间再进，
-                // 否则不会立刻再触发；maxFires 继续扣。
-                return [once, reenter];
-            }
-
-            // maxFires 耗尽：同一对象再返回 = 运行期 fail；从集合里去掉（保留 Once）。
-            ctx.state.reenterDone = true;
-            return [once];
+    reenterId = ctx.at(POINT, (tick, next) => {
+        reenterHits += 1;
+        tick.log("info", "rearm: reenter-sub hit " + String(reenterHits));
+        if (reenterHits >= REENTER_HITS && reenterId !== undefined) {
+            ctx.off(reenterId); // 自己数到量再撤（v1 maxFires 的等价物）
         }
+        next();
+    });
 
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
+    if (onceId === undefined || reenterId === undefined) {
+        ctx.fail("rearm", "ctx.at 未装（no_injection）");
     }
+    ctx.log("info", "rearm: two independent subscriptions installed (v2 has no mode)");
 }
 
-const plugin = {
-    initialState: { onceFires: 0, reenterFires: 0, reenterDone: false },
-    start,
-    onTrigger,
-} satisfies PluginModule<RearmState>;
+const plugin = { start } satisfies PluginModule;
 
 export default plugin;

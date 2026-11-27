@@ -1,109 +1,51 @@
-// Timeout：配置 + 响应 + 超时后 re-arm 一个新对象（v5.3.2）。
+// 超时（v2）：`ctx.once(where, { timeoutMs })` + `try/catch`；timeout 是**失败截止**。
 //
-// 配置：ctx.trigger.afterScript(..., { name, timeoutMs })。
-// 响应：onTrigger 收到 ev.kind === "timeout" ⇒ 旧配方 exit 5 用 ctx.finish(5, reason) 映射。
+// 演示什么
+//   · v1 = `afterScript(..., { timeoutMs })` + onTrigger 收 `ev.kind === "timeout"` + `ctx.finish(5)`；
+//   · v2 = 一个 `ctx.once`：命中 ⇒ resolve 一个 `Tick`；到点 ⇒ **reject**，随后宿主自己 fail Run。
+//   · ⛔ timeout 不是「等不到就跳过」：即使你 catch 了 rejection，Run 仍然会失败（父级裁决）。
 //
-// ⛔ 数值全是占位。
+// v2 新写法 / 门的边界
+//   · 命中后写 guest 用 Tick：`tick.input.click(...)`（入队，下一读点落地）。
+//   · catch 在**泵**里 drain 到（`in_callback_` 保持 false）⇒ 那里只能 log；
+//     `ctx.fail` / `ctx.finish` / `ctx.quit` / `ctx.edit` / `ctx.input` 全是 TypeError。
+//     timeout 已经由宿主记成 `once-timeout` 并 fail Run —— 不需要、也不能在 catch 里再 `ctx.fail`。
+//     想换一条自己的失败原因：在 catch 里重新 `throw`（task 拒绝 ⇒ 宿主以这条 reason fail Run）。
+//   · `ctx.fail` 的正确用武之地是 **Run 回调**（例如 `start` 里参数 / 订阅装失败）。
+//
+// 占位值
+//   · script / label 坐标 / 按钮坐标 / timeoutMs 全是占位；`pos` 从 1 开始、`script` 含 .BIN。
 
-import type {
-    FiredEvent,
-    PluginModule,
-    RunCtx,
-    TimeoutEvent,
-    Trigger,
-} from "@amayui/lift-plugin";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
 
-const GATE_TITLE = "gate:title";
-const GATE_RETRY = "gate:retry";
-const GATE_SETTLE = "gate:settle";
+const GATE_POINT = { script: "TITLE.BIN", pos: 0x00000000 } as const; // 占位
+const GATE_TIMEOUT_MS = 30_000; // 占位：失败截止
 
-const TITLE_SCRIPT = "TITLE";
-const RETRY_SCRIPT = "FIELD";
+const NEXT_X = 0; // 占位：门通过后的点击
+const NEXT_Y = 0;
 
-const TITLE_TIMEOUT_MS = 30_000; // 占位：旧配方行尾 timeout 30000
-const RETRY_TIMEOUT_MS = 5_000; // 占位：重试门的超时
-const SETTLE_DELAY_MS = 500; // 占位：纯固定等待
-const MAX_RETRIES = 3; // 占位
+function start(ctx: RunCtx): void {
+    ctx.task(async (t) => {
+        // once 的门 = Run 回调 ⇒ 在 task 的同步首段注册（第一个 await 之前）。
+        const gate = t.once(GATE_POINT, { timeoutMs: GATE_TIMEOUT_MS });
 
-interface TimeoutState {
-    retries: number;
-}
-
-function start(ctx: RunCtx<TimeoutState>): Trigger {
-    return ctx.trigger.afterScript(TITLE_SCRIPT, {
-        name: GATE_TITLE,
-        timeoutMs: TITLE_TIMEOUT_MS,
-    });
-}
-
-/**
- * 每次超时都造**新对象** = 新超时预算。
- * 不复用旧对象：d.ts 没写 timeout 是否让 Trigger 耗尽/从 armed 集合摘除；
- * 返回新对象可同时兼容两种情况（返回数组是完整替换）。
- */
-function makeRetry(ctx: RunCtx<TimeoutState>): Trigger {
-    return ctx.trigger.afterScript(RETRY_SCRIPT, {
-        name: GATE_RETRY,
-        timeoutMs: RETRY_TIMEOUT_MS,
-    });
-}
-
-function onTrigger(ctx: RunCtx<TimeoutState>, ev: FiredEvent | TimeoutEvent): Trigger | null {
-    if (ev.kind === "timeout") {
-        switch (ev.name) {
-            case GATE_TITLE:
-                // 旧语义：门超时 ⇒ exit 5 + 点名。
-                ctx.finish(5, ev.name + " timeout");
-                return null;
-
-            case GATE_RETRY: {
-                // 展示"超时后 re-arm 一个新 trigger"，而不是直接收口。
-                ctx.state.retries += 1;
-                if (ctx.state.retries >= MAX_RETRIES) {
-                    ctx.finish(5, ev.name + " timeout after " + ctx.state.retries + " retries");
-                    return null;
-                }
-                ctx.log("warn", "gate:retry timed out; re-arm a NEW trigger object", {
-                    retries: ctx.state.retries,
-                });
-                return makeRetry(ctx); // 新对象，不是旧对象
-            }
-
-            case GATE_SETTLE:
-                // afterDelay 没叠 timeoutMs，正常不会到这里；防御性收口。
-                ctx.finish(5, ev.name + " timeout (unexpected)");
-                return null;
-
-            default:
-                ctx.fail(ev.name, "unknown timeout");
-                return null;
+        try {
+            const tick = await gate;
+            tick.input.click(NEXT_X, NEXT_Y);
+            t.log("info", "timeout: gate passed @" + String(tick.now.pos));
+        } catch (err) {
+            // 到点：宿主先 reject（本 catch 在同一泵里 drain 到）、随后 fail Run。
+            // 这里只能 log；写类（含 ctx.fail）在泵里 TypeError。
+            log.error("timeout: gate missed: " + String(err));
+            // 自定义失败原因：重新抛出（task rejection ⇒ fail Run）。
+            // 不抛也行 —— 宿主仍会以 once-timeout fail 这个 Run。
+            throw err;
         }
-    }
+    });
 
-    switch (ev.name) {
-        case GATE_TITLE:
-            // TITLE 门命中后转到重试门（同样是新对象）。
-            return makeRetry(ctx);
-
-        case GATE_RETRY:
-            // 纯固定等待：afterDelay **不叠 timeoutMs**。
-            // 旧 `wait` 是固定时长、没有守卫；卡住由外层 --time-limit / --max-frames 看门狗负责。
-            return ctx.trigger.afterDelay(SETTLE_DELAY_MS, { name: GATE_SETTLE });
-
-        case GATE_SETTLE:
-            ctx.finish(0, "gate settled");
-            return null;
-
-        default:
-            ctx.fail(ev.name, "unknown state");
-            return null;
-    }
+    ctx.log("info", "timeout: task registered; timeoutMs is a failure deadline");
 }
 
-const plugin = {
-    initialState: { retries: 0 },
-    start,
-    onTrigger,
-} satisfies PluginModule<TimeoutState>;
+const plugin = { start } satisfies PluginModule;
 
 export default plugin;
