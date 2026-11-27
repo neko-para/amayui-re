@@ -21,6 +21,7 @@
 // 位置坐标：`pos = 0x3C + (pc − 脚本体基址)` —— 与 `dist/views/data/*.txt` 的 `label_%08x` 同坐标。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -38,10 +39,84 @@ enum class InstrPatchKind : std::uint8_t {
 
 const char* instrPatchKindName(InstrPatchKind kind);
 
+// ---- 订阅形状（S2c）----
+// ★ 为什么 form 是枚举而不是"一个 pos + lo/hi 的联合"：v1 的 `pos` 语义必须逐字保留
+//   （`InstrHookStatus.pos` / `hook.list().pos` / `duplicate` 判据都读它）。
+enum class InstrHookForm : std::uint8_t {
+    Pos = 0,     // {script, pos}
+    Range = 1,   // {script, lo, hi} —— [lo, hi)
+    Script = 2,  // {script}（整本脚本，每一拍都命中）
+    Opcode = 3,  // {opcode} / {script, opcode}
+};
+
+inline const char* instrHookFormName(InstrHookForm form) {
+    switch (form) {
+        case InstrHookForm::Pos:
+            return "pos";
+        case InstrHookForm::Range:
+            return "range";
+        case InstrHookForm::Script:
+            return "script";
+        case InstrHookForm::Opcode:
+            return "opcode";
+    }
+    return "?";
+}
+
+// ★ 三种**用途**（决定去重、链参与、Run 存活），⛔ 不要合并成 bool：
+//   V1At = `ctx.hook.at`（v1：按 (script,pos) 全局去重、不参与链、不算 hasPendingWork）
+//   Sub  = `ctx.at`（v2：允许重复、参与链、算 hasPendingWork）
+//   Once = `ctx.once` 的临时 hook（v2：允许重复、被动、算 hasPendingWork）
+enum class InstrHookKind : std::uint8_t { V1At = 0, Sub = 1, Once = 2 };
+
+inline const char* instrHookKindName(InstrHookKind kind) {
+    switch (kind) {
+        case InstrHookKind::V1At:
+            return "v1";
+        case InstrHookKind::Sub:
+            return "sub";
+        case InstrHookKind::Once:
+            return "once";
+    }
+    return "?";
+}
+
+/** 一条订阅的匹配条件。`form` 决定哪一个字段有效；`script` 空 = 不按脚本过滤（只允许 Opcode）。 */
+struct InstrHookWhere {
+    InstrHookForm form = InstrHookForm::Pos;
+    std::string script;
+    std::uint32_t pos = 0;     // Pos
+    std::uint32_t lo = 0;      // Range
+    std::uint32_t hi = 0;      // Range
+    std::uint32_t opcode = 0;  // Opcode（form == Opcode 时总参与）
+};
+
+/** `Tick.local.*` 的三类读（与 `InstrPatchKind` 同一族概念：都是"local 的哪一格"）。 */
+enum class InstrLocalKind : std::uint8_t { Int = 0, Ptr = 1, PtrDword = 2 };
+
+/** 一次命中现场里 local 的**取址视图**（由 `InstrHit` 的散字段装配；值本身按需读）。
+ *  ★ 为什么带 `has_key`：语义值 = DEC(raw, key)（`value_codec.h`）；没有 key 就不能声称是语义值。 */
+struct InstrLocalView {
+    std::uint32_t int_base = 0;
+    std::uint32_t int_count = 0;
+    std::uint32_t ptr_base = 0;
+    std::uint32_t ptr_count = 0;
+    std::uint32_t codec_key = 0;
+    bool has_key = false;
+};
+
 struct InstrHookStatus {
     std::uint32_t id = 0;                 // 句柄（`ctx.hook.at` 返回的那个）
     std::string script;
     std::uint32_t pos = 0;
+    // ★ S2c 的观测面：用例要能判"装进去的是什么形状"（`hook.list()`），否则只能判 hits。
+    //   ⛔ 复用不了 `kind`（下面那个是 **patch** 的种类，v1 语义）；这两个是新字段。
+    //   `form != Pos` 时 `pos` 保持 0（form 决定哪个字段有意义，pos==0 不是错）。
+    InstrHookKind hook_kind = InstrHookKind::V1At;
+    InstrHookForm form = InstrHookForm::Pos;
+    std::uint32_t lo = 0;
+    std::uint32_t hi = 0;
+    std::uint32_t opcode = 0;
     bool patch = false;                   // 这条 hook 现在**是否**装了覆盖
     InstrPatchKind kind = InstrPatchKind::PtrDword;
     std::uint32_t index = 0;
@@ -75,30 +150,38 @@ struct InstrHookStatus {
 struct InstrHit {
     std::uint32_t handle = 0;       // 命中的 hook 句柄（== InstrHookStatus::id）
     std::uint32_t script_id = 0;    // 本次命中的脚本文件 id（frame+0x3C）
-    const char* script = nullptr;   // **该 hook 注册时的脚本名**（生命周期 = 本次分发；见下）
+    // ★ S2c：`script` 的语义从"订阅注册名"收紧成"**本次派发的脚本名**"（`Frame::name`）——
+    //   `{opcode}` / `{script}` 形态的注册名可能是空串或与当前脚本无关，而 `Tick.now.script`
+    //   必须说"这一拍在哪"。两者在 `{script,pos}` 下构造上相等（只有名字相等才会命中）⇒ v1 无感。
+    //   生命周期 = **本次 `on_hits` 调用**（指向 probe 局部的 `Frame::name`）；消费者要拷贝。
+    const char* script = nullptr;
     std::uint32_t pos = 0;          // label 坐标 = 0x3C + (pc − body)
     std::uint32_t opcode = 0;       // PC 上的 opcode（`mem.rd32(pc)`）
     bool opcode_ok = false;         // false ⇒ 读不到（⛔ 不编 0；JS 侧缺键）
     std::uint64_t hits = 0;         // **本次命中之后**的累计命中（== `stats().hits`）
-    // ---- S3 预留（S2a 只有值、没有读者）----
+    // ---- local 的取址视图（`Tick.local` 的按需读；S2a 只有值、没有读者）----
     std::uint32_t int_base = 0;
     std::uint32_t int_count = 0;
     std::uint32_t ptr_base = 0;
     std::uint32_t ptr_count = 0;
     std::uint32_t codec_key = 0;
+    // ★ S2c：= `Frame::has_key`（`local.*` 没有 key ⇒ undefined）。与 `opcode_ok` 同一条诚实口径。
+    bool codec_ok = false;
 };
 
 /**
  * 反向通道（runtime → ui）。★ 签名里**一个 JS 类型都没有**：`quickjs.h` 只许出现在
  * `ui/quickjs_value.h`（守卫 `tools/test/core-shape.test.mjs`）⇒ runtime 只能给函数指针。
- * · `on_hit`：在 **`instrHookProbe` 的 entries 遍历结束之后**按 sink 注册序调（见 `.cpp` 的
- *   "为什么不是遍历中"）—— 回调里即使改表（S2c 放开写能力）也不会让 `Entry&` 悬垂。
- * · `on_released`：条目被 **remove / releaseOwner / clear** 摘掉时逐条调 ⇒ ui 释放自己那份 JS 值。
- * · `script` 指针的生命周期 = 这次 `on_hit` 调用之内（= `Entry::script.c_str()`；条目此刻仍在表里）。
+ * · `on_hits`：一次**派发**一次调用，`hits[0..count)` 按**注册序**（= entries 顺序 = handle 升序），
+ *   `count >= 1`。★ 为什么是批量而不是逐条：`ctx.at` 的链要"这批命中的全部、且这就是最后一条"这个
+ *   事实；逐条回调下 ui 无法知道批次边界（要么加 begin/end 两个钩子 = 两套口径）。
+ *   回调里改 hook 表是**允许**的（分发在 entries 遍历之后，且 hits 已经物化成值）⇒ 之后 `ctx.off` /
+ *   `hook.clear` 都安全；`hits[i].script` 的生命周期 = **本次 `on_hits` 调用**。
+ * · `on_released`：条目被 **remove / releaseOwner / clear** 摘掉时逐条调（ui 释放自己那份 JS 值）。
  */
 struct InstrHookSink {
     void* user = nullptr;
-    void (*on_hit)(void* user, const InstrHit& hit) = nullptr;
+    void (*on_hits)(void* user, const InstrHit* hits, std::size_t count) = nullptr;
     void (*on_released)(void* user, std::uint32_t handle) = nullptr;
 };
 
@@ -124,6 +207,17 @@ bool instrHookHasSink();
  *   （`script_empty` / `pos_zero` / `duplicate` / `no_injection`）。
  */
 std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err);
+
+/**
+ * 装一条**任意形状**的订阅（S2c）。`owner` = 本条订阅的归属（`PluginHost` 传 `run_serial_`）。
+ * 失败 ⇒ 0 + `*err` 静态字面量：
+ *   `script_empty` / `pos_zero` / `range_empty` / `bad_where` / `duplicate`（**只有 V1At**）/ `no_injection`。
+ * ★ `duplicate` 只对 `kind == V1At`：v1 的「同一 (script,pos) 只能一条」是**已发布语义**
+ *   （合同 §4.5）；v2 的 `Sub` / `Once` 是**新面**，同点多条是它的用法（多 handler / 链）。
+ * ★ 每条订阅 = 一条 Entry（各自 handle、同一个 owner）。
+ */
+std::uint32_t instrHookAddEx(std::uint64_t owner, const InstrHookWhere& where, InstrHookKind kind,
+                             const char** err);
 
 /**
  * ③ 改：给句柄装 / 换 / 撤覆盖。`value` = 语义值；`maxHits` = 0 表示不限（只在前 N 次命中写）。

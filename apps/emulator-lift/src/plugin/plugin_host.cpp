@@ -63,6 +63,33 @@ std::string paramsText(const std::map<std::string, std::string>& params) {
     return out;
 }
 
+// `ctx.hook.at` / `ctx.at` 的日志描述（`form` 决定读哪几个字段）。
+// ★ v1 的 `script=… pos=0x…` 逐字保留（S2c 之前那行日志的唯一形状）；其余形态按 form 描述。
+std::string describeInstrWhere(const lift::InstrHookWhere& where) {
+    char hex[16];
+    switch (where.form) {
+        case lift::InstrHookForm::Pos: {
+            std::snprintf(hex, sizeof(hex), "0x%X", where.pos);
+            return "script=" + where.script + " pos=" + hex;
+        }
+        case lift::InstrHookForm::Range: {
+            char lo_hex[16];
+            char hi_hex[16];
+            std::snprintf(lo_hex, sizeof(lo_hex), "0x%X", where.lo);
+            std::snprintf(hi_hex, sizeof(hi_hex), "0x%X", where.hi);
+            return "script=" + where.script + " range=[" + lo_hex + "," + hi_hex + ")";
+        }
+        case lift::InstrHookForm::Script:
+            return "script=" + where.script + "（整本）";
+        case lift::InstrHookForm::Opcode: {
+            std::snprintf(hex, sizeof(hex), "0x%X", where.opcode);
+            return (where.script.empty() ? std::string() : "script=" + where.script + " ") +
+                   "opcode=" + hex;
+        }
+    }
+    return "?";
+}
+
 // =====================================================================================
 // 回调耗时诊断（REQ-01M7VVDV69MJXRHNDGR50H7VHC 待查 #3）
 //
@@ -248,7 +275,7 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     //   ★ 已经 failed / finished / quit / runner failed 时**不再**跑用户 JS（Run 已收口；残余 job
     //   交给 `Impl::shutdown` 的兜底 drain）。`runner.done()` **不是**跳过条件：task / once 正在
     //   等它的时候，泵就是唯一的推进点。
-    if (script_ != nullptr && !failed_ && !finished_ && !quit_requested_ && !runner_.failed()) {
+    if (script_ != nullptr && !runTerminal()) {
         script_->pump(*this, runner_.budget());
     }
     // ★ S0（缺陷 1）：`onTrigger` 返回 `[]` ⇒ `install` 把 runner 置 done，**这发生在回调返回之后**
@@ -287,7 +314,8 @@ bool PluginHost::runClosed() const {
     //   Run 必须活着（否则 `return []` 会把一个还在 `await ctx.once(...)` 的 Run 收口掉）。
     //   `hasPendingWork` 只认那三样：普通 `ctx.hook.at` 是 v1 观察，⛔ 不算。
     const bool pending = script_ != nullptr && script_->hasPendingWork();
-    return failed_ || finished_ || quit_requested_ || runner_.failed() || (runner_.done() && !pending);
+    // ★ S2b-1：终态判据只有一份 = `runTerminal()`（failed / finished / quit / runner failed）。
+    return runTerminal() || (runner_.done() && !pending);
 }
 
 // =====================================================================================
@@ -454,27 +482,37 @@ bool PluginHost::editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const li
 }
 
 std::uint32_t PluginHost::instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) {
+    // ★ S2c：v1 的 `ctx.hook.at` = `instrHookAddWhere` 的薄包装（Pos + V1At）；
+    //   注册 / 失败日志 / `no_injection` 的响亮分支只有一份实现。
+    lift::InstrHookWhere where;
+    where.form = lift::InstrHookForm::Pos;
+    where.script = script;
+    where.pos = pos;
+    return instrHookAddWhere(where, lift::InstrHookKind::V1At, err);
+}
+
+std::uint32_t PluginHost::instrHookAddWhere(const lift::InstrHookWhere& where, lift::InstrHookKind kind,
+                                            const char** err) {
     const char* why = nullptr;
-    // ★ S0：owner = **本 Run 的序号**（JS 面不变：`ctx.hook.at(script,pos)`）。
-    const std::uint32_t handle = lift::instrHookAdd(run_serial_, script, pos, &why);
+    // ★ S0：owner = **本 Run 的序号**（JS 面不变：`ctx.hook.at` / `ctx.at`）。
+    const std::uint32_t handle = lift::instrHookAddEx(run_serial_, where, kind, &why);
     if (err != nullptr) *err = why;
     if (handle == 0) {
         // ★ S0（缺陷 3）：`no_injection` 不是用户输入错，而是**这一趟构建没有注入站点**
-        //   （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `ctx.hook.*` 永不命中。
+        //   （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `ctx.hook.*` / `ctx.at` 永不命中。
         //   这一条必须**响亮**（report 而不是普通 log）：否则唯一症状是"装上了、hits 永远 0"。
         if (why != nullptr && std::strcmp(why, "no_injection") == 0) {
             report("ctx.hook 不可用",
                    "no_injection：本构建在脚本派发点没有注入 lift_instr_hook"
-                   "（--no-s7 或闭包没覆盖派发 EA）⇒ ctx.hook.* 永不命中");
+                   "（--no-s7 或闭包没覆盖派发 EA）⇒ ctx.hook.* / ctx.at 永不命中");
         } else {
-            log("error", std::string("ctx.hook.at 失败：") + (why != nullptr ? why : "unknown"));
+            log("error", std::string(kind == lift::InstrHookKind::Sub ? "ctx.at " : "ctx.hook.at ") +
+                             "失败：" + (why != nullptr ? why : "unknown"));
         }
         return 0;
     }
-    char pos_hex[16];
-    std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", pos);
-    log("info", std::string("ctx.hook.at script=") + script + " pos=" + pos_hex + " handle=" +
-                   std::to_string(handle));
+    log("info", std::string(kind == lift::InstrHookKind::Sub ? "ctx.at " : "ctx.hook.at ") +
+                   describeInstrWhere(where) + " handle=" + std::to_string(handle));
     return handle;
 }
 
@@ -567,6 +605,14 @@ bool PluginHost::readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::Globa
     return ok;
 }
 
+bool PluginHost::readLocal(const lift::InstrLocalView& view, lift::InstrLocalKind kind,
+                           std::uint32_t index, std::uint32_t* out) {
+    // ★ 只转发：唯一实现在 `GuestEngineRead::readLocal`（那个类才持有 `const GuestMemory&`）。
+    //   `read_ == nullptr`（没 attachMemory）= 装配错误 ⇒ false ⇒ JS 侧 undefined（与 `readGlobal` 同形；
+    //   不是新的失败模式：tick 只在 Run 里跑，那时 attachMemory 必然已经调过）。
+    return read_ != nullptr && read_->readLocal(view, kind, index, out);
+}
+
 Trigger PluginHost::makeAfterScript(const std::string& name, const std::string& script, TriggerMode mode,
                                     std::uint32_t max_fires, std::uint64_t timeout_ms) {
     if (ctx_trigger() == nullptr) return Trigger{};
@@ -614,6 +660,7 @@ void PluginHost::log(const char* level, const std::string& message) {
     }
     if (!message.empty() && message == last_log_) return;
     last_log_ = message;
+    last_line_ = message;  // ★ S2c-1 复审 F7：测试可读的"最后一行原文"（⛔ 不影响打印 / 去重）
     ++log_lines_;
     std::fprintf(stderr, "[plugin %s] %s: %s\n", name_.c_str(), level != nullptr ? level : "info",
                  oneLine(message).c_str());

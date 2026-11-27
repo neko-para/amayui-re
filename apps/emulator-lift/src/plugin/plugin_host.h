@@ -162,6 +162,9 @@ public:
                        const char** code) override;
     // ---- 脚本指令位置钩子（`ctx.hook`；唯一实现 = `runtime/instr_hook.cpp`）----
     std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) override;
+    // ★ S2c：`ctx.at(where, handler)` 的注册口（owner = `run_serial_`，与 `instrHookAdd` 同一份）。
+    std::uint32_t instrHookAddWhere(const lift::InstrHookWhere& where, lift::InstrHookKind kind,
+                                    const char** err) override;
     bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind, std::uint32_t index,
                            std::uint32_t value, std::uint32_t max_hits, const char** err) override;
     bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
@@ -177,6 +180,9 @@ public:
     ui::PluginInputState inputStatus(std::uint64_t id) override;
     bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                     const char** code) override;
+    // ★ S2c：`Tick.local.*` 的转发（唯一实现 = `GuestEngineRead::readLocal`；本头只前向声明它）。
+    bool readLocal(const lift::InstrLocalView& view, lift::InstrLocalKind kind, std::uint32_t index,
+                   std::uint32_t* out) override;
     // ---- AppData（同步只读宿主 I/O；只 RunCtx）----
     bool appDataAvailable() const override { return appdata_.available(); }
     std::string appDataPath() const override { return appdata_.path(); }
@@ -238,6 +244,11 @@ public:
     bool begun() const { return begun_; }
     bool done() const { return runner_.done(); }
     bool failed() const override { return failed_; }
+    // ★ S2b-1（复审 S2-1）：Run 终态 = failed / finished / quit / runner failed。
+    //   泵 / task settle 用它当"Run 已收口 ⇒ 静默丢弃"的判据；⛔ 不含 `runner_.done()`。
+    bool runTerminal() const override {
+        return failed_ || finished_ || quit_requested_ || runner_.failed();
+    }
     const std::string& failName() const { return fail_name_; }
     const std::string& failReason() const { return fail_reason_; }
     bool finished() const { return finished_; }
@@ -250,6 +261,11 @@ public:
     std::uint64_t fired() const { return fired_; }
     std::uint64_t timeouts() const { return timeouts_; }
     std::uint64_t logLines() const { return log_lines_; }
+    // ★ S2c-1 复审 F7（S3）：**最后一条已打出**日志的原文（测试 / readout 判"消息内容"用）。
+    //   ⛔ 不改日志行为：`log()` 照旧 dedup / 上限 / `oneLine()` 打印；这里只是把同一条消息存一份。
+    //   为什么需要：`logLines()` 只数行数 ⇒ `plugin/at-handler-error` 只能判"恰好 +1"，判不了
+    //   消息里有没有点名的 `at #N` / `hit #M`（plan 的判据）。
+    const std::string& lastLogLine() const { return last_line_; }
 
     TriggerRunner& runner() { return runner_; }
     const TriggerRunner& runner() const { return runner_; }
@@ -342,6 +358,7 @@ private:
     std::uint64_t timeouts_ = 0;
     std::uint64_t log_lines_ = 0;
     std::string last_log_;  // 去重（连续相同 ⇒ 不重复打）
+    std::string last_line_;  // ★ 最后一条**已打出**的原文（`lastLogLine()`；只读观测，不参与去重）
 };
 
 }  // namespace lift::plugin

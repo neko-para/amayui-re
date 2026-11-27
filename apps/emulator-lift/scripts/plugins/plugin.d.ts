@@ -545,6 +545,24 @@ export interface RunCtx<State = Record<string, unknown>> {
      *  · 不需要 `await`：登记即返回 `undefined`；task 组合用 Promise 自身的 `await` / `Promise.all`。
      *  ★ 它让 Run **保持存活**：所有 task settled 之前 Run 不收口（`return []` 也不会）。 */
     task(fn: (ctx: RunCtx<State>) => Promise<unknown>): void;
+    /**
+     * **同步订阅**一个指令点（S2c）：命中时按**注册序**跑 handler；调 `next()` 继续，不调 = 截断。
+     *  · 门 = Run 回调（`start` / `onTrigger`）；`ctx.task` 的**同步首段**里可以调；
+     *  · 返回订阅 id（`> 0`）；`no_injection`（`--no-s7`）⇒ `undefined` + 宿主一行显眼 error；
+     *  · 每条订阅让 Run **保持存活**（`hasPendingWork`）⇒ 要收口就 `ctx.off(id)` / `finish` / `quit`；
+     *  · handler 必须**同步**（返回 Promise 会被忽略 + 一次性 warn；`next()` 必须在 await 之前调）；
+     *  · handler 抛错 / 超预算 ⇒ **撤整条订阅** + 一行 error，Run 不 fail。
+     *  · 链的顺序 = 注册序；`once` / `handle.onTick` 是**被动观察者**（截断不影响它们）。
+     *  ★ 本切片（S2c-1）`where` 只收 `{ script, pos }`；`{script,lo,hi}` / `{script}` / `{opcode}`
+     *    在运行时是 **TypeError**（S2c-2 才放开 —— 类型面与实现保持一致，⛔ 不"声明说得比实现多"）。
+     */
+    at(where: AtWhere, handler: (tick: Tick, next: () => void) => void): number | undefined;
+    /**
+     * 撤一条订阅（**幂等**）：`true` = 这次真的撤掉了；`false` = 本来就不在（Run 已收口 / 撤过）。
+     * ★ 门是"在插件上下文里"（**不是**"正在 Run 回调里"）：tick handler / task continuation /
+     *   render 里都能撤（它只减，不写 guest、不让 Run 更长）。
+     */
+    off(handle: number): boolean;
     readonly ui: UiApi;
     /** ⚠ **C5**（C2a 里是 `undefined`）。Run 的 status/abort/events/dispatch。 */
     readonly run: RunApi;
@@ -600,11 +618,56 @@ export interface InstrHookStats {
     readonly ints: number[];
     /** `capture({ptrs})` 的**指针指向的 dword**（语义值；不可读 = 0）。 */
     readonly ptrTargets: number[];
+    // ---- S2c 的形状面（可选：老调用方不需要读它们）----
+    /** 这一行是哪种订阅：v1 `ctx.hook.at` / v2 `ctx.at` / `once` 的临时 hook。 */
+    readonly kind?: "v1" | "sub" | "once";
+    /** `form` 决定哪个字段有意义（`pos` 只在 `"pos"` 形态下非 0）。 */
+    readonly form?: "pos" | "range" | "script" | "opcode";
+    readonly lo?: number;
+    readonly hi?: number;
+    readonly opcode?: number;
 }
-/** S2a/S2b 的**只读** Tick（S2c 才扩成带 `edit` / `input` / `patch` 的完整 `Tick`）。
- *  · `opcode` 读不到 ⇒ **缺键**（⛔ 不是 0：0 是真实 opcode）；
- *  · `log(level, message, data?)` 是宿主的观测出口（一行一条、有界、连续去重；`data` 不进日志行）。
- *  ★ 它只能来自 `handle.onTick(fn)` 的回调参数或 `ctx.once(...)` 的 resolve；⛔ 不要自己造。 */
+/** `ctx.at` 的匹配条件（S2c-1：**只** `{ script, pos }` —— 与运行时的校验逐条一致）。
+ *  ★ S2c-2 才追加 `{script,lo,hi}` / `{script}` / `{script?,opcode}`（运行时一起放开；⛔ 不提前声明）。 */
+export type AtWhere = { readonly script: string; readonly pos: number };
+/** `Tick.now`：**本拍命中的值快照**（⛔ 不是"当前位置"；跨入口仍读到旧值 —— 这是有意的）。 */
+export interface TickNow {
+    readonly script: string;
+    readonly pos: number;
+    /** 读不到 ⇒ **缺键**（⛔ 不是 0：0 是真实 opcode；与 `InstrTick.opcode` 同口径）。 */
+    readonly opcode?: number;
+}
+/** `Tick.local`：**活读** guest（语义值 = DEC）。有效期 = 产生 Tick 的那次入口（含其 drain）。 */
+export interface TickLocal {
+    /** `local-int index` 的**语义值**；越界 / 不可读 / 没有 ENC key ⇒ `undefined`。 */
+    int(index: number): number | undefined;
+    /** `local-ptr index` 的**指针值**（地址，⛔ 不解码）；越界 ⇒ `undefined`。 */
+    ptr(index: number): number | undefined;
+    /** `local-ptr index` **指向**的 dword 的语义值；越界 / 指针 0 / 不可读 ⇒ `undefined`。 */
+    ptrDword(index: number): number | undefined;
+}
+/** **Tick**（S2c）：只来自 `ctx.at` 的回调参数或 `ctx.once(...)` 的 resolve；⛔ 不要自己造。
+ *  ★ 有效期 = **产生它的那一次指令点入口（含该入口的 drain）**：跨入口用 `local`（S2c-2 还有
+ *    `edit` / `input` / `patch`）⇒ 抛 `Error`（消息含 `stale_tick`）；`now` 是快照、`log` 是宿主
+ *    出口 ⇒ 仍可用。
+ *  ★ 一次派发**一个** Tick 对象（全链共享同一个快照）；`id` = 链里**第一条**订阅的句柄
+ *    （要自己的 id 就在 `ctx.at` 时把返回值存起来）。 */
+export interface Tick {
+    readonly id: number;
+    readonly now: TickNow;
+    readonly local: TickLocal;
+    log(level: string, message: string, data?: unknown): void;
+    // ---- deprecated（S4 删；S2a/S2b 的夹具与 d.ts 曾用平铺字段）----
+    /** @deprecated 用 `now.script`。 */
+    readonly script: string;
+    /** @deprecated 用 `now.pos`。 */
+    readonly pos: number;
+    /** @deprecated 用 `now.opcode`。 */
+    readonly opcode?: number;
+}
+/** S2a/S2b 的旧名（= v2 `Tick` 的**同一形状**；保留是因为 `handle.onTick` / `ctx.once` 的
+ *  既有调用方与夹具都用它）。★ S2c 起两者逐字段同形；新代码用 `Tick`。
+ *  @deprecated 用 `Tick`（同一形状；S4 删这个别名）。 */
 export interface InstrTick {
     readonly id: number;
     readonly script: string;

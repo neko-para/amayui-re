@@ -121,6 +121,14 @@ public:
     //   默认 false（测试替身 / 未来的其它宿主不必被迫实现）。
     virtual bool failed() const { return false; }
 
+    // ★ S2b-1（复审 S2-1）：本 Run 是否**已经到终态**（`failed` / `finished` / `quit` / runner failed）。
+    //   为什么不能只判 `failed()`：`ctx.finish()` / `ctx.quit()` **不**置 `failed_` ⇒ 一个在
+    //   finish/quit 之后同一入口里拒绝的 task 会把 `run=finished exit=N` **翻成 failed**、
+    //   并把 `exit` 读数覆盖掉。⇒ 泵 / task settle 的"Run 已收口"判据一律用它：
+    //   已到终态 ⇒ **静默丢弃**待推工作（不 fail、不覆盖读数）；否则 rejected task ⇒ `fail("task", …)`。
+    //   ⛔ 不把 `runner.done()` 算进来：正常 done 的 Run 仍要每帧 render（与 `onReadPoint` 的泵门同口径）。
+    virtual bool runTerminal() const = 0;
+
     // ---- Edit（立即）----
     // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
     virtual bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
@@ -137,6 +145,14 @@ public:
     virtual bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                             const char** code) = 0;
 
+    // ---- Tick.local（S2c；**只读 guest**，只 tick 入口用）----
+    // ★ 纯虚：唯一实现者 = `PluginHost`。⛔ 不给默认实现 —— 那会让"没接线"静默退化成 `undefined`
+    //   （与 `readWired()` 的口径冲突：装配错误必须响亮）。
+    // ★ 语义值口径：int / ptrDword = DEC(raw, key)（`value_codec.h`）；ptr = 槽里原样（地址不解码）。
+    //   越界 / 未提交 / 指针 0 / 没有 key ⇒ **false** ⇒ JS 侧 `undefined`（⛔ 不编 0）。
+    virtual bool readLocal(const lift::InstrLocalView& view, lift::InstrLocalKind kind,
+                           std::uint32_t index, std::uint32_t* out) = 0;
+
     // ---- 脚本指令位置钩子（`ctx.hook`；**只 RunCtx**）----
     // ★ 三种能力**彼此独立**（用户裁决 2026-11-26 晚：触发 ≠ 修改）：
     //   ① 触发 `instrHookAdd(script,pos)`（纯观察，不读不写；返回句柄 id）；
@@ -144,6 +160,10 @@ public:
     //   ③ 改   `instrHookSetPatch(handle, …)`（在这条指令读之前覆盖一个 dword，指令后恢复 ⇒ 净变化 0）。
     // ★ 实现 = `runtime/instr_hook.h`（唯一一份）；本接口只是语言无关的那层。
     virtual std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) = 0;
+    // ★ S2c：`ctx.at(where, handler)` 的注册口 —— 每条订阅一条 runtime Entry（各自 handle、
+    //   同一个 owner）。`instrHookAdd` 是它的 v1 薄包装（Pos + V1At，去重只对 V1At）。
+    virtual std::uint32_t instrHookAddWhere(const lift::InstrHookWhere& where, lift::InstrHookKind kind,
+                                            const char** err) = 0;
     virtual bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind,
                                    std::uint32_t index, std::uint32_t value, std::uint32_t max_hits,
                                    const char** err) = 0;
