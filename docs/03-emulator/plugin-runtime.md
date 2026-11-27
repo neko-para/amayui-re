@@ -1487,6 +1487,30 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **门禁**：`plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` /
   `pump-budget` / `module-start-only`；变异覆盖 `call()` drain / `once` deadline / `hasPendingWork`。
 
+### 4.15 同步订阅（S2c-1：`ctx.at` 链 + 只读 `Tick` + `local` + stale）
+
+- **`ctx.at(where, (tick, next) => …)` → 订阅 id（number）**：每条订阅 = 一条 runtime Entry（各自 handle、
+  同一 owner）；`where` 在 S2c-1 的 **JS 面只放开 `{script, pos}`**（matcher 的四种 form 已一次写全，
+  `{script,lo,hi}`/`{script}`/`{opcode}` 的 JS 暴露是 S2c-2）。`no_injection` ⇒ `undefined` + 显眼 error；
+  形状错 ⇒ TypeError；门 = `inCallback()`（Run 回调；`task` 的同步首段可以 `at`）。
+- **链**：同一次派发按 **handle 升序**（= 注册序）；只把 v2 `at` 订阅纳入链（`once` / v1 `onTick` 照跑、不参与
+  `next`）；`next()` 继续、不调 = 截断；`next()` 二次 = 幂等；链外调 `next` ⇒ `next_outside_chain`；
+  handler 抛错 ⇒ **摘整条订阅**（防僵尸订阅让 Run 永不收口）+ 一行 `at #N hit #M`；handler 返回 Promise ⇒
+  忽略 + 一次性 warn（异步走 `task`/`once`）。
+- **`ctx.off(subscriptionId)`** → bool、幂等；门 = `call_host`（tick / render / 泵里都能撤）。
+  `at` 订阅算 `hasPendingWork`（Run 不会在还有订阅时收口）；`ctx.hook.clear()` 仍全清（v1 语义）。
+- **`Tick`（只读面）** = `{ id, now, local, log }`（`now = {script,pos,opcode?}`）：
+  `local.int(i)` / `local.ptr(i)` / `local.ptrDword(i)` —— `int`/`ptrDword` 是 **DEC 语义值**，`ptr` 是地址原样；
+  越界 / 未提交 / ptr 0 / **没有 codec key** ⇒ `undefined`（⛔ 不编 0）。
+- **有效期**：Tick 只在**产生它的那次 tick 入口**（含该入口的 drain）内有效；跨入口用 `local.*` ⇒
+  `Error("stale_tick…")`；`now`（值快照）与 `log` 仍可用。实现 = `Impl::ticks`（`serial → TickRef` 值拷贝）+
+  JS 对象隐藏键 `__tick`；入口末尾 `ticks.clear()`。
+- **未做（S2c-2）**：`{script,lo,hi}`/`{script}`/`{opcode}` 的 JS 暴露、`Tick.edit/input/patch`、
+  `Pending` 单槽 → 多槽（链上多个 handler 各自 patch 会静默丢一次覆盖）、stale 的写面。
+- **门禁**：`plugin/at-chain-order` / `at-next-truncates` / `at-off` / `at-handler-error` / `tick-now` /
+  `tick-local` / `tick-stale` / `at-multi-same-pos` / `at-keeps-run`；`instr-hook/sink-hit-batch` /
+  `add-ex-shared`；变异 6 条。
+
 ---
 
 ## §5 迁移切片 C0–C5
@@ -1837,6 +1861,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 44 | **指令点钩子的收口 / CAS / 注入可见性（S0）**：hook 归 **Run owner**，Run 的每条收口路径都 `instrHookReleaseOwner`；`patch` 恢复 = **CAS**（当前值仍是我写的编码值才写回），否则计 `restore_conflicts`；持久写（`ctx.edit` / 控制层 `global-set`）**主动撤销** pending；render 期 7 个 `ctx.hook.*` trampoline 一律 TypeError；`--no-s7` / 注入站点 0 ⇒ `at()` 返回 `no_injection`（⛔ 不是永远 hits=0 的假句柄） | Run 结束后仍按条改 guest；窗口里别人的写被静默抹掉；render 里改 hook；插件"装上了但永不命中"且无消息 | `instr-hook`（`patch-restore-cas` / `patch-restore-clean` / `no-injection` / `owner-release` / `patch-edit-cancels-pending`）+ `plugin/hook-release-{fail,done,budget}` + `plugin/render-stored-runctx-rejected`（OPS 含 hook）+ 变异 `--match instr-hook` |
 | 45 | **指令点回调只读 + 每入口 drain（S2a）**：sink 分发在 entries 遍历**之后**；`handle.onTick(fn)` 每句柄一个、tick 只有 `{id,script,pos,opcode?,log}`、`inCallback()` 恒 false；handler 失败只摘 handler（`hit #N` 一行）不 fail Run；每个 host→JS 入口在**同一 CPU 预算窗**内 drain microtask；Run 收口 `on_released` 释放 JS 值、之后 probe 不再调 JS | tick 里能改 guest / 跑 `fail`；JS 回调改 hook 表导致遍历 UB；`await` continuation 漏到下一入口；忙等 await 卡死 guest；Run 结束后仍在跑 JS | `instr-hook/sink-*` + `plugin/point-hit*` + `drain-per-entry` / `drain-budget` + `core-shape` ⑦/⑧ + 变异 `--match 'sink-hit'` / `--match 'drain'` |
 | 46 | **异步面（S2b）**：`once` 只收 `{script,pos}` + `timeoutMs>0`；超时 = reject → 泵 drain → `fail Run`；`task` 返回 Promise 才接受、rejected ⇒ fail Run；`pump` 只在读点 + `renderFrame`；Run 存活 = `tasks ∪ onces ∪ onTick 订阅` 为空才收口；`start` 可单独存在（`onTrigger` 单独仍拒） | 永不结束的 once / once 泄漏 hook；task 拒绝被静默吞；Run 提前 done 把 task 杀掉 / 或永不收口；loader 把 onTrigger-only 当可用 | `plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` / `pump-budget` / `module-start-only` + 3 条变异 |
+| 47 | **同步订阅（S2c-1）**：`ctx.at` 每条订阅一条 Entry、链按 handle 升序、`next()` 截断、二次幂等、链外抛；handler 抛错摘整条订阅；`Tick` = `{id,now,local,log}`、`local` 是 DEC 语义值、越界/无 key ⇒ undefined、跨入口 `local.*` 抛 `stale_tick`；`at` 算 Run 存活、`off` 幂等且门 = `call_host` | 链序/截断错；僵尸订阅让 Run 永不收口；stale Tick 读到别人视图；越界读编 0；`at` 不阻止 Run 提前收口 | 9 条 `plugin/at-*`/`tick-*` + `instr-hook/sink-hit-batch` + `add-ex-shared` + 6 条变异 |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
