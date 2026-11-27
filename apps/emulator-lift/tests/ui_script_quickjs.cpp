@@ -151,6 +151,9 @@ globalThis.render = function render() {
   var globalCtor = 'compiled';
   try { globalThis.constructor.constructor('return 1')(); } catch (e) { globalCtor = e.name; }
   ui.text({ x: 0, y: 0, text: 'global-ctor=' + globalCtor, size: 1 });
+  // ★ S3 负控制：独立全局 `log` 只装在**插件装载路径**（`makeQuickJsPlugin`）。
+  //   本文件走的是 `QuickJsRuntime::load`（classic HUD / 内部 hud 回退）⇒ 这里必须没有它。
+  ui.text({ x: 0, y: 0, text: 'log=' + typeof log, size: 1 });
 };
 )JS";
 
@@ -185,6 +188,9 @@ void caseSandbox() {
     expectText(texts, 13, "direct-eval=ReferenceError", "沙箱：eval 已被删除");
     expectText(texts, 14, "fn-ctor=TypeError", "沙箱：.constructor 不能再编译源码");
     expectText(texts, 15, "global-ctor=TypeError", "沙箱：globalThis.constructor.constructor 也不能");
+    // ★ S3 负控制：`log` 是**插件上下文**的全局，classic / 内部 hud 回退路径没有它
+    //   （装点 = `makeQuickJsPlugin`，⛔ 不是 `createImpl`）。
+    expectText(texts, 16, "log=undefined", "经典 / 内部 HUD 路径不得有全局 log（只装插件装载路径）");
 
     // ★ `import` 现在走 **module 路径**（`ui-script-modules` 单）；这里钉的是**边界**：`'y'` 是
     //   bare specifier ⇒ module loader 拒绝 ⇒ load 失败，且 err 带 `origin:line:col`。

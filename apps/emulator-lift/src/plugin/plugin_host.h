@@ -276,6 +276,11 @@ public:
     //   为什么需要：`logLines()` 只数行数 ⇒ `plugin/at-handler-error` 只能判"恰好 +1"，判不了
     //   消息里有没有点名的 `at #N` / `hit #M`（plan 的判据）。
     const std::string& lastLogLine() const { return last_line_; }
+    // ★ S3：**最后一条已打出**日志的级别（`lastLogLine()` 的姊妹；同一套"只读观测"纪律）。
+    //   为什么需要：全局 `log.info/warn/error/debug` 的四个方法共用一份实现，级别映射错了
+    //   （例如四个都传 info）时消息文本与行数都**看不出来** ⇒ `plugin/global-log` 要判这一位。
+    //   ⛔ 不改日志行为：`log()` 照旧 dedup / 上限 / 打印；这里只是把已打出的那条级别存一份。
+    const std::string& lastLogLevel() const { return last_level_; }
 
     TriggerRunner& runner() { return runner_; }
     const TriggerRunner& runner() const { return runner_; }
@@ -369,6 +374,7 @@ private:
     std::uint64_t log_lines_ = 0;
     std::string last_log_;  // 去重（连续相同 ⇒ 不重复打）
     std::string last_line_;  // ★ 最后一条**已打出**的原文（`lastLogLine()`；只读观测，不参与去重）
+    std::string last_level_;  // ★ S3：最后一条**已打出**的级别（`lastLogLevel()`；同上，只读观测）
 };
 
 }  // namespace lift::plugin

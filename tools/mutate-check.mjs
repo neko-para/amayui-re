@@ -5007,6 +5007,24 @@ const MUTATIONS = [
       '`plugin/tick-patch-once-tick` 红（`code === "once_tick"` 那一位 = 0）',
   },
 
+  // ── S3：独立全局 `log` 的**安装**（插件装载路径）──────────────────────────────────────────────
+  //   ★ 代表这一类错：忘了在 `makeQuickJsPlugin` 装 `globalThis.log`（或把它挪进 `createImpl`，
+  //     那样插件有、classic HUD 也有 —— 后半由 `ui-script-quickjs/sandbox` 的负控制抓）。
+  //     插件里的 `log.info(...)` 会变成 ReferenceError / 静默没有输出，而且只在**用到**时才有症状。
+  //   ★ 红点 = `plugin/global-log`（四路之一的 start 就抛 ⇒ Run failed；行数 / 级别也对不上）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '    if (ok) ok = defineReadOnly(ctx, global.raw(), "log", std::move(log_obj));\n',
+    to: '    if (ok) { (void)global; (void)log_obj; }  // 变异：不装 globalThis.log\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`installGlobalLog` 不把 `log` 装进 `globalThis`（`defineReadOnly(...)` 改成 no-op）⇒ ' +
+      '插件里的 `log.info` / `log.warn` / `log.error` / `log.debug` 全部不可用；`plugin/global-log` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;
