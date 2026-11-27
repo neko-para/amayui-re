@@ -101,7 +101,7 @@ void usage() {
         "  --frame-log             每次 Present 打一行帧号 + guest 后缓冲哈希（缺省关）\n"
         "  --region-log            启动 readout 末尾追加 guest 区域表（缺省关；需 --log-level info）\n"
         "  --no-intrinsics         关掉构建期库内建闸门（缺省 = 开；只给 A/B 与诊断）\n"
-        "  --user-run              标记「用户本人正在体验」：写机器级体验锁，构建/测试工具据此让路（缺省关）\n"
+        "  --user-run              标记「用户本人正在体验」：写机器级体验锁；杀进程前先看这里（缺省关）\n"
         "\n"
         "★ 控制层（缺省不启动；需显式 --control-root）：\n"
         "  --control-root <dir>      端点文件目录\n"
@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
     std::string guest_root;
     // ★ `--user-run`（纯开关，缺省关）：标记「用户本人正在体验」—— 只在宿主侧写一个**机器级**
     //   锁文件（`runtime/experience_lock.h`），⛔ 不改任何模拟语义。读端 / 守卫 =
-    //   `tools/experience.mjs`（构建 / 测试 / 变异自检据此让路）。
+    //   `tools/experience.mjs`（杀进程前先认人；⛔ 不拦构建 / 测试）。
     bool user_run = false;
     // ★ `--help` 不在这里立刻 return：锁必须在**解析后立刻**写（`--user-run --help` 也要能证明
     //   "锁在进程存活期间存在"）⇒ 只记下来，解析循环结束后先写锁、再打 usage。
@@ -650,10 +650,10 @@ int main(int argc, char** argv) {
     // =====================================================================================
     // ★ 用户体验锁（`--user-run`）：**解析后立刻写**，在 `--help` / 任何校验 / bring-up 之前。
     //   ⇒ "用户正在体验"从进程一开始就在盘上（`tools/experience.mjs` 的 status / guard 与命令行
-    //     兜底都认它），agent 哪怕只抢到一小段时间也能看见并让路。
+    //     兜底都认它），agent 哪怕只抢到一小段时间也能看见并避开。
     //   ★ 已有别的**活**锁 ⇒ 只 warn + 覆盖，⛔ 不拒绝启动（用户开第二个实例是用户的事）。
     //   ★ 退出删锁：RAII（栈上对象析构）+ `std::atexit` 兜底，**都核对 pid**（被覆盖后不删别人的）。
-    //   ★ 写不进去不致命：打一行 warn 继续（锁是让路信号，⛔ 不是启动前提）。
+    //   ★ 写不进去不致命：打一行 warn 继续（锁是认人信号，⛔ 不是启动前提）。
     lift::experience::UserRunLock user_run_lock;
     if (user_run) {
         std::error_code cwd_ec;

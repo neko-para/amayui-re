@@ -3,7 +3,7 @@
 // ★ 它解决什么：agent 在用户本人跑游戏体验时执行构建 / `ctest` / 变异自检（都会抢 `out/`、
 //   抢 CPU）或 `kill`，会把用户打断。⇒ 用户启动时加 `--user-run`，本文件在**解析完参数后立刻**
 //   写一个**机器级**锁文件 `<os temp>/amayui-re-experience.json`（两个工作树共用同一份，
-//   见 AGENTS §14.5），构建 / 测试工具（`tools/experience.mjs`）据此让路。
+//   见 AGENTS §14.5）；`tools/experience.mjs` 只用于**杀进程前认人**（⛔ 不拦构建 / 测试）。
 //
 // ★ 三条硬口径（⛔ 别改）：
 //   ① **不改任何模拟语义**：只在宿主侧写一个文件 + 打一行，guest 可见状态逐位不变；
@@ -244,7 +244,7 @@ public:
         }
         // ★ 登记 `atexit` 兜底（只在成功拿到锁之后；重复登记无副作用）。
         std::atexit(&removeLockAtExit);
-        std::printf("[experience] 用户正在体验（pid=%lld，lock=%s）⇒ 构建/测试工具应让路（--user-run）\n",
+        std::printf("[experience] 用户正在体验（pid=%lld，lock=%s）⇒ 杀进程前先看这里（--user-run）\n",
                     self, path_text.c_str());
         std::fflush(stdout);
         return true;
