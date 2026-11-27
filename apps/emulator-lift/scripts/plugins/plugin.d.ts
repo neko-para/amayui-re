@@ -525,7 +525,10 @@ export interface RunCtx<State = Record<string, unknown>> {
      * ★ 只 `RunCtx` 有（`RenderCtx` 没有：render 不做 guest 写）。
      */
     readonly hook: HookApi;
-    /** **异步等待**一个脚本指令点（S2b）：命中 ⇒ resolve 只读 `InstrTick`（与 `onTick` 同形）。
+    /** **异步等待**一个脚本指令点（S2b）：命中 ⇒ resolve 一个 `Tick`（与 `ctx.at` 的 Tick 同形；
+     *  `id` = 这条 `once` 自己的临时订阅）。★ S2c-2 起 `local` / `edit` / `input` 在 resolve 的
+     *  `.then` 里可用（continuation 在同一入口的 drain 里跑）；`patch` 会回执 `once_tick`
+     *  （临时条目已撤）。
      *  · `where` 本切片只收 `{script,pos}`（`{script,lo,hi}` / `{opcode}` 是 S2c）；
      *  · `opts.timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：到点 = **失败截止**
      *    （先 reject，让 `catch` 在泵里 drain 到；随后宿主记 timeout 并 **fail Run**）。
@@ -536,7 +539,7 @@ export interface RunCtx<State = Record<string, unknown>> {
     once(
         where: { readonly script: string; readonly pos: number },
         opts: { readonly timeoutMs: number },
-    ): Promise<InstrTick>;
+    ): Promise<Tick>;
     /** **协程**（S2b）：`fn(ctx)` 必须**同步**返回 Promise（否则 TypeError）；返回的 promise 进本
      *  Run 的 task 账。每个 host→JS 入口末尾（drain 之后）检查 settle：
      *  fulfilled ⇒ 移除；rejected ⇒ **fail Run**（reason = 拒绝原因）；pending ⇒ 保留。
@@ -660,16 +663,37 @@ export interface TickLocal {
     /** `local-ptr index` **指向**的 dword 的语义值；越界 / 指针 0 / 不可读 ⇒ `undefined`。 */
     ptrDword(index: number): number | undefined;
 }
-/** **Tick**（S2c）：只来自 `ctx.at` 的回调参数或 `ctx.once(...)` 的 resolve；⛔ 不要自己造。
- *  ★ 有效期 = **产生它的那一次指令点入口（含该入口的 drain）**：跨入口用 `local`（S2c-2 还有
- *    `edit` / `input` / `patch`）⇒ 抛 `Error`（消息含 `stale_tick`）；`now` 是快照、`log` 是宿主
+/** **Tick**（S2c）：来自 `ctx.at` 的回调参数或 `ctx.once(...)` 的 resolve（v1 `handle.onTick`
+ *  拿到的是**同一个对象**；它的静态类型仍是平铺的 `InstrTick`）；⛔ 不要自己造。
+ *  ★ 有效期 = **产生它的那一次指令点入口（含该入口的 drain）**：跨入口用 `local` / `edit` /
+ *    `input` / `patch` ⇒ 抛 `Error`（消息含 `stale_tick`）；`now` 是快照、`log` 是宿主
  *    出口 ⇒ 仍可用。
  *  ★ 一次派发**一个** Tick 对象（全链共享同一个快照）；`id` = 链里**第一条属于本实例的**订阅的
- *    句柄（多 `Impl` 同活时不会串到别人的句柄；要自己的 id 就在 `ctx.at` 时把返回值存起来）。 */
+ *    句柄（多 `Impl` 同活时不会串到别人的句柄；要自己的 id 就在 `ctx.at` 时把返回值存起来）。
+ *  ★ 写面（S2c-2）：`edit` 立即持久写、`input` 入队（下一读点落地）、`patch` 本拍瞬时覆盖。
+ *    ⛔ tick 入口**不**打开 `in_callback_`：本对象上的这几个是唯一被放开的能力；同一个 handler 里
+ *    从 RunCtx 调的 `ctx.fail` / `finish` / `quit` / `trigger` / `hook.*` / `profile` / `config`
+ *    仍一律 TypeError。
+ */
 export interface Tick {
     readonly id: number;
     readonly now: TickNow;
     readonly local: TickLocal;
+    /** 与 `RunCtx.edit` **同形**（同一个宿主方法；立即持久写 ⇒ 下一读点读得到）。 */
+    readonly edit: EditApi;
+    /** 与 `RunCtx.input` **同形**（入队，下一读点落地）。 */
+    readonly input: InputApi;
+    /**
+     * **本拍瞬时覆盖**（S2c-2）：在这条指令**读之前**写一个 dword，下一拍派发前按 CAS 恢复。
+     *  · `target` 与 `InstrHookHandle.patch` 同形（`{ptrLocal}` / `{localInt}` / `{globalId}` 三选一）；
+     *  · 只作用于**本拍命中**的订阅条目：链里每个 handler 的 `patch` 归到**自己那条订阅**；
+     *    链外（drain / once）回落到 `id` 那条；
+     *  · handler 里读到的是**打补丁前**的值（写发生在 `on_hits` 返回之后）；
+     *  · 回执：成功 `{accepted:true, applied:true}`；失败 `code` = `bad_target` / `no_key` /
+     *    `too_many_slots`（本拍不同地址已到 8）/ `not_hit` / `no_such_hook`；
+     *  · `once` 的 Tick 调 `patch` ⇒ `code:"once_tick"`（条目在 resolve 后立刻撤，覆盖无处落地）。
+     */
+    patch(target: InstrHookTarget, value: number): Receipt;
     log(level: string, message: string, data?: unknown): void;
     // ---- deprecated（S4 删；S2a/S2b 的夹具与 d.ts 曾用平铺字段）----
     /** @deprecated 用 `now.script`。 */
@@ -679,9 +703,10 @@ export interface Tick {
     /** @deprecated 用 `now.opcode`。 */
     readonly opcode?: number;
 }
-/** S2a/S2b 的旧名（= v2 `Tick` 的**同一形状**；保留是因为 `handle.onTick` / `ctx.once` 的
- *  既有调用方与夹具都用它）。★ S2c 起两者逐字段同形；新代码用 `Tick`。
- *  @deprecated 用 `Tick`（同一形状；S4 删这个别名）。 */
+/** S2a/S2b 的旧名（= v2 `Tick` 的**平铺**视图；保留是因为 `handle.onTick` 的既有调用方与夹具
+ *  用平铺字段）。★ 运行时两者是**同一个对象**（`handle.onTick` 拿到的也带 `now` / `local` /
+ *  `edit` / `input` / `patch`）；这个别名只描述平铺字段。S4 删这个别名。
+ *  @deprecated 用 `Tick`。 */
 export interface InstrTick {
     readonly id: number;
     readonly script: string;
@@ -699,9 +724,11 @@ export interface InstrHookHandle {
     stats(): InstrHookStats;
     /** 撤这条 hook（未还原的覆盖会先写回）。 */
     clear(): void;
-    /** ① 触发（S2a）：指令点命中 → 只读回调（每个句柄**恰好一个**；`null` = 撤；重复 = 替换）。
-     *  ★ 回调入口 `inCallback()` 恒 false ⇒ `edit` / `input` / `trigger` / `fail` / `finish` /
-     *    `quit` / `profile.*` / `appdata.stat` / `hook.*` 全部 TypeError；`tick.log` 可用。
+    /** ① 触发（S2a）：指令点命中 → 回调（每个句柄**恰好一个**；`null` = 撤；重复 = 替换）。
+     *  ★ 回调入口 `inCallback()` 恒 false ⇒ 从 RunCtx 调的 `ctx.edit` / `input` / `trigger` /
+     *    `fail` / `finish` / `quit` / `profile.*` / `appdata.stat` / `hook.*` 全部 TypeError。
+     *    S2c-2 起**这个 Tick 自己**的 `edit` / `input` / `patch` 可用（门是 `*Attached()`，不是
+     *    `in_callback_`）；`tick.log` 也可用。
      *  ★ 它让 Run **保持存活**（sync 订阅）：不撤它、也没有 task/once 时，`return []` 之后 Run
      *    不会收口（`ctx.hook.at` 本身是 v1 观察，**不算**）。 */
     onTick(fn: ((tick: InstrTick) => void) | null): this;

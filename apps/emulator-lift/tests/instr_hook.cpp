@@ -28,9 +28,10 @@
 //   ⑨ `instr-hook/add-ex-shared`（S2c）：`duplicate` **只对 V1At**；Sub / Once 同点可重复；
 //      `{Range}` + `{Pos}` 同拍各命中一次；`range_empty` / `bad_where` 两条形状校验。
 //      红了 = v2 同点多订阅被 v1 去重拒掉（`at-multi-same-pos` 会连带红）或形状校验缺失。
-//   ⑩ `instr-hook/v1-patch-does-not-starve-sub`（S2c-1 复审 F1）：同点 V1At+patch 写成功之后，
-//      后面的 v2 `Sub` 仍必须 `hits += 1` 并进 sink 的批量；写仍只有一次（先注册者赢）。
-//      红了 = probe 又退回"写成功就 break"⇒ 同点后面的 `ctx.at` 静默不跑（S2 复发）。
+//   ⑩ `instr-hook/v1-patch-does-not-starve-sub`（S2c-1 复审 F1 + S2c-2 多槽）：同点 V1At+patch 写成功之后，
+//      后面的 v2 `Sub` 仍必须 `hits += 1` 并进 sink 的批量；★ S2c-2 起**两条都写**（多槽 + 同址合并）：
+//      地址 = 最后一次写、下一拍恢复回**最初** raw。
+//      红了 = probe 又退回"写成功就 break/跳过"⇒ 同点后面的 `ctx.at` 静默不跑（S2 复发）或多槽丢一条。
 //   ⑪ `instr-hook/add-ex-opcode`（S2c-1 复审 F6）：`{opcode}` 真按 opcode 匹配；撤掉 opcode 条目后
 //      `has_opcode_entry` 归 false ⇒ 普通 probe **不读 pc**（用 `g_access` 判）。
 //      红了 = opcode 匹配是假面 / 闸门恒 true（每拍多付一次 `rd32(pc)`）。
@@ -191,6 +192,9 @@ std::uint32_t addExHook(std::uint64_t owner, L::InstrHookForm form, const std::s
 std::uint32_t targetGlobalAddr() {
     return kIntPool + L::kScriptGlobalSlotBytes * kGlobalIndex;
 }
+
+// ★ S2c-2（多槽）：local-int N 的地址（`frame+0x20` = kIntPool、`4 * N`）。
+std::uint32_t localIntAddr(std::uint32_t index) { return kIntPool + 4u * index; }
 
 // =====================================================================================
 // ① 窗口里"别人写" ⇒ CAS 拒绝写回 + 记 restore_conflicts
@@ -689,7 +693,9 @@ void caseAddExShared() {
 //   红 = v1 的 patch 写成功后 `break` ⇒ 同点**后面**的 v2 订阅既不 `hits += 1`、也进不了
 //   `hit_ids`（`ctx.at` handler 静默不跑、`hook.list().hits` 恒 0）。
 //   判据：同点 V1At+patch + Sub+patch 各一条 ⇒ 一次 probe 后两条 hits 都是 1、sink 恰好 2 条；
-//   地址 = **先注册的 v1** 的 patch 值（"一条指令最多一次写、先注册者赢"没变）。
+//   ★ S2c-2 起**两条都写**（多槽 + 同址合并）：地址 = **后注册的 sub** 的 patch 值（最后一次写），
+//   下一拍恢复回**最初**的 raw（v1 的 3）—— 同址合并保留第一个开窗者的 raw。它同时是
+//   `instr-hook/pending-same-addr` 的另一个入口（v1 + v2 各写一次）。
 // =====================================================================================
 void caseV1PatchDoesNotStarveSub() {
     lift_test::g_current_case = "instr-hook/v1-patch-does-not-starve-sub";
@@ -717,7 +723,7 @@ void caseV1PatchDoesNotStarveSub() {
                                         L::InstrHookKind::Sub, &sub_ok);
     LIFT_CHECK(sub_ok);
     LIFT_CHECK(v1 < sub);
-    // 第二条也装 patch（值不同）⇒ "sub 不写"有读数：地址必须还是 v1 写进去的 enc(7)。
+    // 第二条也装 patch（值不同）⇒ 两条都要写；同址合并后 `written` = 后注册的 9。
     LIFT_CHECK(L::instrHookSetPatch(sub, true, L::InstrPatchKind::PtrDword, 0u, 9u, 0u, &err));
 
     dispatchAt(mem, cpu, kPosA);
@@ -734,11 +740,17 @@ void caseV1PatchDoesNotStarveSub() {
         LIFT_CHECK_EQ_U32(sink.hits[0].handle, v1);  // 注册序 = handle 升序
         LIFT_CHECK_EQ_U32(sink.hits[1].handle, sub);
     }
-    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(7u));  // v1 的 7 生效、sub 的 9 没写
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.skips), 0);  // 跳过写 ≠ 尝试失败
-    // 窗口结束：下一拍恢复 v1 原本的 raw（sub 没留下任何东西）。
+    // ★ S2c-2：多槽 ⇒ 第二条 patch 也生效（同址合并：written = 最后一次的 9）。
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(9u));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.skips), 0);  // 第二条也真写了
+    // 窗口结束：下一拍恢复**最初**的 raw（enc(3)），账记在**第一个开窗者**（v1）身上。
     dispatchAt(mem, cpu, kPosB);
     LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));
+    LIFT_CHECK(L::instrHookStats(v1, &v1_st));
+    LIFT_CHECK(L::instrHookStats(sub, &sub_st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.restores), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.restores), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.restore_conflicts), 0);
     L::instrHookClear();
     L::instrHookRemoveSink(&sink);
 }
@@ -994,6 +1006,201 @@ void caseAddExOpcodeGate() {
     LIFT_CHECK(L::instrHookList().empty());
 }
 
+// =====================================================================================
+// ⑮ S2c-2 · `instr-hook/pending-multi-slot`：同拍两条订阅各 patch 一个**不同**地址
+//
+//   红 = pending 仍是单槽（第二条把第一条的 raw 覆盖 / 提前写回）⇒ 下一拍只恢复一条、
+//        另一条的值留在 guest 里（净变化不再 0），或两条的 `restores` 不是各 1。
+//   判据：两条都生效 → 下一拍两条都恢复成**各自最初**的 raw、各 `restores == 1`、`conflicts == 0`。
+// =====================================================================================
+void casePendingMultiSlot() {
+    lift_test::g_current_case = "instr-hook/pending-multi-slot";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    // 第二个地址的初值（local-int 1）：语义 5（⛔ 不是 0）。
+    LIFT_CHECK(put32(mem, localIntAddr(1u), enc(5u)));
+
+    bool a_ok = false;
+    bool b_ok = false;
+    const std::uint32_t a = addExHook(0x71u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &a_ok);
+    const std::uint32_t b = addExHook(0x71u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &b_ok);
+    LIFT_CHECK(a_ok);
+    LIFT_CHECK(b_ok);
+    const char* err = nullptr;
+    LIFT_CHECK(L::instrHookSetPatch(a, true, L::InstrPatchKind::PtrDword, 0u, 7u, 0u, &err));
+    LIFT_CHECK(L::instrHookSetPatch(b, true, L::InstrPatchKind::LocalInt, 1u, 9u, 0u, &err));
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(7u));         // 第一条生效
+    LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(1u)), enc(9u));  // ★ 第二条也生效（修前被单槽吞掉）
+
+    // 下一条脚本指令派发：恢复**全部**槽（各自 CAS）。
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));
+    LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(1u)), enc(5u));
+    L::InstrHookStatus as;
+    L::InstrHookStatus bs;
+    LIFT_CHECK(L::instrHookStats(a, &as));
+    LIFT_CHECK(L::instrHookStats(b, &bs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(as.restores), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.restores), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(as.restore_conflicts), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.restore_conflicts), 0);
+    L::instrHookReleaseOwner(0x71u);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
+// =====================================================================================
+// ⑯ S2c-2 · `instr-hook/pending-same-addr`：同址两次写 ⇒ 一个槽、恢复回**最初** raw
+//
+//   红 = 每条写各挂一个槽 ⇒ 恢复时第一条 CAS 冲突（当前值是第二条的 written）、只写回第二个 raw
+//        （= 第一次改后的值），净变化不再是 0；或 `written` 不是最后一次。
+//   判据：guest 最后一次 = enc(9)（后注册者）；下一拍 = enc(3)（**最初** raw，不是 enc(7)）；
+//        第一个开窗者 `restores == 1`，第二个 0（同址合并：一个窗口一个 owner），`conflicts == 0`。
+// =====================================================================================
+void casePendingSameAddr() {
+    lift_test::g_current_case = "instr-hook/pending-same-addr";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+
+    bool a_ok = false;
+    bool b_ok = false;
+    const std::uint32_t a = addExHook(0x72u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &a_ok);
+    const std::uint32_t b = addExHook(0x72u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &b_ok);
+    LIFT_CHECK(a_ok);
+    LIFT_CHECK(b_ok);
+    LIFT_CHECK(a < b);
+    const char* err = nullptr;
+    LIFT_CHECK(L::instrHookSetPatch(a, true, L::InstrPatchKind::PtrDword, 0u, 7u, 0u, &err));
+    LIFT_CHECK(L::instrHookSetPatch(b, true, L::InstrPatchKind::PtrDword, 0u, 9u, 0u, &err));
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(9u));  // written = 最后一次
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));  // ★ 最初 raw（若两个槽 ⇒ 会剩 enc(7)）
+    L::InstrHookStatus as;
+    L::InstrHookStatus bs;
+    LIFT_CHECK(L::instrHookStats(a, &as));
+    LIFT_CHECK(L::instrHookStats(b, &bs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(as.restores), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.restores), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(as.restore_conflicts), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.restore_conflicts), 0);
+    L::instrHookReleaseOwner(0x72u);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
+// =====================================================================================
+// ⑰ S2c-2 · `instr-hook/pending-remove-isolation`：摘一条只结算**它开的**槽
+//
+//   红 = `instrHookRemove(a)` 调 `restorePendingLocked()`（把 b 的槽也提前写回）⇒ b 的地址在
+//        remove 之后就变回原值（b 的那次覆盖被静默取消）。
+//   判据：remove(a) 之后 a 的地址 = 最初 raw、b 的地址仍是 enc(9)；下一次派发才恢复 b
+//        （`b.restores == 1`）。**归属**：同址合并的槽归第一个开窗者 ⇒ 这里两条不同地址、各自开窗。
+// =====================================================================================
+void casePendingRemoveIsolation() {
+    lift_test::g_current_case = "instr-hook/pending-remove-isolation";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    LIFT_CHECK(put32(mem, localIntAddr(1u), enc(5u)));
+
+    bool a_ok = false;
+    bool b_ok = false;
+    const std::uint32_t a = addExHook(0x73u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &a_ok);
+    const std::uint32_t b = addExHook(0x73u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                      L::InstrHookKind::Sub, &b_ok);
+    LIFT_CHECK(a_ok);
+    LIFT_CHECK(b_ok);
+    const char* err = nullptr;
+    LIFT_CHECK(L::instrHookSetPatch(a, true, L::InstrPatchKind::PtrDword, 0u, 7u, 0u, &err));
+    LIFT_CHECK(L::instrHookSetPatch(b, true, L::InstrPatchKind::LocalInt, 1u, 9u, 0u, &err));
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(7u));
+    LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(1u)), enc(9u));
+
+    LIFT_CHECK(L::instrHookRemove(a));
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));          // a 的槽：结算
+    LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(1u)), enc(9u)); // ★ b 的槽：一个字节都不动
+
+    dispatchAt(mem, cpu, kPosB);
+    LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(1u)), enc(5u));
+    L::InstrHookStatus bs;
+    LIFT_CHECK(L::instrHookStats(b, &bs));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bs.restores), 1);
+    L::instrHookReleaseOwner(0x73u);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
+// =====================================================================================
+// ⑱ S2c-2 · `instr-hook/pending-slot-limit`：槽上限 8 ⇒ 第 9 条 `skips += 1`（⛔ 不静默丢）
+//
+//   红 = 槽上限不存在 / 超限静默丢 ⇒ 第 9 条写了却没有恢复（净变化非 0），或 `skips` 不涨。
+//   判据：8 条各写一个不同地址 → 都生效；第 9 条**不写**、`skips == 1`；下一拍 8 条都恢复、
+//        各 `restores == 1`，第 9 条的地址保持最初 raw。
+// =====================================================================================
+void casePendingSlotLimit() {
+    lift_test::g_current_case = "instr-hook/pending-slot-limit";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    // local-int 0..7 的初值 = 语义 0x20+i（8 个不同地址，int_count = 8）。
+    for (std::uint32_t i = 0; i < 8u; ++i) {
+        LIFT_CHECK(put32(mem, localIntAddr(i), enc(0x20u + i)));
+    }
+
+    std::uint32_t handles[9] = {};
+    for (std::uint32_t i = 0; i < 9u; ++i) {
+        bool ok = false;
+        handles[i] = addExHook(0x74u, L::InstrHookForm::Pos, kScript, kPosA, 0, L::InstrHookKind::Sub, &ok);
+        LIFT_CHECK(ok);
+        const char* err = nullptr;
+        // 第 9 条 patch 的是 ptrDword 0（= kTarget，第 9 个不同地址）。
+        const bool set = i < 8u
+                             ? L::instrHookSetPatch(handles[i], true, L::InstrPatchKind::LocalInt, i, 0x30u + i, 0u, &err)
+                             : L::instrHookSetPatch(handles[i], true, L::InstrPatchKind::PtrDword, 0u, 0x30u + i, 0u, &err);
+        LIFT_CHECK(set);
+    }
+    dispatchAt(mem, cpu, kPosA);
+    for (std::uint32_t i = 0; i < 8u; ++i) {
+        LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(i)), enc(0x30u + i));  // 前 8 条生效
+    }
+    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));  // ★ 第 9 条：没写（没有槽可恢复）
+    L::InstrHookStatus ninth;
+    LIFT_CHECK(L::instrHookStats(handles[8], &ninth));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ninth.skips), 1);
+
+    dispatchAt(mem, cpu, kPosB);
+    for (std::uint32_t i = 0; i < 8u; ++i) {
+        LIFT_CHECK_EQ_U32(mem.rd32(localIntAddr(i)), enc(0x20u + i));  // 全部恢复
+        L::InstrHookStatus st;
+        LIFT_CHECK(L::instrHookStats(handles[i], &st));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.restores), 1);
+    }
+    L::instrHookReleaseOwner(0x74u);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1017,5 +1224,10 @@ int main() {
     caseAddExRange();
     caseAddExScript();
     caseAddExOpcodeGate();
+    // ---- S2c-2b（多槽 pending：CAS 多槽 / 同址合并 / 摘条目隔离 / 槽上限）----
+    casePendingMultiSlot();
+    casePendingSameAddr();
+    casePendingRemoveIsolation();
+    casePendingSlotLimit();
     return lift_test::finish("instr-hook");
 }

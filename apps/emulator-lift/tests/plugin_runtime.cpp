@@ -448,6 +448,11 @@ std::uint64_t instrHits(std::uint32_t handle) {
     return st.hits;
 }
 
+// ★ S2c-2b（`tick.patch`）：local-int `index` 的**语义值**（`installInstrLocalValues` 摆的那 8 个槽）。
+std::uint32_t readInstrLocalInt(Fixture& f, std::uint32_t index) {
+    return lift::decodeInt(f.mem.rd32(kInstrIntBase + 4u * index), kFxKey);
+}
+
 // ★ 脚本化的夹具**没有"进屏"这一步** ⇒ 必须把读档界面的**页号**（guest int global `0x138e`）种成
 //   **目标页**，否则 `save.js` 的 `readSavePage` 读到的不是 0：槽里存的是 `ENC(value, key)`，
 //   而零内存 ≠ 明文 0（`ENC(0) = key`）⇒ 它会去点左右箭头翻页 ⇒ 整条脚本链的坐标/拍数全部错位。
@@ -3325,6 +3330,241 @@ void caseTickStale() {
     LIFT_CHECK(f.host->logLines() > base);                 // "late log" 真的打出来了
 }
 
+// =====================================================================================
+// S2c-2b · Tick 的写面（`edit` / `input` / `patch`）+ stale 写 + once 的 Tick
+//
+// ★ 判据口径：tick handler 只写**模块变量**（tick 入口没有 `ctx.edit` 之外的回写面），回读统一
+//   在下一个 `onTrigger`（`put`）或 C++ 直接读 guest/队列 —— 两者都是行为读数。
+// =====================================================================================
+constexpr std::uint32_t kTickWriteTarget = 0xb150;  // 夹具的 `TICK_TARGET`（int 池内）
+
+// `plugin/tick-edit`：tick 里 `edit.global.set` ⇒ 读点后 guest int 变；同一 handler 里
+//   `ctx.fail` 仍 TypeError（"写面不是把 in_callback_ 打开"的唯一可判读数）。
+void caseTickEdit() {
+    lift_test::g_current_case = "plugin/tick-edit";
+    Fixture f;
+    if (!loadAtChain(f, "tick-edit")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：装订阅
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    // ★ Edit = **立即持久写**：探针还没返回，guest int 已经是 42。
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickWriteTarget), 42u);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：把回执 + `ctx.fail` 的结果写回 guest
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // accepted
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // applied
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // queued == false（Edit 不排队）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // ctx.fail ⇒ TypeError（写面没打开 in_callback_）
+}
+
+// `plugin/tick-input`：tick 里 `input.click` ⇒ 回执 queued、下一读点 applied。
+void caseTickInput() {
+    lift_test::g_current_case = "plugin/tick-input";
+    Fixture f;
+    if (!loadAtChain(f, "tick-input")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+
+    dispatchInstr(f, kInstrPos);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    // ★ tick 不是读点 ⇒ 只入队（staged），不落地。
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 1);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // 本读点：② 提升 → ⑥ 落地 click；回调里读到的仍是 queued
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // accepted
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // queued
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // applied == false（回执时刻）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // 有 id（> 0）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u); // handler 内 status == "queued"
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u); // onTrigger 内（drain 之前）仍 queued
+    const std::uint32_t click_id = readFieldInt(f, kAtOutF2);
+    LIFT_CHECK(click_id > 0);
+    // ★ 下一读点落地：pump 之后宿主队列记 Applied。
+    LIFT_CHECK(f.host->queue().status(click_id) == lift::plugin::IntentQueue::Status::Applied);
+}
+
+// `plugin/tick-stale-write`：旧 Tick 的 `edit` / `input` / `patch` ⇒ `stale_tick` 抛、guest/队列零变化。
+void caseTickStaleWrite() {
+    lift_test::g_current_case = "plugin/tick-stale-write";
+    Fixture f;
+    if (!loadAtChain(f, "stale-write")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(seedFieldInt(f, kTickWriteTarget, 0u));  // 零变化要有基线（ENC(0) ≠ 零内存）
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+
+    dispatchInstr(f, kInstrPos);  // handler 把 Tick 存进模块变量
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger（call 入口，不是 tick 入口）：三个写面都必须 stale
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // edit 抛
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // 消息含 stale_tick
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);  // input 抛
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // patch 抛
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);
+    // ★ 门在写之前：guest 一个字节都没动、队列里一条都没有。
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickWriteTarget), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+}
+
+// `plugin/tick-patch-cas`：tick 里 `patch({localInt:0},5)` ⇒ 该条指令读到 5；窗口里"别人写"
+//   ⇒ CAS 不写回、`restore_conflicts += 1`。`max`/越界 ⇒ 回执（另见 `tick-patch-limit`）。
+void caseTickPatchCas() {
+    // ---- ① 正常窗口：恢复回最初 raw（7），`restores == 1`、`conflicts == 0` ----
+    lift_test::g_current_case = "plugin/tick-patch-cas";
+    {
+        Fixture f;
+        if (!loadAtChain(f, "tick-patch")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        LIFT_CHECK(installInstrLocalValues(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
+
+        dispatchInstr(f, kInstrPos);  // handler 设 one-shot；probe 在 handler **之后**应用
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 5u);  // ★ 该条指令读到 5（修前 = 7）
+
+        f.readings.pos = 0x1000u;
+        f.pump();  // phase 0：回执 + 重新 arm
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // accepted
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // applied
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // 没有 code
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 7u);  // handler 里读到的是**打补丁前**的 7
+
+        dispatchInstr(f, kInstrPos + 8u);  // 下一条指令派发 ⇒ 恢复
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 7u);  // 最初 raw
+        f.readings.pos = 0x1000u;
+        f.pump();  // phase 1：stats
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);   // restores == 1
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 0u);  // restore_conflicts == 0
+    }
+    // ---- ② 窗口里"别人写" ⇒ CAS 不写回、`restore_conflicts += 1` ----
+    {
+        Fixture f;
+        if (!loadAtChain(f, "tick-patch")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        LIFT_CHECK(installInstrLocalValues(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+
+        dispatchInstr(f, kInstrPos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 5u);
+        // 另一条执行流写同一地址（明文也行：CAS 只比 4 字节原样）。
+        LIFT_CHECK(put32(f.mem, kInstrIntBase, 0xDEADBEEFu));
+        f.readings.pos = 0x1000u;
+        f.pump();  // phase 0
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+
+        dispatchInstr(f, kInstrPos + 8u);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(f.mem.rd32(kInstrIntBase), 0xDEADBEEFu);  // 别人的写还在
+        f.readings.pos = 0x1000u;
+        f.pump();  // phase 1
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 0u);   // restores == 0
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // ★ restore_conflicts == 1
+    }
+}
+
+// `plugin/tick-patch-limit`：9 个不同地址 ⇒ 前 8 条生效、第 9 条回执 `too_many_slots` + `skips += 1`；
+//   越界 target ⇒ `bad_target`（⛔ 不静默变成 0 写）。
+void caseTickPatchLimit() {
+    lift_test::g_current_case = "plugin/tick-patch-limit";
+    Fixture f;
+    if (!loadAtChain(f, "tick-patch-limit")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(installInstrLocalValues(f.mem));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 10);
+
+    dispatchInstr(f, kInstrPos);  // 10 条同点订阅一条链（每个 handler 调 next）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    for (std::uint32_t i = 0; i < 8u; ++i) {
+        LIFT_CHECK_EQ_U32(readInstrLocalInt(f, i), 0x500u + i);  // 前 8 个地址生效
+    }
+    LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 0x500u);  // 首个 = 0x500
+    LIFT_CHECK_EQ_U32(f.mem.rd32(kInstrLocalTarget), lift::encodeInt(9u, kFxKey));  // 第 9 个没写
+
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 8u);   // 8 条 accepted
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);   // 1 条 too_many_slots
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);   // 1 条 bad_target（越界）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 10u);  // 10 条都调用了 `tick.patch`
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // 第 9 条的 entry.skips == 1
+}
+
+// `plugin/tick-once-tick-writable`：`once` resolve 的 `.then` 里 `tick.local` / `tick.edit` 可用
+//   （continuation 在同一入口的 drain 里 ⇒ Tick 还没 stale）。
+void caseTickOnceTickWritable() {
+    lift_test::g_current_case = "plugin/tick-once-tick-writable";
+    Fixture f;
+    if (!loadAtChain(f, "once-tick-writable")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(installInstrLocalValues(f.mem));
+    LIFT_CHECK(seedFieldInt(f, kTickWriteTarget, 0u));
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+
+    dispatchInstr(f, kInstrPos);  // once 命中 ⇒ resolve + `.then` 在本入口 drain 里跑
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickWriteTarget), 0x77u);  // .then 里的 tick.edit 生效
+
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // onceRan
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 7u);  // local.int(0)（installInstrLocalValues）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);  // tick.edit accepted && applied
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 0u);  // 没抛
+}
+
+
 // `plugin/at-multi-same-pos`：同点 4 条（at×2 + v1 onTick + once）⇒ 一条链；
 //   截断只影响 at 参与者；once 的 `.then` 在**同一入口的 drain** 里跑；`duplicate` 只对 v1 生效。
 void caseAtMultiSamePos() {
@@ -4653,6 +4893,13 @@ int main() {
     caseTickNow();
     caseTickLocal();
     caseTickStale();
+    // ---- S2c-2b（Tick 的写面：edit / input / patch + stale 写 + once 的 Tick）----
+    caseTickEdit();
+    caseTickInput();
+    caseTickStaleWrite();
+    caseTickPatchCas();
+    caseTickPatchLimit();
+    caseTickOnceTickWritable();
     caseAtMultiSamePos();
     caseAtKeepsRun();
     // ---- S2c-1 复审收口（F5 next 的链外调用 / F4 Tick 含 drain / F7 消息）----

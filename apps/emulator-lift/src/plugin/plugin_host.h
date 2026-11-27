@@ -153,6 +153,13 @@ public:
     bool inputWired() const override { return in_callback_ && ctx_input() != nullptr; }
     bool readWired() const override { return read_ != nullptr; }
     bool triggerWired() const override { return in_callback_ && ctx_trigger() != nullptr; }
+    // ★ S2c-2：`Tick.edit` / `Tick.input` 的**装配**门（⛔ 不含 `in_callback_`）：tick 入口
+    //   `in_callback_` 恒 false，而写面不是"把 in_callback_ 打开"。两条实现都只看**接线**：
+    //   · Edit = `GuestEditSink`（`attachMemory` 建）；
+    //   · Input = `IntentExecutor` 的 `Context::input`（构造时接的 `IntentQueue&`；回调外 `ctx_` 是
+    //     nullptr，所以⛔ 不能复用 `ctx_input()`）。
+    bool editAttached() const override { return edit_ != nullptr; }
+    bool inputAttached() const override { return executor_.context().input != nullptr; }
     // ★ C2b 复审 F2：render 期 `call_host` **非空**（read/log 要用），但 `fail`/`finish`/`quit`/
     //   `profile.*` 是 **Run 回调**的出口 ⇒ 那 5 个 trampoline 靠这一位拒绝"存下来的 RunCtx
     //   在 render 里用"。⛔ 不要把它也放松成恒 true（那等于成员表只是画出来的门面）。
@@ -167,6 +174,9 @@ public:
                                     const char** err) override;
     bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind, std::uint32_t index,
                            std::uint32_t value, std::uint32_t max_hits, const char** err) override;
+    // ★ S2c-2：`Tick.patch` 的 one-shot 覆盖（只作用于本拍命中的条目；静默 —— 每拍都 log 会刷屏）。
+    bool instrHookSetTickPatch(std::uint32_t handle, lift::InstrPatchKind kind, std::uint32_t index,
+                               std::uint32_t value, const char** err) override;
     bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
                              const std::vector<std::uint32_t>& ptrs) override;
     bool instrHookStats(std::uint32_t handle, lift::InstrHookStatus* out) override;

@@ -108,6 +108,16 @@ public:
     virtual bool readWired() const = 0;
     virtual bool triggerWired() const = 0;
 
+    // ★ S2c-2：`Tick.edit` / `Tick.input` 的**装配**检查 —— **不含** `in_callback_`，也**不含**
+    //   "正在 Run 回调里"。为什么必须与上面那两条分开：tick 入口 `in_callback_` 恒 false（那是
+    //   S2a/S2b 刻意留的"只读面"），而写面又不是"把 in_callback_ 打开"（那会一次放开
+    //   `ctx.fail/finish/quit/trigger/hook.*/profile/config` 七个副作用）。
+    //   ⇒ tick 的写 trampoline 用**这两条**（装配）+ `tickRefOf`（这一拍没 stale）；v1 的
+    //   `ctx.edit` / `ctx.input` 仍走 `editWired()` / `inputWired()`（含 `in_callback_`）。
+    //   ⛔ 不要用这两条去放宽 v1 的门（`render 不做 guest 写` 的落点仍是 `editWired`）。
+    virtual bool editAttached() const = 0;
+    virtual bool inputAttached() const = 0;
+
     // 现在是否在 **Run 回调**（`start` / `onTrigger`）里；`render` 期间恒 false（C2b 复审 F2）。
     // ★ 为什么需要这一位：render 期间 `read` / `log` 也要能用 ⇒ 宿主（`call_host`）在 render 期
     //   **非空**；于是"只判 `call_host != nullptr`"的出口（`fail` / `finish` / `quit` / `profile.*`）
@@ -167,6 +177,12 @@ public:
     virtual bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind,
                                    std::uint32_t index, std::uint32_t value, std::uint32_t max_hits,
                                    const char** err) = 0;
+    // ★ S2c-2：`Tick.patch(target, value)` 的 one-shot 覆盖（runtime 侧只对**本拍命中**的条目生效，
+    //   在 `on_hits` 返回之后应用）。与 v1 的 `instrHookSetPatch` 是**两条独立的路**：
+    //   后者是持久覆盖（每拍写、窗口恢复），前者只作用于当前这一次派发。
+    virtual bool instrHookSetTickPatch(std::uint32_t handle, lift::InstrPatchKind kind,
+                                       std::uint32_t index, std::uint32_t value,
+                                       const char** err) = 0;
     virtual bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
                                      const std::vector<std::uint32_t>& ptrs) = 0;
     virtual bool instrHookStats(std::uint32_t handle, lift::InstrHookStatus* out) = 0;

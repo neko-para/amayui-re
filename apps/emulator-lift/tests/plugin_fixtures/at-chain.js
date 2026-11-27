@@ -27,10 +27,18 @@
 //   · `where-opcode`    ：`{opcode:114}` 在两条不同 pos 都命中；`{script,opcode}` 只在该脚本命中。
 //   · `where-mixed`     ：同拍 `{script}` + `{script,pos}` + `{opcode}` 按注册序成一条链。
 //   · `tick-id`         ：多 Impl 同活时 `tick.id` 必须是本实例自己的句柄（⛔ 不是 `hits[0]`）。
+//   · `tick-edit`       ：tick 里 `edit.global.set` ⇒ guest int 立即变；同一 handler 里 `ctx.fail` 仍
+//     TypeError（"写面不是把 in_callback_ 打开"的读数）。
+//   · `tick-input`      ：tick 里 `input.click` ⇒ 回执 queued、下一读点 applied。
+//   · `stale-write`     ：旧 Tick 的 `edit` / `input` / `patch` ⇒ 抛 `stale_tick`，guest / 队列零变化。
+//   · `tick-patch`      ：tick 里 `patch({localInt:0},5)` ⇒ 该条指令读到 5；下一拍恢复；CAS 冲突读数。
+//   · `tick-patch-limit`：9 个不同地址 + 1 个越界 ⇒ 前 8 条生效、第 9 条 `too_many_slots` + `skips=1`、
+//     越界 target ⇒ `bad_target`。
+//   · `once-tick-writable`：`once` resolve 的 `.then` 里 `tick.local` / `tick.edit` 可用（同一入口 drain）。
 //
-// ★ tick 入口只读：`ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 全 TypeError
-//   ⇒ 本夹具只写**模块变量**，guest 写回统一放在 `onTrigger`（合法的 Run 回调）。
-// ★ `off` 是唯一例外：只减操作，门 = `call_host != nullptr` ⇒ tick handler 里也能撤（`tick-off`）。
+// ★ Tick 入口的**写面**（S2c-2）：`tick.edit` / `tick.input` / `tick.patch` 可用；从 RunCtx 调的
+//   `ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 仍 TypeError。
+// ★ `off` 是既有的例外：只减操作，门 = `call_host != nullptr` ⇒ tick handler 里也能撤（`tick-off`）。
 const SCRIPT = "FIELD.BIN";
 const POS = 0x0100;
 const UNDEF = 0x7ffffffe;  // undefined 的哨兵（⛔ 不是 0：0 是真实值）
@@ -79,6 +87,23 @@ let opScopedRuns = 0;   // `{script,opcode:114}` 的命中次数（只在该脚�
 let seenTickId = 0;     // `tick-id`：本实例看到的 `tick.id`
 let seenTickRuns = 0;   // 它跑了几次
 
+// ---- S2c-2b：Tick 的写面（edit / input / patch）与 stale 写 ----
+const TICK_TARGET = 0xb150;  // guest int 输出 / 写面的目标槽（int 池 0xB1B6 个槽 ⇒ 寻址得到）
+const PATCH_VALUE = 5;
+let editRec = null;         // `tick-edit`：回执 + `ctx.fail` 是否仍 TypeError
+let editFailType = 0;
+let inputRec = null;        // `tick-input`：回执 + handler 内 status
+let inputStatusInTick = "";
+let inputStatusInDump = "";
+let patchRec = null;        // `tick-patch-cas`：回执
+let patchPreLocal = null;   // handler 里 patch 之后读到的 local.int(0)（必须是**打补丁前**的 7）
+let patchStat = null;       // 第二次 onTrigger 读到的 restores / restore_conflicts
+let patchReceipts = [];     // `tick-patch-limit`：10 条订阅的回执
+let patchSubs = [];         // 它们的句柄（第 9 条 = too_many_slots 的读数）
+let onceLocal = UNDEF;      // `once-tick-writable`：continuation 读到的 local.int(0)
+let onceEdit = 0;           // 它的 tick.edit 回执 accepted&&applied
+let onceErr = 0;
+
 function note(value) {
     return value === undefined ? UNDEF : value;
 }
@@ -99,6 +124,14 @@ function kindOf(hooks, handle) {
         if (row.id === handle) return row.kind;
     }
     return "?";
+}
+
+// 读 `hook.list()` 的某个统计字段（S2c-2b：`restores` / `restore_conflicts` / `skips`）。
+function statOf(hooks, handle, field) {
+    for (const row of hooks) {
+        if (row.id === handle) return row[field];
+    }
+    return -1;
 }
 
 function remember(tick) {
@@ -362,6 +395,119 @@ const plugin = {
             ctx.log("info", "at-chain: installed mode=tick-id");
             return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
         }
+        // ---- S2c-2b：Tick 的写面（edit / input / patch）+ stale 写 + once 的 Tick ----
+        if (mode === "tick-edit") {
+            hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                // ★ d.ts 的 Tick 成员表（S2c-2）：`edit` / `input` / `patch` 与 `now` / `local` 同形。
+                if (typeof tick.edit !== "object" || tick.edit === null ||
+                    typeof tick.edit.global !== "object" || tick.edit.global === null ||
+                    typeof tick.edit.global.set !== "function") {
+                    throw new Error("tick-edit: tick.edit 形状错");
+                }
+                if (typeof tick.input !== "object" || tick.input === null ||
+                    typeof tick.input.click !== "function" || typeof tick.input.status !== "function") {
+                    throw new Error("tick-edit: tick.input 形状错");
+                }
+                if (typeof tick.patch !== "function") throw new Error("tick-edit: tick.patch 形状错");
+                const r = tick.edit.global.set("int", TICK_TARGET, 42);
+                editRec = { accepted: r.accepted, applied: r.applied, queued: r.queued };
+                // ★ "写面不是把 in_callback_ 打开"的唯一可判读数：同一个 tick handler 里
+                //   `ctx.fail`（start 的那个 RunCtx）仍必须是 TypeError。
+                try {
+                    ctx.fail("tick-edit", "must-not-run");
+                } catch (e) {
+                    editFailType = (e && e.name === "TypeError") ? 1 : 2;
+                }
+            });
+            if (typeof hNow !== "number") throw new Error("tick-edit: at failed");
+            ctx.log("info", "at-chain: installed mode=tick-edit");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "tick-input") {
+            hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                const r = tick.input.click(10, 20);
+                inputRec = {
+                    accepted: r.accepted,
+                    queued: r.queued,
+                    applied: r.applied,
+                    hasId: typeof r.id === "number" && r.id > 0,
+                    id: r.id,
+                };
+                inputStatusInTick = tick.input.status(r.id);
+            });
+            if (typeof hNow !== "number") throw new Error("tick-input: at failed");
+            ctx.log("info", "at-chain: installed mode=tick-input");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "stale-write") {
+            hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                savedTick = tick;
+            });
+            if (typeof hNow !== "number") throw new Error("stale-write: at failed");
+            ctx.log("info", "at-chain: installed mode=stale-write");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "tick-patch") {
+            hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                const r = tick.patch({ localInt: 0 }, PATCH_VALUE);
+                // ★ handler 必须看到**打补丁前**的值（写发生在 `on_hits` 返回之后）。
+                patchPreLocal = tick.local.int(0);
+                patchRec = {
+                    accepted: r.accepted,
+                    applied: r.applied,
+                    code: r.code === undefined ? "" : String(r.code),
+                };
+            });
+            if (typeof hNow !== "number") throw new Error("tick-patch: at failed");
+            ctx.log("info", "at-chain: installed mode=tick-patch");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "tick-patch-limit") {
+            // 9 条各自 patch 一个**不同**地址（localInt 0..7 + ptrLocal 0），第 10 条越界。
+            for (let i = 0; i < 9; i += 1) {
+                const target = i < 8 ? { localInt: i } : { ptrLocal: 0 };
+                const value = 0x500 + i;
+                const id = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
+                    const r = tick.patch(target, value);
+                    patchReceipts.push({
+                        accepted: r.accepted,
+                        code: r.code === undefined ? "" : String(r.code),
+                    });
+                    next();
+                });
+                if (typeof id !== "number") throw new Error("tick-patch-limit: at failed #" + String(i));
+                patchSubs.push(id);
+            }
+            const bad = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
+                const r = tick.patch({ localInt: 8 }, 1);  // int_count = 8 ⇒ 越界
+                patchReceipts.push({
+                    accepted: r.accepted,
+                    code: r.code === undefined ? "" : String(r.code),
+                });
+                next();
+            });
+            if (typeof bad !== "number") throw new Error("tick-patch-limit: bad at failed");
+            patchSubs.push(bad);
+            ctx.log("info", "at-chain: installed mode=tick-patch-limit");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "once-tick-writable") {
+            const pending = ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
+            pending.then((tick) => {
+                onceRan += 1;
+                try {
+                    // ★ 这个 continuation 在**命中那一拍入口的 drain** 里跑 ⇒ Tick 仍有效。
+                    const v = tick.local.int(0);
+                    onceLocal = v === undefined ? UNDEF : v;
+                    const r = tick.edit.global.set("int", TICK_TARGET, 0x77);
+                    onceEdit = (r.accepted && r.applied) ? 1 : 0;
+                } catch (e) {
+                    onceErr = 1;
+                }
+            });
+            ctx.log("info", "at-chain: installed mode=once-tick-writable");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
     onTrigger(ctx) {
@@ -568,6 +714,116 @@ const plugin = {
             put(ctx, OUT_A, seenTickId);
             put(ctx, OUT_B, seenTickRuns);
             ctx.off(h1);
+            return [];
+        }
+        if (mode === "tick-edit") {
+            const r = editRec;
+            if (r === null) {
+                ctx.fail("tick-edit", "no receipt");
+                return [];
+            }
+            put(ctx, OUT_A, r.accepted ? 1 : 0);
+            put(ctx, OUT_B, r.applied ? 1 : 0);
+            put(ctx, OUT_C, r.queued ? 1 : 0);
+            put(ctx, OUT_N, editFailType);
+            ctx.off(hNow);
+            return [];
+        }
+        if (mode === "tick-input") {
+            const r = inputRec;
+            if (r === null) {
+                ctx.fail("tick-input", "no receipt");
+                return [];
+            }
+            put(ctx, OUT_A, r.accepted ? 1 : 0);
+            put(ctx, OUT_B, r.queued ? 1 : 0);
+            put(ctx, OUT_C, r.applied ? 1 : 0);
+            put(ctx, OUT_N, r.hasId ? 1 : 0);
+            put(ctx, OUT_F0, inputStatusInTick === "queued" ? 1 : 0);
+            // 本回调里查（泵的 drain 在回调**之后**）仍是 queued；C++ 在 pump 之后用宿主队列判 applied。
+            inputStatusInDump = ctx.input.status(r.id);
+            put(ctx, OUT_F1, inputStatusInDump === "queued" ? 1 : 0);
+            put(ctx, OUT_F2, r.id);
+            ctx.off(hNow);
+            return [];
+        }
+        if (mode === "stale-write") {
+            // ★ Tick 跨入口：三个写面都必须抛 `stale_tick`，且 guest / 队列**零变化**。
+            let throwEdit = 0;
+            let msgEdit = 0;
+            let throwInput = 0;
+            let msgInput = 0;
+            let throwPatch = 0;
+            let msgPatch = 0;
+            const stale = (e) => String(e && e.message ? e.message : e).indexOf("stale_tick") >= 0;
+            try {
+                savedTick.edit.global.set("int", TICK_TARGET, 0x7f);
+            } catch (e) {
+                throwEdit = 1;
+                msgEdit = stale(e) ? 1 : 0;
+            }
+            try {
+                savedTick.input.click(1, 2);
+            } catch (e) {
+                throwInput = 1;
+                msgInput = stale(e) ? 1 : 0;
+            }
+            try {
+                savedTick.patch({ localInt: 0 }, PATCH_VALUE);
+            } catch (e) {
+                throwPatch = 1;
+                msgPatch = stale(e) ? 1 : 0;
+            }
+            put(ctx, OUT_A, throwEdit);
+            put(ctx, OUT_B, msgEdit);
+            put(ctx, OUT_C, throwInput);
+            put(ctx, OUT_N, msgInput);
+            put(ctx, OUT_F0, throwPatch);
+            put(ctx, OUT_F1, msgPatch);
+            ctx.off(hNow);
+            return [];
+        }
+        if (mode === "tick-patch") {
+            if (phase === 0) {
+                const r = patchRec;
+                if (r === null) {
+                    ctx.fail("tick-patch", "no receipt");
+                    return [];
+                }
+                put(ctx, OUT_A, r.accepted ? 1 : 0);
+                put(ctx, OUT_B, r.applied ? 1 : 0);
+                put(ctx, OUT_C, r.code === "" ? 0 : 1);
+                put(ctx, OUT_F1, patchPreLocal === null ? UNDEF : patchPreLocal);
+                phase = 1;
+                return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump2" })];
+            }
+            put(ctx, OUT_N, statOf(hooks, hNow, "restores"));
+            put(ctx, OUT_F0, statOf(hooks, hNow, "restore_conflicts"));
+            ctx.off(hNow);
+            return [];
+        }
+        if (mode === "tick-patch-limit") {
+            let accepted = 0;
+            let tooMany = 0;
+            let badTarget = 0;
+            for (const r of patchReceipts) {
+                if (r.accepted) accepted += 1;
+                if (r.code === "too_many_slots") tooMany += 1;
+                if (r.code === "bad_target") badTarget += 1;
+            }
+            put(ctx, OUT_A, accepted);
+            put(ctx, OUT_B, tooMany);
+            put(ctx, OUT_C, badTarget);
+            put(ctx, OUT_N, patchReceipts.length);
+            put(ctx, OUT_F0, patchSubs.length === 10 ? statOf(hooks, patchSubs[8], "skips") : -1);
+            for (const id of patchSubs) ctx.off(id);
+            return [];
+        }
+        if (mode === "once-tick-writable") {
+            put(ctx, OUT_A, onceRan);
+            put(ctx, OUT_B, onceLocal);
+            put(ctx, OUT_C, onceEdit);
+            put(ctx, OUT_N, onceErr);
             return [];
         }
         ctx.fail("mode", "unexpected onTrigger for " + String(mode));

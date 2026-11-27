@@ -81,6 +81,15 @@ struct Entry {
     std::uint64_t restore_conflicts = 0;  // ★ S0：CAS 判定"窗口里有人写过"的次数（不写回）
     std::uint64_t skips = 0;
     std::uint32_t last_id = 0;
+    // ★ S2c-2：`Tick.patch` 的 one-shot（只在**本拍命中**时由 handler 设，probe 在 `on_hits`
+    //   返回之后应用并清位）。`tick_addr` 是注册时解析好的目标地址（handler 里解析、handler 里
+    //   读到的是"打补丁前"的值；真正写发生在 handler 之后）。
+    bool tick_patch = false;
+    InstrPatchKind tick_kind = InstrPatchKind::LocalInt;
+    std::uint32_t tick_index = 0;
+    std::uint32_t tick_value = 0;
+    std::uint32_t tick_addr = 0;
+    std::uint64_t hit_serial = 0;  // == `State::probe_serial` ⇒ 本拍命中
     // ② 读（采样清单 + 最近一次读数）
     std::vector<std::uint32_t> cap_ints;
     std::vector<std::uint32_t> cap_ptrs;
@@ -89,17 +98,23 @@ struct Entry {
     std::vector<std::uint32_t> last_targets;
 };
 
-struct Pending {
-    bool active = false;
-    std::uint32_t entry_id = 0;
+// ★ S2c-2：pending 从"单槽"变成"多槽 + 同址合并"。
+//   为什么必须多槽：一条链上两个 handler 各 `tick.patch` 一个不同 local，或 v1 的持久 patch 与
+//   `tick.patch` 同时存在 —— 单槽会把前一次的待恢复**提前写回**（静默丢一次覆盖）。
+//   同址合并的语义：**保留最初 raw**（窗口内多次改同一地址 ⇒ 恢复回最初的 raw），`written` 更新为
+//   最后一次写入的编码值（CAS 比的就是它）。`entry_id` 归属 = **第一个开窗的条目**（保留 raw 的那条）：
+//   ⇒ `instrHookRemove(handle)` / `instrHookSetPatch(handle,false)` 只结算"自己开的窗"；
+//     别的条目对同一地址的后继写由第一个开窗者统一结算（一个窗口只有一个 owner，账才不重复）。
+struct PendingSlot {
+    std::uint32_t entry_id = 0;  // 第一个开窗的条目（raw 的归属；`restores` 记在它账上）
     std::uint32_t addr = 0;
-    std::uint32_t raw = 0;      // 覆盖**之前**的 4 字节（恢复目标）
-    std::uint32_t written = 0;  // ★ S0：我**写进去**的编码值（恢复前比对它 = CAS）
+    std::uint32_t raw = 0;      // 窗口**最初**的 4 字节（恢复目标）
+    std::uint32_t written = 0;  // 我**最后一次**写进去的编码值（恢复前比对它 = CAS）
 };
 
 struct State {
     std::vector<Entry> entries;
-    Pending pending;
+    std::vector<PendingSlot> pendings;  // ★ S2c-2：多槽（上限 `kMaxPatchSlots`）
     // 最近一次 probe 用到的 guest 内存（`clear()` / `remove()` 在没有 X86 时也能把未还原的写恢复）。
     GuestMemory* mem = nullptr;
     std::uint32_t next_id = 1;
@@ -113,6 +128,13 @@ struct State {
     //   `recomputeGates()` 在 add / remove / releaseOwner / clear 之后维护；没有 opcode 订阅时
     //   probe 不必每拍多付一次 `rd32(pc)`（`Want sink` 那一次仍然只在**命中后**才付）。
     bool has_opcode_entry = false;
+    // ★ S2c-2：`on_hits` 正在跑（`tick.patch` 的 one-shot 注册门）+ 本拍的序号与现场。
+    //   `probe_serial` 每拍 +1；`hit_serial == probe_serial` ⇒ "这条 entry 本次命中"。
+    //   `probe_frame` / `probe_mem` 只在 `on_hits` 期间非空（`instrHookSetTickPatch` 用它解析地址）。
+    bool dispatching = false;
+    std::uint64_t probe_serial = 0;
+    Frame* probe_frame = nullptr;
+    GuestMemory* probe_mem = nullptr;
 };
 
 State& state() {
@@ -138,32 +160,75 @@ bool write32(GuestMemory& mem, std::uint32_t ea, std::uint32_t raw) {
 //   为什么必须比对：窗口 = "写入覆盖值" → "下一条脚本指令派发前"。那一段时间里**整条指令**都在跑
 //   （shim / 读点 / 另一个 Run 回调 / 音频 feeder 都可能写同一个 dword）。无条件写回 `raw` 会把
 //   别人的写**静默抹掉**（文档里的"净变化 0"只在这个窗口没人写过时才成立）。
-//   判据：`当前值 == pending.written`（我写进去的编码值）⇒ 写回 `raw` 并计 `restores`；
+//   判据：`当前值 == slot.written`（我最后一次写进去的编码值）⇒ 写回 `raw` 并计 `restores`；
 //   否则**不写**、计 `restore_conflicts`（别人的写赢）。
 //   读不到（未提交）⇒ 既不写也不计数：那不是"有人写过"，是"这个地址现在不可读"（与旧口径一致）。
+// ★ S2c-2：**多槽**逐条独立结算（每条各自 CAS），然后清空。`owner_entry == nullptr`（条目已被摘）
+//   仍然结算写回，只是没有账可记 —— ⛔ 不许把一次待恢复的写留在 guest 里。
+Entry* findEntry(std::uint32_t handle) {
+    for (Entry& e : state().entries) {
+        if (e.id == handle) return &e;
+    }
+    return nullptr;
+}
+
+// 结算**一条**槽（CAS）。调用方负责把它从 `State::pendings` 里去掉（⛔ 不在遍历里 erase）。
+void settleSlot(const PendingSlot& slot) {
+    State& st = state();
+    if (st.mem == nullptr) return;
+    Entry* owner_entry = findEntry(slot.entry_id);
+    std::uint32_t current = 0;
+    if (!read32(*st.mem, slot.addr, &current)) return;
+    if (current == slot.written) {
+        if (write32(*st.mem, slot.addr, slot.raw) && owner_entry != nullptr) owner_entry->restores += 1;
+    } else if (owner_entry != nullptr) {
+        owner_entry->restore_conflicts += 1;
+    }
+}
+
 void restorePendingLocked() {
     State& st = state();
-    if (!st.pending.active) return;
-    Entry* owner_entry = nullptr;
-    for (Entry& e : st.entries) {
-        if (e.id == st.pending.entry_id) {
-            owner_entry = &e;
-            break;
+    if (st.pendings.empty()) return;
+    // 先 swap 出来：`settleSlot` 会查 entries，但不会碰 pendings（⛔ 不在遍历里 erase）。
+    std::vector<PendingSlot> slots;
+    slots.swap(st.pendings);
+    for (const PendingSlot& slot : slots) settleSlot(slot);
+}
+
+/** 只结算 `handle` 开的槽（`instrHookRemove` / `instrHookSetPatch(false)`）。别的条目一个字节都不动。 */
+void restorePendingForEntry(std::uint32_t handle) {
+    State& st = state();
+    std::vector<PendingSlot> keep;
+    keep.reserve(st.pendings.size());
+    for (const PendingSlot& slot : st.pendings) {
+        if (slot.entry_id == handle) {
+            settleSlot(slot);
+        } else {
+            keep.push_back(slot);
         }
     }
-    if (st.mem != nullptr) {
-        std::uint32_t current = 0;
-        if (read32(*st.mem, st.pending.addr, &current)) {
-            if (current == st.pending.written) {
-                if (write32(*st.mem, st.pending.addr, st.pending.raw) && owner_entry != nullptr) {
-                    owner_entry->restores += 1;
-                }
-            } else if (owner_entry != nullptr) {
-                owner_entry->restore_conflicts += 1;
-            }
-        }
+    st.pendings.swap(keep);
+}
+
+/**
+ * 登记一次写（同址合并 + 槽上限）。`entry` 非空 ⇒ 超限时记它的 `skips`。
+ * 返回 false = 槽已满（调用方**还没有**写 guest ⇒ 直接跳过本次写）。
+ * ★ 同址：保留最初 `raw` 与最初 `entry_id`，只更新 `written`（最后一次写的编码值）。
+ */
+bool recordPending(std::uint32_t entry_id, std::uint32_t addr, std::uint32_t raw, std::uint32_t written,
+                   Entry* entry) {
+    State& st = state();
+    for (PendingSlot& slot : st.pendings) {
+        if (slot.addr != addr) continue;
+        slot.written = written;
+        return true;
     }
-    st.pending.active = false;
+    if (st.pendings.size() >= kMaxPatchSlots) {
+        if (entry != nullptr) entry->skips += 1;
+        return false;
+    }
+    st.pendings.push_back(PendingSlot{entry_id, addr, raw, written});
+    return true;
 }
 
 bool sampleFrame(X86& cpu, Frame* out) {
@@ -265,19 +330,19 @@ void recomputeGates() {
     st.has_opcode_entry = opcode;
 }
 
-bool targetAddress(X86& cpu, const Frame& f, const Entry& e, std::uint32_t* addr) {
-    GuestMemory& mem = *cpu.mem;
-    switch (e.kind) {
+bool targetAddressIn(GuestMemory& mem, const Frame& f, InstrPatchKind kind, std::uint32_t index,
+                     std::uint32_t* addr) {
+    switch (kind) {
         case InstrPatchKind::PtrDword: {
-            if (e.index >= f.ptr_count) return false;
+            if (index >= f.ptr_count) return false;
             std::uint32_t p = 0;
-            if (!read32(mem, f.ptr_base + 4 * e.index, &p) || p == 0) return false;
+            if (!read32(mem, f.ptr_base + 4 * index, &p) || p == 0) return false;
             *addr = p;
             return true;
         }
         case InstrPatchKind::LocalInt: {
-            if (e.index >= f.int_count) return false;
-            *addr = f.int_base + 4 * e.index;
+            if (index >= f.int_count) return false;
+            *addr = f.int_base + 4 * index;
             return true;
         }
         case InstrPatchKind::GlobalInt: {
@@ -285,12 +350,16 @@ bool targetAddress(X86& cpu, const Frame& f, const Entry& e, std::uint32_t* addr
             std::uint32_t count = 0;
             if (!read32(mem, f.engine + kGlobalIntBase, &base) || base == 0) return false;
             if (!read32(mem, f.engine + kGlobalIntCount, &count)) return false;
-            if (e.index > count) return false;
-            *addr = base + 4 * e.index;
+            if (index > count) return false;
+            *addr = base + 4 * index;
             return true;
         }
     }
     return false;
+}
+
+bool targetAddress(X86& cpu, const Frame& f, const Entry& e, std::uint32_t* addr) {
+    return targetAddressIn(*cpu.mem, f, e.kind, e.index, addr);
 }
 
 void captureLocals(const GuestMemory& mem, const Frame& f, Entry* e) {
@@ -313,13 +382,6 @@ void captureLocals(const GuestMemory& mem, const Frame& f, Entry* e) {
         if (have_p && p != 0 && read32(mem, p, &v) && f.has_key) v = decodeInt(v, f.key);
         e->last_targets.push_back(have_p && p != 0 ? v : 0u);
     }
-}
-
-Entry* find(std::uint32_t handle) {
-    for (Entry& e : state().entries) {
-        if (e.id == handle) return &e;
-    }
-    return nullptr;
 }
 
 /**
@@ -440,10 +502,10 @@ bool instrHookSetPatch(std::uint32_t handle, bool enabled, InstrPatchKind kind, 
         if (err != nullptr) *err = why;
         return false;
     };
-    Entry* e = find(handle);
+    Entry* e = findEntry(handle);
     if (e == nullptr) return fail("no_such_hook");
-    // 换覆盖 / 撤覆盖之前先把还没还原的那次写回去（否则会留下一个半新半旧的窗口）。
-    if (state().pending.active && state().pending.entry_id == handle) restorePendingLocked();
+    // 换覆盖 / 撤覆盖之前先把**这条 entry 开的窗**结算掉（别的条目的 pending 一个字节都不动）。
+    restorePendingForEntry(handle);
     if (!enabled) {
         e->patch = false;
         if (err != nullptr) *err = nullptr;
@@ -459,9 +521,74 @@ bool instrHookSetPatch(std::uint32_t handle, bool enabled, InstrPatchKind kind, 
     return true;
 }
 
+bool instrHookSetTickPatch(std::uint32_t handle, InstrPatchKind kind, std::uint32_t index,
+                           std::uint32_t value, const char** err) {
+    auto fail = [err](const char* why) {
+        if (err != nullptr) *err = why;
+        return false;
+    };
+    Entry* e = findEntry(handle);
+    if (e == nullptr) return fail("no_such_hook");
+    // ★ once 的临时条目在 resolve 之后立刻撤（`runOnceResolve`）⇒ 这次覆盖没有落地的地方。
+    //   ⛔ 不假装收下（那会让回执说 true、guest 却没变）。
+    if (e->hook_kind == InstrHookKind::Once) return fail("once_tick");
+    State& st = state();
+    if (!st.dispatching || st.probe_frame == nullptr || st.probe_mem == nullptr) return fail("not_hit");
+    if (e->hit_serial != st.probe_serial) return fail("not_hit");  // 本拍没命中（不是这个 Tick 的拍）
+    if (!st.probe_frame->has_key) return fail("no_key");
+    std::uint32_t addr = 0;
+    if (!targetAddressIn(*st.probe_mem, *st.probe_frame, kind, index, &addr)) return fail("bad_target");
+    std::uint32_t raw = 0;
+    if (!read32(*st.probe_mem, addr, &raw)) return fail("bad_target");
+    // 槽上限：把"本拍计划中、尚未在 pendings 里的不同地址"算进来（tick.patch 全部登记在
+    // handler 里、统一在 `on_hits` 之后应用 ⇒ 只在 pendings 上判会全部通过、应用时才丢）。
+    bool covered = false;
+    for (const PendingSlot& slot : st.pendings) {
+        if (slot.addr == addr) {
+            covered = true;
+            break;
+        }
+    }
+    if (!covered) {
+        for (const Entry& other : st.entries) {
+            if (other.tick_patch && other.tick_addr == addr) {
+                covered = true;
+                break;
+            }
+        }
+    }
+    if (!covered) {
+        std::size_t planned = 0;
+        for (const Entry& other : st.entries) {
+            if (!other.tick_patch) continue;
+            // 自己已经登记过（这次是**换目标**）⇒ 旧目标会被覆盖，不能再占一个计划位。
+            if (&other == e) continue;
+            bool in_pending = false;
+            for (const PendingSlot& slot : st.pendings) {
+                if (slot.addr == other.tick_addr) {
+                    in_pending = true;
+                    break;
+                }
+            }
+            if (!in_pending) planned += 1;
+        }
+        if (st.pendings.size() + planned >= kMaxPatchSlots) {
+            e->skips += 1;
+            return fail("too_many_slots");
+        }
+    }
+    e->tick_patch = true;
+    e->tick_kind = kind;
+    e->tick_index = index;
+    e->tick_value = value;
+    e->tick_addr = addr;
+    if (err != nullptr) *err = nullptr;
+    return true;
+}
+
 bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
                          const std::vector<std::uint32_t>& ptrs) {
-    Entry* e = find(handle);
+    Entry* e = findEntry(handle);
     if (e == nullptr) return false;
     e->cap_ints.assign(ints.begin(), ints.begin() + static_cast<std::ptrdiff_t>(ints.size() < 8 ? ints.size() : 8));
     e->cap_ptrs.assign(ptrs.begin(), ptrs.begin() + static_cast<std::ptrdiff_t>(ptrs.size() < 8 ? ptrs.size() : 8));
@@ -469,7 +596,7 @@ bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>&
 }
 
 bool instrHookStats(std::uint32_t handle, InstrHookStatus* out) {
-    const Entry* e = find(handle);
+    const Entry* e = findEntry(handle);
     if (e == nullptr) return false;
     InstrHookStatus s;
     s.id = e->id;
@@ -499,7 +626,8 @@ bool instrHookStats(std::uint32_t handle, InstrHookStatus* out) {
 
 bool instrHookRemove(std::uint32_t handle) {
     State& st = state();
-    if (st.pending.active && st.pending.entry_id == handle) restorePendingLocked();
+    // ★ S2c-2：只结算**这条 entry 开的槽**（别的订阅的 pending 一个字节都不动）。
+    restorePendingForEntry(handle);
     for (auto it = st.entries.begin(); it != st.entries.end(); ++it) {
         if (it->id == handle) {
             st.entries.erase(it);
@@ -516,25 +644,30 @@ bool instrHookRemove(std::uint32_t handle) {
 
 void instrHookReleaseOwner(std::uint64_t owner) {
     State& st = state();
-    // ① 未还原的那次覆盖若属于本 owner ⇒ 先按 CAS 结算（别人的 pending 一个字节都不动）。
-    //    找不到对应 entry（不该发生）⇒ 也结算：⛔ 不许把一次待恢复的写留在 guest 里。
-    if (st.pending.active) {
-        const Entry* pending_entry = nullptr;
-        for (const Entry& e : st.entries) {
-            if (e.id == st.pending.entry_id) {
-                pending_entry = &e;
-                break;
-            }
-        }
-        if (pending_entry == nullptr || pending_entry->owner == owner) restorePendingLocked();
-    }
-    // ② 撤掉本 owner 的全部 hook（别的 owner 原样）。
-    // ★ S2a：先把要摘的 id 收集到局部（⛔ 不在 `remove_if` 的谓词里调 sink）；
-    //   摘完之后逐条 `notifyReleased` ⇒ ui 释放对应的 JS handler。
+    // ① 先收集本 owner 的 id（撤表之前；之后 `findEntry` 就查不到了）。
     std::vector<std::uint32_t> released;
     for (const Entry& e : st.entries) {
         if (e.owner == owner) released.push_back(e.id);
     }
+    // ② **只结算本 owner 的槽**（别的 owner 的 pending 一个字节都不动）。
+    //    找不到对应 entry 的槽（不该发生：`instrHookRemove` 会先结算自己那条）⇒ 也结算，
+    //    ⛔ 不许把一次待恢复的写留在 guest 里。
+    if (!st.pendings.empty()) {
+        std::vector<PendingSlot> keep;
+        keep.reserve(st.pendings.size());
+        for (const PendingSlot& slot : st.pendings) {
+            const Entry* pending_entry = findEntry(slot.entry_id);
+            if (pending_entry == nullptr || pending_entry->owner == owner) {
+                settleSlot(slot);
+            } else {
+                keep.push_back(slot);
+            }
+        }
+        st.pendings.swap(keep);
+    }
+    // ③ 撤掉本 owner 的全部 hook（别的 owner 原样）。
+    // ★ S2a：先把要摘的 id 收集到局部（⛔ 不在 `remove_if` 的谓词里调 sink）；
+    //   摘完之后逐条 `notifyReleased` ⇒ ui 释放对应的 JS handler。
     st.entries.erase(std::remove_if(st.entries.begin(), st.entries.end(),
                                     [owner](const Entry& e) { return e.owner == owner; }),
                      st.entries.end());
@@ -560,10 +693,13 @@ void instrHookSetInjectionSites(std::uint32_t n) { state().injection_sites = n; 
 
 void instrHookCancelPendingAt(std::uint32_t addr) {
     State& st = state();
-    if (!st.pending.active || st.pending.addr != addr) return;
+    if (st.pendings.empty()) return;
     // ★ 持久写赢过瞬时覆盖：**不**写回 raw（这次写是真的），也**不**记 restore / conflict
-    //   —— 什么都没发生，只是那次待恢复作废了（见头文件的口径）。
-    st.pending.active = false;
+    //   —— 什么都没发生，只是这些待恢复作废了（见头文件的口径）。
+    // ★ S2c-2：取消**所有** `addr` 相同的槽（同址合并后通常只有一条）。
+    st.pendings.erase(std::remove_if(st.pendings.begin(), st.pendings.end(),
+                                     [addr](const PendingSlot& s) { return s.addr == addr; }),
+                      st.pendings.end());
 }
 
 std::vector<InstrHookStatus> instrHookList() {
@@ -603,11 +739,13 @@ void instrHookProbe(X86& cpu) {
     if (cpu.mem == nullptr) return;
     st.mem = cpu.mem;
 
-    // ① 先恢复上一条指令的临时写（窗口 = 一条脚本指令）。
+    // ① 先恢复上一条指令的临时写（窗口 = 一条脚本指令）—— **全部槽**逐条 CAS。
     restorePendingLocked();
 
     Frame f;
     if (!sampleFrame(cpu, &f)) return;
+    // 本拍序号：`hit_serial == probe_serial` ⇒ "这条 entry 本拍命中"（`tick.patch` 的判据）。
+    st.probe_serial += 1;
 
     // ★ S2a：有 sink 才收集命中 id。为什么**不在遍历里**直接分发：
     //   sink 会跑 JS；JS 一旦能调 `instrHookAdd`（`push_back` ⇒ 重分配）或 `instrHookRemove`
@@ -622,12 +760,6 @@ void instrHookProbe(X86& cpu) {
     std::uint32_t hit_ids[8];
     std::size_t n_hits = 0;
     std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2c 起可达：同点多条）
-    // ★ S2c-1 复审 F1（S2）：v1 "一条指令最多一次写、先注册者赢" —— 用**本次 probe 的一位**表达，
-    //   ⛔ 不是 `break`。旧写法写成功后 `break` ⇒ 同一点**后面**的条目既不 `hits += 1`、也进不了
-    //   `hit_ids` ⇒ v2 `ctx.at` handler 静默不跑（旧注释"位置唯一"在 S2c 多条目之后已不成立）。
-    //   现在的语义：写成功之后**只跳过写**（下面的 `if (wrote_patch) continue;`），
-    //   hits / hit_ids / capture 照常 —— "先注册者赢"不变，同点后面的订阅不再被饿死。
-    bool wrote_patch = false;
 
     for (Entry& e : st.entries) {
         // ★ S2c：四种 form 的统一判定（v1 的 Pos 仍是"先比 pos"那一支，代价同阶）。
@@ -637,7 +769,8 @@ void instrHookProbe(X86& cpu) {
 
         e.hits += 1;
         e.last_id = f.id;
-        // ★★ S2a：记命中 id 必须在**这里**（`e.hits += 1` 之后、任何 `continue` / `break` 之前）：
+        e.hit_serial = st.probe_serial;  // ★ S2c-2：本拍命中（`tick.patch` 的 one-shot 门）
+        // ★★ S2a：记命中 id 必须在**这里**（`e.hits += 1` 之后、任何 `continue` 之前）：
         //    只读订阅（没装 patch）会在下面的 `if (!e.patch) continue;` 走掉 ⇒ 写在循环体尾部
         //    就永远记不到（`instr-hook/sink-hit-fields` 会红）。
         if (want_sink) {
@@ -649,10 +782,6 @@ void instrHookProbe(X86& cpu) {
         }
         if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);
         if (!e.patch) continue;
-        // ★ F1：这条 probe 已经有一条成功写过 ⇒ 后面的 patch 条目**跳过写**（v1 语义不变：
-        //   一条指令最多一次写、先注册者赢）。⛔ 不要在这里 `break`：上面的 hits / hit_ids /
-        //   capture 必须先记完（否则同点后面的 `ctx.at` 连 hits 都不涨）。
-        if (wrote_patch) continue;
         if (e.max_hits != 0 && e.hits > e.max_hits) continue;
 
         std::uint32_t addr = 0;
@@ -665,20 +794,28 @@ void instrHookProbe(X86& cpu) {
             e.skips += 1;
             continue;
         }
+        // ★ S2c-2：多槽 —— 每条 entry 各写一个 slot（同址合并）。槽满 ⇒ 跳过**这一次写**
+        //   （⛔ 不写一个没有槽可恢复的值）、记 `skips`。v1 的"写成功后不 break"保持不变：
+        //   上面的 hits / hit_ids / capture 已经记完，后面的条目继续跑（且它自己的 patch 也生效）。
+        bool covered = false;
+        for (const PendingSlot& slot : st.pendings) {
+            if (slot.addr == addr) {
+                covered = true;
+                break;
+            }
+        }
+        if (!covered && st.pendings.size() >= kMaxPatchSlots) {
+            e.skips += 1;
+            continue;
+        }
         // ★ S0：`written` 必须留下来 —— 恢复时用它做 CAS 比对（`restorePendingLocked`）。
         const std::uint32_t written = encodeInt(e.value, f.key);
         if (!write32(*cpu.mem, addr, written)) {
             e.skips += 1;
             continue;
         }
-        st.pending.active = true;
-        st.pending.entry_id = e.id;
-        st.pending.addr = addr;
-        st.pending.raw = raw;
-        // ★ S0：记下**我写进去的**编码值 —— 下一次恢复先比它（CAS，见 `restorePendingLocked`）。
-        st.pending.written = written;
-        // ★ F1：一次 probe 只许写一次（先注册者赢）；**继续遍历**把同点后面的订阅照常记账。
-        wrote_patch = true;
+        // ★ S0：同址合并保留**最初** raw、更新 `written`（见 `recordPending`）。
+        (void)recordPending(e.id, addr, raw, written, &e);
     }
     if (!want_sink || (n_hits == 0 && hit_overflow.empty())) return;
 
@@ -698,7 +835,7 @@ void instrHookProbe(X86& cpu) {
     std::size_t n = 0;
     const auto fill = [&](std::uint32_t id) {
         // 重新查（S2a 的原写法）：遍历之后表可能已被 patch 路径之外的东西改过。
-        Entry* e = find(id);
+        Entry* e = findEntry(id);
         if (e == nullptr) return;
         InstrHit& h = hits[n++];
         h.handle = e->id;
@@ -719,8 +856,50 @@ void instrHookProbe(X86& cpu) {
     for (const std::uint32_t id : hit_overflow) fill(id);
     if (n == 0) return;
     // ★ ⑤ 一次派发**一次** `on_hits`（注册序 = `hits[0..n)`）—— 链需要"这批就是全部"这个事实。
+    //   期间 `dispatching` / `probe_frame` 有效 ⇒ handler 里的 `tick.patch` 能解析目标地址、
+    //   知道"这一拍命中了谁"；⛔ 覆盖的**写**一律留到 `on_hits` 返回之后（见 ⑥）。
+    st.dispatching = true;
+    st.probe_frame = &f;
+    st.probe_mem = cpu.mem;
     for (const InstrHookSink& s : st.sinks) {
         if (s.on_hits != nullptr) s.on_hits(s.user, hits, n);
+    }
+    st.dispatching = false;
+    st.probe_frame = nullptr;
+    st.probe_mem = nullptr;
+
+    // ★ ⑥ 应用本拍 `tick.patch` 的 one-shot 覆盖（**handler 之后**：handler 必须看到"打补丁前"
+    //   的读数）。逐条命中按注册序；目标地址在 `instrHookSetTickPatch` 里已解析/校验过，
+    //   这里只负责"读 raw → 写 → 记槽"。条目在派发期间被摘（`off(self)`）⇒ 覆盖无处落地
+    //   （回执已经给出；见头文件的口径）。
+    for (std::size_t i = 0; i < n; ++i) {
+        Entry* e = findEntry(hits[i].handle);
+        if (e == nullptr || !e->tick_patch) continue;
+        e->tick_patch = false;
+        const std::uint32_t addr = e->tick_addr;
+        // 本拍已有同址槽 ⇒ 合并；否则先判上限（⛔ 写一个没有槽可恢复的值）。
+        bool covered = false;
+        for (const PendingSlot& slot : st.pendings) {
+            if (slot.addr == addr) {
+                covered = true;
+                break;
+            }
+        }
+        if (!covered && st.pendings.size() >= kMaxPatchSlots) {
+            e->skips += 1;
+            continue;
+        }
+        std::uint32_t raw = 0;
+        if (!read32(*cpu.mem, addr, &raw) || !f.has_key) {
+            e->skips += 1;
+            continue;
+        }
+        const std::uint32_t written = encodeInt(e->tick_value, f.key);
+        if (!write32(*cpu.mem, addr, written)) {
+            e->skips += 1;
+            continue;
+        }
+        (void)recordPending(e->id, addr, raw, written, e);
     }
 }
 
