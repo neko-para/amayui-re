@@ -248,7 +248,7 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     //   ★ 已经 failed / finished / quit / runner failed 时**不再**跑用户 JS（Run 已收口；残余 job
     //   交给 `Impl::shutdown` 的兜底 drain）。`runner.done()` **不是**跳过条件：task / once 正在
     //   等它的时候，泵就是唯一的推进点。
-    if (script_ != nullptr && !failed_ && !finished_ && !quit_requested_ && !runner_.failed()) {
+    if (script_ != nullptr && !runTerminal()) {
         script_->pump(*this, runner_.budget());
     }
     // ★ S0（缺陷 1）：`onTrigger` 返回 `[]` ⇒ `install` 把 runner 置 done，**这发生在回调返回之后**
@@ -287,7 +287,8 @@ bool PluginHost::runClosed() const {
     //   Run 必须活着（否则 `return []` 会把一个还在 `await ctx.once(...)` 的 Run 收口掉）。
     //   `hasPendingWork` 只认那三样：普通 `ctx.hook.at` 是 v1 观察，⛔ 不算。
     const bool pending = script_ != nullptr && script_->hasPendingWork();
-    return failed_ || finished_ || quit_requested_ || runner_.failed() || (runner_.done() && !pending);
+    // ★ S2b-1：终态判据只有一份 = `runTerminal()`（failed / finished / quit / runner failed）。
+    return runTerminal() || (runner_.done() && !pending);
 }
 
 // =====================================================================================

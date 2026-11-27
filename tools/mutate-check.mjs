@@ -4655,6 +4655,43 @@ const MUTATIONS = [
       ' Run 被当场收口；`plugin/task-keeps-run` 红',
   },
 
+  // ── S2-3：`hasPendingWork` 的 `onces` 支（裸 ctx.once 是 Run 存活来源）──────────────────────
+  //   ★ 代表这一类错：把 once 从存活来源里删掉 ⇒ `start` 只登记一条 `ctx.once`（不进 task）并
+  //     返回 null 时，第一拍 `runClosed()` 就成立 ⇒ `releaseRunHooks` 撤掉 once 的临时 hook ⇒
+  //     promise 永远 pending，而**没有任何症状**（旧复审 M1 就是删掉这支仍全绿）。
+  //   ★ 红点 = `plugin/bare-once-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();\n',
+    to: '        return !impl_->tasks.empty() || !impl_->hook_handlers.empty();  // 变异：不把 once 当存活来源\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`hasPendingWork` 的 `onces` 支删掉（不把 once 当 Run 存活来源）⇒ 裸 `ctx.once` + `start` 返回 null ' +
+      '的 Run 第一拍就被收口、promise 永不 settle；`plugin/bare-once-keeps-run` 红',
+  },
+
+  // ── S2-3：`hasPendingWork` 的 `hook_handlers` 支（onTick 订阅是 Run 存活来源）────────────────
+  //   ★ 代表这一类错：把 sync 订阅从存活来源里删掉 ⇒ `ctx.hook.at(...).onTick(fn)` 之后返回 null
+  //     的 Run 第一拍就收口；S2a 的 onTick 订阅变成"永远等不到 on_released"的永久 pending。
+  //   ★ 红点 = `plugin/onTick-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();\n',
+    to: '        return !impl_->tasks.empty() || !impl_->onces.empty();  // 变异：不把 onTick 订阅当存活来源\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`hasPendingWork` 的 `hook_handlers` 支删掉（不把 `handle.onTick` 订阅当 Run 存活来源）⇒ ' +
+      '订阅之后返回 null 的 Run 第一拍就被收口；`plugin/onTick-keeps-run` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

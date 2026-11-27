@@ -238,6 +238,11 @@ public:
     bool begun() const { return begun_; }
     bool done() const { return runner_.done(); }
     bool failed() const override { return failed_; }
+    // ★ S2b-1（复审 S2-1）：Run 终态 = failed / finished / quit / runner failed。
+    //   泵 / task settle 用它当"Run 已收口 ⇒ 静默丢弃"的判据；⛔ 不含 `runner_.done()`。
+    bool runTerminal() const override {
+        return failed_ || finished_ || quit_requested_ || runner_.failed();
+    }
     const std::string& failName() const { return fail_name_; }
     const std::string& failReason() const { return fail_reason_; }
     bool finished() const { return finished_; }

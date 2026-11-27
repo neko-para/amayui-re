@@ -3311,12 +3311,11 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         }
         const std::uint64_t timeout_ns = timeout_u * 1'000'000ull;
 
-        // ★ 先建 Promise 再注册 hook：两条失败路径都必须**返回 Promise**（类型面是 `Promise<Tick>`；
-        //   ⛔ 不返回 undefined 让调用方 `await` 到 undefined）。注册失败 ⇒ 已拒绝的 promise
-        //   （宿主已经打过一行 error 点名 code）；它不会自己 fail Run（除非调用方 await 的 task 抛）。
-        const char* code = nullptr;
-        const std::uint32_t handle =
-            host->instrHookAdd(script, static_cast<std::uint32_t>(pos), &code);
+        // ★ S3（复审）：**先建 Promise 再注册 hook**。失败路径都必须**返回 Promise**（类型面是
+        //   `Promise<Tick>`；⛔ 不返回 undefined 让调用方 `await` 到 undefined）。反过来（先
+        //   `instrHookAdd`）时 Promise 创建失败会让那条临时 hook 泄漏（Run 收口前一直挂在表里、
+        //   `ctx.hook.list()` 可见、hits 会涨）。注册失败 ⇒ 已拒绝的 promise（宿主已打过一行 error
+        //   点名 code）；它不会自己 fail Run（除非调用方 await 的 task 抛）。
         JSValue funcs[2] = {JS_UNDEFINED, JS_UNDEFINED};
         Value promise(ctx, JS_NewPromiseCapability(ctx, funcs));
         if (promise.isException()) {
@@ -3325,6 +3324,9 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         }
         Value resolve_fn(ctx, funcs[0]);
         Value reject_fn(ctx, funcs[1]);
+        const char* code = nullptr;
+        const std::uint32_t handle =
+            host->instrHookAdd(script, static_cast<std::uint32_t>(pos), &code);
         if (handle == 0) {
             rejectOnceValue(ctx, reject_fn.raw(),
                             std::string("ctx.once: 注册失败（") + (code != nullptr ? code : "unknown") + "）");
@@ -3341,7 +3343,13 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         entry.script = script;
         entry.pos = static_cast<std::uint32_t>(pos);
         entry.timeout_ms = static_cast<std::uint32_t>(timeout);
-        impl->onces[handle] = std::move(entry);
+        try {
+            impl->onces[handle] = std::move(entry);
+        } catch (...) {
+            // 入账失败（分配失败）⇒ 不许留下"已装 hook、没有账"的幽灵条目。
+            lift::instrHookRemove(handle);
+            throw;
+        }
         return promise.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.once: 宿主异常（C++ exception at script boundary）");
@@ -3566,7 +3574,9 @@ JSValue jsHookOnTick(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
         // ⛔ 不另造一个 `off()`）。
         if (JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
             impl->dropHookHandler(handle);
-            return JS_UNDEFINED;
+            // ★ S3（复审）：d.ts 的 `onTick` 返回 `this`（注册路径也返回 this）⇒ 撤销路径同样返回
+            //   `this`。否则 TS 侧的链式写法编译通过、运行时却是 undefined（成员表与 d.ts 分叉）。
+            return JS_DupValue(ctx, this_val);
         }
         if (!JS_IsFunction(ctx, argv[0])) {
             return JS_ThrowTypeError(ctx, "handle.onTick: fn 必须是函数（撤掉传 null）");
@@ -3619,8 +3629,11 @@ bool makeTickObject(Impl& impl, const lift::InstrHit& hit, Value* out) {
 // =====================================================================================
 
 // 命中：组 Tick（与 `onTick` 同一个 `makeTickObject`）→ resolve → 撤临时 hook → 删账。
-// ★ `lift::instrHookRemove` 会经 `on_released` 删掉这条账（含三个 `Value`）⇒ 之后只许 `erase` 幂等，
-//   ⛔ 不许再碰 `entry`（迭代器已失效）。
+// ★ 顺序是**承重**的（S2 复审 S3）：`makeTickObject` 必须先把 `hit.script` 拷进 JS 字符串，
+//   **再** `instrHookRemove` —— `InstrHit::script` 指回 hook 表里的条目，摘掉之后就是悬垂指针。
+// ★ S2b-4（复审 S2-4）：`instrHookRemove` 会经 `on_released` 回到本实例；**先**把账摘掉再撤 hook，
+//   这样 `on_released` 知道"这条是正常结算的"（否则它会把 resolve 当成被 `hook.clear()` 撤掉而 reject）。
+//   ⛔ 不许在 `instrHookRemove` 之后再碰 `entry`（迭代器已失效）。
 void runOnceResolve(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit) {
     const auto entry = impl.onces.find(handle);
     if (entry == impl.onces.end()) return;
@@ -3628,15 +3641,17 @@ void runOnceResolve(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit)
     if (!makeTickObject(impl, hit, &tick)) {
         // 组 Tick 失败（宿主分配失败）⇒ 与"注册失败"同一口径：reject + 撤 hook（⛔ 不 fail Run）。
         rejectOnceValue(impl.ctx, entry->second.reject.raw(), "ctx.once: 组 Tick 失败");
+        impl.onces.erase(entry);
         lift::instrHookRemove(handle);
-        impl.onces.erase(handle);
         return;
     }
     JSValueConst args[1] = {tick.raw()};
     Value ignored(impl.ctx, JS_Call(impl.ctx, entry->second.resolve.raw(), JS_UNDEFINED, 1, args));
     if (ignored.isException()) qjs::clearException(impl.ctx);
+    // ★ S2b-4：resolve 之后再**先摘账、再撤 hook** ⇒ `on_released` 不会把这次正常结算当成
+    //   "被 `hook.clear()` 撤掉"而再 reject 一次（`entry` 在 erase 之后失效，⛔ 不许再碰）。
+    impl.onces.erase(entry);
     lift::instrHookRemove(handle);
-    impl.onces.erase(handle);
 }
 
 // 超时：reject（原因点名 script/pos/timeoutMs）→ 撤 hook → 删账。**不在这里 fail Run** ——
@@ -3650,15 +3665,18 @@ bool runOnceTimeout(Impl& impl, std::uint32_t handle, std::string* reason_out) {
                                entry->second.script + " pos=" + pos_hex + "（timeoutMs=" +
                                std::to_string(entry->second.timeout_ms) + "）";
     rejectOnceValue(impl.ctx, entry->second.reject.raw(), reason);
-    lift::instrHookRemove(handle);  // ⇒ `on_released` 删 onces（含三个 Value）
-    impl.onces.erase(handle);
+    // ★ S2b-4：先摘账再撤 hook（理由同 `runOnceResolve`）⇒ `on_released` 不会把这次 timeout 再 reject 一次。
+    impl.onces.erase(entry);
+    lift::instrHookRemove(handle);
     if (reason_out != nullptr && reason_out->empty()) *reason_out = reason;
     return true;
 }
 
 // 每个入口末尾（drain 之后）检查 task：FULFILLED ⇒ 移除；REJECTED ⇒ **fail Run**；PENDING ⇒ 保留。
-// ★ `host->failed()` 时只移除、不再 fail：`PluginHost::fail` 会**覆盖** reason，重复 fail 会把
-//   真正的原因（例如 once timeout）换成后到的那一条。
+// ★ S2b-1（复审 S2-1）：判据是 `runTerminal()`（failed / finished / quit / runner failed），
+//   ⛔ 不是只判 `failed()`：`ctx.finish()` / `ctx.quit()` 之后同一入口里拒绝的 task 若走 `fail()`，
+//   `PluginHost::fail` 会**覆盖** reason 并把 `run=finished exit=N` 翻成 `run=failed`（exit 读数被覆盖）。
+//   ⇒ Run 已到终态 = **静默丢弃**（不 fail、不写日志、不覆盖读数）；否则 rejected ⇒ `fail("task", …)`。
 void settleTasks(Impl& impl, lift::ui::PluginCallHost* host) {
     if (impl.tasks.empty()) return;
     JSContext* ctx = impl.ctx;
@@ -3667,15 +3685,13 @@ void settleTasks(Impl& impl, lift::ui::PluginCallHost* host) {
         const JSPromiseStateEnum state = JS_PromiseState(ctx, impl.tasks[i].raw());
         if (state == JS_PROMISE_FULFILLED) continue;  // 移除
         if (state == JS_PROMISE_REJECTED) {
-            if (host != nullptr && !host->failed()) {
+            if (host != nullptr && !host->runTerminal()) {
                 Value reason(ctx, JS_PromiseResult(ctx, impl.tasks[i].raw()));
                 std::string text;
                 formatThrownValue(ctx, impl.origin, reason.raw(), &text);
                 host->fail("task", text.empty() ? (impl.origin + ": ctx.task rejected") : text);
-            } else if (host != nullptr) {
-                host->log("error", "ctx.task rejected（Run 已经 failed，不再覆盖 reason）");
             }
-            continue;  // 移除（失败任务不再重复报）
+            continue;  // 移除（失败任务不再重复报；终态 Run 静默丢弃）
         }
         // PENDING（登记时已校验是 Promise，⛔ 不会走到 NOT_A_PROMISE）⇒ 保留。
         if (keep != i) impl.tasks[keep] = std::move(impl.tasks[i]);
@@ -3741,7 +3757,7 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
     //    （带 `pump #N` 的唯一性 —— `PluginHost::log` 会对连续相同消息去重）。
     if (!drained) {
         if (pump_overran) {
-            if (host != nullptr && !host->failed()) {
+            if (host != nullptr && !host->runTerminal()) {
                 const std::string reason =
                     (drain_err.empty() ? std::string(impl.origin + ": interrupted") : drain_err) +
                     "\n(plugin: 泵里的异步状态超出预算（deadline / op_limit）⇒ 已中断)";
@@ -3759,7 +3775,7 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
         }
     }
     // ⑤ timeout 是**失败截止**：drain 已让 catch 有机会 log，现在才 fail（用户 catch 了也照样 fail）。
-    if (!timeout_reason.empty() && host != nullptr && !host->failed()) {
+    if (!timeout_reason.empty() && host != nullptr && !host->runTerminal()) {
         host->fail("once-timeout", timeout_reason);
     }
     // 恢复外层字段（`overran` = 外层 or 泵自己的；别把泵的超预算读数冲掉）。
@@ -3907,10 +3923,17 @@ void implOnInstrReleased(void* user, std::uint32_t handle) {
     try {
         Impl* impl = static_cast<Impl*>(user);
         if (impl == nullptr || impl->ctx == nullptr) return;
-        // ★ S2b：once 的临时 hook 被 remove / releaseOwner / clear 摘掉时，它的账也必须一起消失
-        //   （promise / resolve / reject 三个 Value 要在这里释放，⛔ 不能等到 FreeContext）。
-        //   ★ 不 settle（不 reject）：Run 正在收口 / 用户主动撤 hook，再跑用户 continuation 没有意义。
-        impl->onces.erase(handle);
+        // ★ S2b-4（复审 S2-4）：`ctx.hook.clear()` / `handle.clear()` / `releaseRunHooks()` 会撤掉
+        //   once 的**临时** hook。`runOnceResolve` / `runOnceTimeout` 是"先摘账再撤 hook"⇒ 到这里
+        //   仍留在账里的条目一定是被**别人**撤掉的 ⇒ 必须 reject 那条 promise：
+        //   否则正在 `await` 它的 task 永远 pending，而 deadline 已随条目消失 ⇒ Run **永不收口**
+        //   （只能等 `--time-limit`），且 `hook.clear()` 是公开 API。
+        //   ★ 不 fail Run：reason 交给 task 自己的 catch / `settleTasks`（拒绝原因点名清楚即可）。
+        const auto it = impl->onces.find(handle);
+        if (it != impl->onces.end()) {
+            rejectOnceValue(impl->ctx, it->second.reject.raw(), "once 被清掉 / hook cleared");
+            impl->onces.erase(it);
+        }
         impl->dropHookHandler(handle);
     } catch (...) {
     }
@@ -5332,13 +5355,27 @@ private:
             if (err != nullptr) *err = "quickjs: 插件已 shutdown";
             return false;
         }
+        // ★ S2b-2（复审 S2-2）：Run 已到**终态**（failed / finished / quit / runner failed）⇒
+        //   与 `PluginHost::onReadPoint` 的早退**同口径**：不泵、不 settle、不跑用户 JS。
+        //   Run 收口后窗口档每个 present 仍会调 render；继续 drain 用户 continuation 等于绕过
+        //   "Run 已收口后不再跑用户 JS"这条不变量，配合 `settleTasks` 还能把 finished 翻成 failed。
+        //   ⛔ 不用 `runner_.done()` 当判据：正常 done 的 Run 仍要画（与读点泵的门一致）。
+        if (impl.call_host_persistent != nullptr && impl.call_host_persistent->runTerminal()) {
+            impl.render_bridge = nullptr;  // 本轮没有 render ⇒ 不 flush 上一帧的桥
+            return true;
+        }
         // ★ S2b：**render 边界**的泵（没有第三个 pump 概念）。`call_host` 用 persistent 那份
         //   （render 期间 `inCallback()` 恒 false ⇒ 泵里的 continuation 只有只读口）。
         //   ★ 必须在 `setBudget` 之后调用（present_sdl 每帧先设本帧墙钟预算）——`pumpImpl`
         //   自己**保存-恢复** `deadline_ns`，所以本帧的 20 ms 不会被子泵的 CPU 窗冲掉。
+        // ★ S2b-2（复审 S3）：`overran` 也要保存-恢复。本帧 render 的预算窗从 0 起（先清），泵之后
+        //   单独保存它自己的读数 —— 否则下面那句 `impl.overran = false` 会把泵的超预算读数冲掉
+        //   （与 `pumpImpl` 头注"留下读数"矛盾；`plugin/pump-budget` 走读点泵所以发现不了）。
+        impl.overran = false;
         if (impl.call_host_persistent != nullptr) {
             pumpImpl(impl, impl.call_host_persistent, lift::plugin::Budget{});
         }
+        const bool pump_overran = impl.overran;
         // ★ 这一帧没有桥 / 没有 render ⇒ flush 必须是 no-op（⛔ 不能拿上一帧的桥再 flush 一次）。
         impl.render_bridge = nullptr;
         // ★ 没有 `render` 的插件**合法**（纯 Run / headless）：present_sdl 只在挂了 overlay 时调
@@ -5352,6 +5389,7 @@ private:
         impl.builder = &builder;
         impl.current = &readings;
         impl.ops = 0;
+        // ★ 本帧 render 自己的预算窗从 0 起（泵的读数已存进 `pump_overran`，下面并回来）。
         impl.overran = false;
         // ★ D2：把本帧的 config 桥缓存到 `render_bridge`（flushConfig 在 render 返回之后还要用它
         //   —— 那时 current / call_host 已经复位）。消费者 = 经典 `host.config` **与**
@@ -5397,11 +5435,15 @@ private:
         // ★ S2b：render 的 drain 也可能让 task 完成 / 拒绝 ⇒ **同一入口**检查 settle
         //   （在 `call_host` 复位之前；task 拒绝要经宿主 fail）。
         if (impl.call_host != nullptr) settleTasks(impl, impl.call_host);
+        // ★ S2b-2（复审 S3）：本帧 render 自己的 overrun 读数（只用于下面的消息面），
+        //   最终 `overran()` = 本帧 render or 泵（泵的读数不能被冲掉）。
+        const bool render_overran = impl.overran;
         impl.builder = nullptr;
         impl.current = nullptr;
         impl.call_host = nullptr;
+        impl.overran = render_overran || pump_overran;
         if (!ok) {
-            if (impl.overran) {
+            if (render_overran) {
                 local_err += "\n(plugin: render 超出预算（deadline / op_limit）⇒ 已中断)";
             }
             if (err != nullptr) *err = local_err;

@@ -121,6 +121,14 @@ public:
     //   默认 false（测试替身 / 未来的其它宿主不必被迫实现）。
     virtual bool failed() const { return false; }
 
+    // ★ S2b-1（复审 S2-1）：本 Run 是否**已经到终态**（`failed` / `finished` / `quit` / runner failed）。
+    //   为什么不能只判 `failed()`：`ctx.finish()` / `ctx.quit()` **不**置 `failed_` ⇒ 一个在
+    //   finish/quit 之后同一入口里拒绝的 task 会把 `run=finished exit=N` **翻成 failed**、
+    //   并把 `exit` 读数覆盖掉。⇒ 泵 / task settle 的"Run 已收口"判据一律用它：
+    //   已到终态 ⇒ **静默丢弃**待推工作（不 fail、不覆盖读数）；否则 rejected task ⇒ `fail("task", …)`。
+    //   ⛔ 不把 `runner.done()` 算进来：正常 done 的 Run 仍要每帧 render（与 `onReadPoint` 的泵门同口径）。
+    virtual bool runTerminal() const = 0;
+
     // ---- Edit（立即）----
     // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
     virtual bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
