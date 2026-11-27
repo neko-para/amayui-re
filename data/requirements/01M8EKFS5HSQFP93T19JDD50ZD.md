@@ -62,10 +62,6 @@
 - `RunCtx`/`Tick`/`RenderCtx` 作为 `@amayui/lift-plugin` 类型；插件源码用 TS，`tsc --noEmit --erasableSyntaxOnly` 门禁。
 - 不用 nullable 全局 `ctx`；TS 走参数（`start(ctx)`、`task(async (ctx) =>)`、`at((tick) =>)`、`render(rctx)`）。
 
-## 待定
-
-- timeout 检测点（系统定时器/present/读点）；input token 是否做；`Tick` 越界访问抛错还是 undefined；是否保留全局 `ctx` 便利。
-
 ## 核实（2026-11-27，报告 `.tmp/plugin-v2/v3-api-design.md`）
 
 - **drain 现成但没接线**：`drainPendingJobs` 只在模块装载（`script_quickjs.cpp:1624`）与析构（`:236-239`）调用；插件回调 `call()` 与 `render()` 跑完不 drain ⇒ `await Promise.resolve()` 的"当前入口跑完"今天**不成立**。且 CPU deadline 在 `JS_Call` 返回即清零（`:4760-4774`）⇒ drain 必须纳入同一预算窗，否则忙等 await 循环永久卡住且无症状。
@@ -75,3 +71,7 @@
 - **输入触发点**：`node tools/opcodes.mjs --handlers` 可机械点名 114 `wait-for-input` / 205 / 257 `poll-input` / 540 `wait`（handler EA 有），但"哪条 = 输入到达"仍**待核**。
 - **timeout 没有独立泵**：只能挂读点（`plugin_host.cpp:231-259`）与 render 帧（`present_sdl.cpp:722-729`）两个既有泵；`aot_run.cpp`/`machine.cpp` 不许出现 pump 词（守卫 `input-plan-shape.test.mjs:96`）。
 - **建议顺序**：指令点 sink（只读命中）→ drain + 预算窗 → `once`/timeout → `at` 链 → `Tick` 分层。
+
+## 进展（2026-11-28）
+- **S2a 已实现**（dev `d72afb2`）：指令点 sink + `handle.onTick` 只读 tick + 每入口 drain（同一 2 ms CPU 窗）+ Run 收口释放 JS handler；守卫 `instr-hook/sink-*` / `plugin/point-hit*` / `drain-*` + 形态 ⑦⑧ + 2 变异。
+- **待做**：S2b `once`/`task`/timeout 泵（挂读点/render 既有泵）+ Run 存活；S2c `ctx.at` 链 + `Tick` 分层；顺手补 d.ts `onTick`/`InstrTick` 与 tick 预算字段保存/恢复。

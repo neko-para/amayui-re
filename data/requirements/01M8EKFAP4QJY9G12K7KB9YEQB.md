@@ -52,3 +52,11 @@
 - 合同：`docs/03-emulator/plugin-runtime.md`
 - 引擎：`apps/emulator-lift/third_party/quickjs-ng`；宿主：`apps/emulator-lift/src/ui/script_quickjs.cpp`
 - 进度：`pnpm tools requirements plan`
+
+## 进展（2026-11-28）
+
+- **S0 已实现并合入 main**（dev `177e93d`）：4 条静默缺陷修完（hook 归 Run owner、全部收口路径释放；patch 恢复 = CAS + `restore_conflicts`；render 期 7 个 `ctx.hook.*` 拒绝；`--no-s7` 注入站点进 `lift_pin.h` ⇒ `no_injection`）。复审 accept-with-findings（无 S0/S1 级）。
+- **S1 已实现并合入 main**（dev `d4668eb` + `d819864`）：quickts E1 擦除进 quickjs-ng（`.js` flags off/on 字节码 16/16 恒等；examples 9/9 零 module request）；`.ts`/`.mts` 插件端到端；`tsc --erasableSyntaxOnly` 进 examples 门禁。复审 accept-with-findings。
+- **S2a 已实现并合入 main**（dev `d72afb2`）：指令点 sink（runtime→ui，无 JS 类型）+ `handle.onTick(fn)` 只读 tick + 每入口 drain（同一 CPU 预算窗）+ Run 收口释放 JS handler。复审 accept-with-findings。
+- **进行中**：S2b（`once`/`task`/timeout + Run 存活语义）→ S2c（`ctx.at` 链 + `Tick` 分层）→ S3 → S4。
+- 证据：`.tmp/plugin-v2/{plan.md,s0/,s1/,s2a/}`（含复审报告与变异读数）。

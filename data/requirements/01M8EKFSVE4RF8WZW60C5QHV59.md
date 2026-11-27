@@ -64,3 +64,8 @@
 - 需求的**两处落点写错**：`locateSpecifier`（`script_quickjs.cpp:1299`）只用于错误文本、不参与装载；`JS_DetectModule`（`quickjs.h:1042`）**没有 flags 参数** ⇒ `.ts` 不能靠它带 flag 探测（按扩展名强制 module 或新增 API）。
 - 门禁现状：tsc 5.9.3；examples 的 `--noEmit` 与 `--erasableSyntaxOnly` 都 exit 0；但 `examples/tsconfig.json` 与根 `typecheck` 都**没开**该选项 ⇒ 目前不是常设门禁。
 - 路径：P0 外部 tsc 预编译（2–4 h）· P0.5 `.ts` 候选 + flag 管线（2–4 h）· P1 E1-mini（1–2 人日）· P2 完整 E1（2–4 人日）。
+
+## 进展（2026-11-28）
+
+- **S1 已实现**（dev `d4668eb` + `d819864`，合入 main）：`quickts_e1.h`（1,125 行，上游 `66e2847`，MIT，E1 only）+ `quickjs.c` 18 个插入区 + `JS_EVAL_FLAG_TYPESCRIPT`；`.js` flags off/on 字节码 16/16 恒等 + 内联 GLOBAL 13/13；examples 9/9 编译且零 module request；`.ts`/`.mts` 装载（`.js` 不加 flag、`.ts` 强制 module、moduleLoad 同 flag）；`plugin_search` 候选 `.js`→`.ts`→`.mts`；`erasableSyntaxOnly` 进 examples tsconfig；`__text` +8,243 B（+1.27%）。
+- **待做（S4/S5）**：examples 迁 v2、`plugin.d.ts` / README / 文档；extensionless import、HUD `.ts`、product-exe `.ts` e2e、MSVC 未证、enum/JSX 按需（E2）。
