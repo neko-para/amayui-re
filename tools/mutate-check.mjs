@@ -4368,15 +4368,18 @@ const MUTATIONS = [
   },
   {
     // ── 插件 `loadSave` 的翻页等待窗（★ 只判"链的判定"，不判游戏读数）──
-    //   把 1200 改回 60 ⇒ 正常点击也会被判成"丢了"（60 读点 ≈ 1.5 帧 < 一次点击要跨的 2 个回调）。
+    //   把 205 改回 60 ⇒ 窗从 ≈3.3 s 压到 ≈0.97 s（"1 拍 = 1 帧"那个错误单位换算的值）。
     //   守卫 = `tools/test/plugin-loadsave-page.test.mjs`（pure；不需要构建）。
+    //   ★ 2026-11-28 P1-fix S1：常量从 1200（读点单位）按**实测 61.9 SAVE 回调/s** 重算成 205
+    //     （同一 ≈3.3 s 墙钟）⇒ 这条变异体的 `from`/`to` 跟着改；判据 / guard 不变
+    //     （该 guard 现在 9/9 红属 P3，见 P1 复审 S3 —— 本条目在 P3 之前都不可信）。
     file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
-    from: 'const PAGE_STALL_LIMIT = 1200;',
+    from: 'const PAGE_STALL_LIMIT = 205;',
     to: 'const PAGE_STALL_LIMIT = 60;',
     guard: 'tools/test/plugin-loadsave-page.test.mjs',
     what:
-      '翻页等待窗缩回 60 个读点（≈164 ms）⇒ 正常点击也要先撞满窗、再发一次多余的重试点击（把页多翻一格），' +
-      '而第一下真被吞时重试自己又要 76 个读点才落地、`turnr` 的 60 拍等不到 ⇒ `page not reached (target 0, still 1)`',
+      '翻页等待窗按错误单位换算成 60 个 SAVE 回调（≈0.97 s，只有 v1 的 1/3）⇒ 点击被吞时重试窗不够 ⇒ ' +
+      '`page not reached (target 0, still 1)`（`turn` 提前重试、`turnr` 也等不到）',
   },
 
   {
@@ -4425,17 +4428,20 @@ const MUTATIONS = [
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
     file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
+    // ★ 2026-11-28 P1 迁移后：v2 的常驻订阅是 `ctx.at({script,pos})`（v1 的
+    //   `ctx.trigger.afterPosition(...)` 行已不存在）。只改 `from` / `to` 的**落点**，
+    //   判据与 guard 一个字不动（仍是"`start` 里多一次 `ctx.input.click`"）。
     from:
-      '            ctx.trigger.afterPosition(DRAWOBJ_SCRIPT, DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {\n',
+      '        drawSub = ctx.at({ script: DRAWOBJ_SCRIPT, pos: DRAWOBJ_ENTRY_LO }, (tick, next) => {\n',
     to:
-      '            ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
-      '            ctx.trigger.afterPosition(DRAWOBJ_SCRIPT, DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {\n',
+      '        ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
+      '        drawSub = ctx.at({ script: DRAWOBJ_SCRIPT, pos: DRAWOBJ_ENTRY_LO }, (tick, next) => {\n',
     guard: 'ctest:plugin-field-switch',
     ctest: 'plugin-field-switch',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-plugin-field-switch',
     what:
-      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click`（插在 DRAWOBJ 入口触发之前）⇒ ' +
+      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click`（插在 DRAWOBJ 入口订阅之前）⇒ ' +
       '开关又开始驱动输入（guest 与 readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红' +
       '（剥注释后代码里出现 `ctx.input`）',
   },
@@ -4665,10 +4671,11 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
       '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
+      '               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
       '        return !impl_->tasks.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();  // 变异：不把 once 当存活来源\n',
+      '               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n' +
+      '        // 变异：不把 once 当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4686,10 +4693,11 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
       '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
+      '               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
       '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->at_subs.empty();  // 变异：不把 onTick 订阅当存活来源\n',
+      '               !impl_->wait_anys.empty() || !impl_->at_subs.empty();\n' +
+      '        // 变异：不把 onTick 订阅当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4724,10 +4732,11 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
       '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
+      '               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
       '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
-      '               !impl_->hook_handlers.empty();  // 变异：不把 at 订阅当存活来源\n',
+      '               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty();\n' +
+      '        // 变异：不把 at 订阅当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',

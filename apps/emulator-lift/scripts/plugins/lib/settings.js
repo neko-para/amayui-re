@@ -6,6 +6,11 @@
 //   也有一份。四份语义**不完全一样**（`precheck` 收 `"true"`、`on` 只收数字…），改一处另一处静默过期。
 //   ⇒ 本文件是"config > `--plugin-param` > 默认"这条优先级的**唯一**实现。
 //
+// ★ v2（2026-11-28）：语义全留（`ctx.config` / `ctx.params` 是"保留"面，不是兼容层）；唯一改动是
+//   日志从 `ctx.log` 换成**全局 `log`**（`log.warn`）。`ctx.config` 的门 = **Run 侧入口**
+//   （Run 回调 / task continuation / 泵；P0 起 tick handler 里经存下来的 RunCtx 也可用）⇒
+//   "每拍重读配置"在 tick handler 里是**允许**的（`field-point-visible` 的 live 语义靠这条）。
+//
 // 口径（父级裁决 `.tmp/settings-overlay/decision.md` D1/D3）：
 //   · `openConfigDomain` 只在 `config.available === true` 时返回域对象；否则 **null**（完全回退 params）。
 //     ★ 调用点用 `domain === null || !domain.has(k)` 收窄（⛔ 不要 `@ts-ignore`、⛔ 不要把类型改宽）。
@@ -314,7 +319,7 @@ export function slotSetting(ctx, domain, fallback, domainId) {
  * 写入形状：`{ "<plugin-domain>": { title, live, entries: { <key>: { type, label, default?, min?, max?, step? } } } }`；
  * 有 `owner` 时多一个 `owner` 字段（= 插件名，设置页小节标题的归属前缀）。
  * ★ 先 `all()` 比一下：**相同就不写**（⛔ 不产生每 Run 一次的脏写）。
- * ★ **永不抛错**：任何 `set` 失败（超上限 / 只读 / 没有 appdata）只落一行 `ctx.log("warn", …)`。
+ * ★ **永不抛错**：任何 `set` 失败（超上限 / 只读 / 没有 appdata）只落一行 `log.warn(…)`。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {SettingsSpec} spec 插件自报的 schema。
@@ -338,10 +343,10 @@ export function registerSettings(ctx, spec) {
                 receipt !== null && receipt !== undefined && typeof receipt.code === "string"
                     ? receipt.code
                     : "not_applied";
-            logWarn(ctx, `settings.schema: ${spec.domain} 没写进去（${code}）`);
+            logWarn(`settings.schema: ${spec.domain} 没写进去（${code}）`);
         }
     } catch (e) {
-        logWarn(ctx, `settings.schema: 注册 ${String(spec !== null && spec !== undefined ? spec.domain : "?")} 失败：${messageOf(e)}`);
+        logWarn(`settings.schema: 注册 ${String(spec !== null && spec !== undefined ? spec.domain : "?")} 失败：${messageOf(e)}`);
     }
 }
 
@@ -423,15 +428,16 @@ function sameEntry(left, right) {
 /**
  * 唯一允许的日志失败面：注册失败写一行 warn，**⛔ 不再抛**。
  *
- * @param {RunCtx} ctx RunCtx。
+ * ★ v2：用**全局 `log`**（`log.warn`；与 `ctx.log` 同一份宿主实现 —— 一行一条 / 有界 / 去重）。
+ *
  * @param {string} message 文案。
  * @returns {void}
  */
-function logWarn(ctx, message) {
+function logWarn(message) {
     try {
-        ctx.log("warn", message);
+        log.warn(message);
     } catch (e) {
-        // ⛔ 连日志都失败时也不许打死 Run（`ctx.log` 的失败不是本插件的失败）。
+        // ⛔ 连日志都失败时也不许打死 Run（`log` 的失败不是本插件的失败）。
         const ignored = /** @type {any} */ (e);
         void ignored;
     }

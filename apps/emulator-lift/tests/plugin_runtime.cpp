@@ -2957,6 +2957,131 @@ void caseRenderAfterFinish() {
 }
 
 // =====================================================================================
+// P1-fix S2 · `ctx.waitAny(arms, { timeoutMs })`（多臂 + wall-clock 失败截止 + hook.clear 收口）
+//
+// 判据（每条都点名"红了 = 什么坏了"）：
+//   · `plugin/wait-any`：两条臂 `{pos:0x200}`（第 0 条）/ `{pos:0x100}`（第 1 条）；
+//     派发 0x100 ⇒ 第 1 条胜出：`{index:1}` 对（⛔ 不是"第一条"）、**两条临时 hook 都撤掉**、
+//     task 的 continuation 在本入口 drain 里跑完（log 行）、Run 收口 `run=done`。
+//     红了 = index 张冠李戴 / 输的那条留在 hook 表（Run 只能等超时）。
+//   · `plugin/wait-any-timeout`：两条都不命中 + `timeoutMs=1` ⇒ 泵先 reject（catch 能 log）、
+//     随后 `fail Run`（reason 点名 `wait-any timeout`；用户 catch 了也照样 fail）；hook 表清空。
+//     红了 = 超时只 reject 不 fail（静默挂到 `--time-limit`）/ 条目残留。
+//   · `plugin/wait-any-timeout-finish`：catch 里 `ctx.finish(5, "<v1 原文案>")` 后再 throw
+//     （`gates.js` 的真实形状）⇒ 终态不许被翻成 failed：readout `run=finished exit=5` + 原文案。
+//   · `plugin/wait-any-clear`：`ctx.hook.clear()`（v1 onTrigger 里调）撤掉整组臂 ⇒ 整组 reject
+//     （catch 能 log；不 fail Run）⇒ task settle ⇒ Run **收口**（`run=done`，不是 `run=waiting`）。
+//     红了 = `on_released` 只摘账不 reject ⇒ task 永远 pending ⇒ 只能等 `--time-limit`。
+// =====================================================================================
+bool loadWaitAny(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("wait-any.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+void caseWaitAny() {
+    // ---- ① 非第一条命中：index 对、另一条 hook 已撤 ----
+    lift_test::g_current_case = "plugin/wait-any";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "two-arms")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：装 2 条临时 hook + task await waitAny
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+        LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+        const std::uint64_t base = f.host->logLines();
+        // ★ 命中**第 1 条臂**（pos 0x100）；第 0 条（0x200）不命中。
+        dispatchInstr(f, kInstrPos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        // 赢家自己 + 输的那条都不许留（不留 pending）。
+        LIFT_CHECK(f.host->instrHookList().empty());
+        LIFT_CHECK(!lift::instrHooksActive());
+        // task 的 continuation 在本次派发的 drain 里跑完 ⇒ log 行含 index=1 / pos=0x100。
+        LIFT_CHECK(f.host->logLines() > base);
+        const std::string& last = f.host->lastLogLine();
+        LIFT_CHECK(last.find("wait-any: index=1") != std::string::npos);
+        LIFT_CHECK(last.find("pos=256") != std::string::npos);
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ② 超时（不 catch 到"不算失败"）：先 reject（catch log）再 fail Run ----
+    lift_test::g_current_case = "plugin/wait-any-timeout";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "timeout")) return;
+        f.pump();  // start：两条臂 + timeoutMs=1
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+        const std::uint64_t base = f.host->logLines();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(f.host->failed());
+        const std::string& reason = f.host->failReason();
+        LIFT_CHECK(reason.find("wait-any timeout") != std::string::npos);
+        LIFT_CHECK(reason.find("script=FIELD.BIN") != std::string::npos);
+        // catch 在**泵**里 drain 到了（那行 log 是 catch 打的 ⇒ "先 reject 再 fail"）。
+        LIFT_CHECK(f.host->logLines() > base);
+        LIFT_CHECK(f.host->instrHookList().empty());
+        LIFT_CHECK(f.host->readout().find("run=failed") != std::string::npos);
+        std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
+    }
+    // ---- ③ catch 里 finish(5) + throw（gates.js 形状）：终态不许被翻成 failed ----
+    lift_test::g_current_case = "plugin/wait-any-timeout-finish";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "timeout-finish")) return;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(f.host->finished());
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(f.host->finishCode(), 5);
+        const std::string line = f.host->readout();
+        LIFT_CHECK(line.find("run=finished") != std::string::npos);
+        LIFT_CHECK(line.find("exit=5") != std::string::npos);
+        LIFT_CHECK(line.find("run=failed") == std::string::npos);
+        LIFT_CHECK(f.host->finishReason().find("load-save: gate timeout (load:expect:BTL.BIN)") !=
+                   std::string::npos);
+        LIFT_CHECK(f.host->instrHookList().empty());
+        std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+    }
+}
+
+void caseWaitAnyClear() {
+    lift_test::g_current_case = "plugin/wait-any-clear";
+    Fixture f;
+    if (!loadWaitAny(f, "clear")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：2 条臂 + task await；再 arm v1 触发（clear 的入口）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    const std::uint64_t base = f.host->logLines();
+    // v1 触发 ⇒ onTrigger 里 `ctx.hook.clear()` ⇒ 整组被外部撤掉 ⇒ reject（catch 在同一入口 drain）。
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->logLines() > base);  // catch 真的跑了（整组被 reject）
+    LIFT_CHECK(f.host->instrHookList().empty());
+    // ★ 关键：不许出现"一直 waiting 直到 --time-limit"（task 必须 settle ⇒ Run 收口）。
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+// =====================================================================================
 // S2c · `ctx.at(where, (tick, next) => …)` 的同步订阅面（链 / next 截断 / off / Tick / stale）
 //
 // 红 = 同点多订阅被 v1 去重拒掉 / 链不按注册序 / `next()` 截断失效 / `off` 不撤账 /
@@ -5383,6 +5508,9 @@ int main() {
     caseBareOnceKeepsRun();
     caseOnTickKeepsRun();
     caseOnceHookClear();
+    // ---- P1-fix S2（`ctx.waitAny`：多臂 / wall-clock 失败截止 / `hook.clear` 收口）----
+    caseWaitAny();
+    caseWaitAnyClear();
     caseTaskFinishThenReject();
     caseRenderAfterFinish();
     // ---- S2c（`ctx.at` 的同步订阅面 / 链 / next 截断 / off / Tick 只读面 / stale）----

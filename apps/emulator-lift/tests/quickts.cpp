@@ -276,7 +276,8 @@ void expectIdentical(const char* what, const CompileResult& off, const CompileRe
 }
 
 // ---------------------------------------------------------------------------------------
-// ① 16 个发行 .js（全部是 ES module；经 `rg '^\s*(import|export)\s'` 取证）
+// ① 15 个发行 .js（全部是 ES module；经 `rg '^\s*(import|export)\s'` 取证）
+//   ★ 2026-11-28：v1 的 `plugins/lib/chains.js`（`route`）已随插件 v2 迁移删除 ⇒ 清单 16 → 15。
 // ---------------------------------------------------------------------------------------
 constexpr const char* kLiftScripts[] = {
     "plugins/field-point-visible.js",
@@ -286,7 +287,6 @@ constexpr const char* kLiftScripts[] = {
     "plugins/scenario-save07-battle.js",
     "plugins/scenario-save10-field.js",
     "plugins/lib/boot-to-title.js",
-    "plugins/lib/chains.js",
     "plugins/lib/gates.js",
     "plugins/lib/guest-globals.js",
     "plugins/lib/save.js",
@@ -323,7 +323,7 @@ void caseJsBytecodeIdentical() {
             ++compared;
         }
     }
-    LIFT_CHECK_EQ_I64(compared, 16);
+    LIFT_CHECK_EQ_I64(compared, 15);
 }
 
 // ---------------------------------------------------------------------------------------

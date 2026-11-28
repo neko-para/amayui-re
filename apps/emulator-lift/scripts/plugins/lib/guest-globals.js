@@ -1,20 +1,26 @@
 // scripts/plugins/lib/guest-globals.js —— **guest global** 的常量 + 操作（数字只在这里写一次）
 //
-// 口径：
-//   · `kind` 只有 `"int"` / `"uint"` / `"float"` 走 `ctx.read.global.get` / `ctx.edit.global.set`
+// 口径（v2，2026-11-28）：
+//   · `kind` 只有 `"int"` / `"uint"` / `"float"` 走 `ctx.read.global.get` / `tick.edit.global.set`
 //     （`"string"` 型的 set 本实现未实现 ⇒ 调用即 TypeError；见 `scripts/plugins/plugin.d.ts`）。
+//   · **读 = `ctx.read`**（RunCtx 上的只读口；`readWired()` 不绑 `in_callback_` ⇒ tick handler /
+//     task continuation 里用存下来的 RunCtx 读**合法**）。⛔ 不要用 `Tick.local` 替代：那读的是
+//     当前帧的 local，与全局池 id 不是同一个地址空间。
+//   · **写 = `tick.edit`**（P0 起 `ctx.edit` / `ctx.input` 在 tick / continuation 里仍是 TypeError
+//     ⇒ 写函数**收 Tick**，调用方传刚 `await` 到的那一拍）。
 //   · 读**失败**在 API 里没有错误通道 ⇒ 宿主抛 TypeError（`script_quickjs.cpp` 的
 //     `jsCtxReadGlobalGet`：⛔ 不返回 0 冒充读数）。所以本文件**不**吞读异常 —— 让它穿到宿主，
 //     归因里带 `file:line`（吞掉就变成"静默地什么都没改"）。
 //   · 写**失败**有回执：`{ accepted, queued, applied, seq, id, code? }`（Edit 立即 ⇒ `accepted == applied`）。
 //     `applied === false` ⇒ **warn（带 code / accepted / before / after）并返回 false**；
-//     ⛔ 本文件不 `ctx.fail`（是否致命由调用方决定），⛔ 不静默。
+//     ⛔ 本文件不 `ctx.fail`（是否致命由调用方决定），⛔ 不静默。日志走**全局 `log`**（v2；`ctx.log` 已弃用）。
 //   · ⛔ 别处不许再裸写这些 id / 位（守卫 `tools/test/script-map.test.mjs` 与 `0x…` 字面量同一条规则）。
 //
 // 怎么查（控制层，同一条读法）：
 //   `node tools/emu-ctl.mjs global-get --kind int --index 0xb1b6 --json`
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Tick} Tick */
 /** @typedef {import("@amayui/lift-plugin").Receipt} Receipt */
 
 /**
@@ -80,31 +86,32 @@ export function hex(value) {
  *
  * ★ 调用时机由调用方决定：**载入完成之后、在 FIELD 上做**（载入会还原脚本 / global 状态，
  *   在 TITLE 上置位会被随后的载入覆盖）。
+ * ★ v2：读走 `ctx.read`，写走**这一拍的 Tick**（`tick.edit`）—— `ctx.edit` 在 task continuation 里
+ *   是 TypeError（`inCallback` 门），只有 Tick 的写面被放开。
  *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get` / `ctx.edit.global.set` / `ctx.log`）。
+ * @param {RunCtx} ctx RunCtx（用 `ctx.read.global.get`）。
+ * @param {Tick} tick 刚 `await ctx.once(...)` 到的 Tick（用 `tick.edit.global.set`）。
  * @returns {boolean} 写成功（`applied !== false`）⇒ true；否则 warn 后 false。
  */
-export function hideBattleHelp(ctx) {
+export function hideBattleHelp(ctx, tick) {
     const before = ctx.read.global.get("int", BATTLE_HELP_GLOBAL_ID);
     const after = (before | BATTLE_HELP_HIDE_BIT) >>> 0;
     /** @type {Receipt | null | undefined} */
-    const receipt = ctx.edit.global.set("int", BATTLE_HELP_GLOBAL_ID, after);
+    const receipt = tick.edit.global.set("int", BATTLE_HELP_GLOBAL_ID, after);
     const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
     if (!applied) {
         const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
             ? String(receipt.code)
             : "unknown";
         const accepted = receipt !== null && typeof receipt === "object" ? String(receipt.accepted) : "unknown";
-        ctx.log(
-            "warn",
+        log.warn(
             `guest-globals: hideBattleHelp 未生效（战斗帮助可能照旧出现）— ` +
                 `global=${BATTLE_HELP_GLOBAL_ID} bit=${BATTLE_HELP_HIDE_BIT} ` +
                 `before=${hex(before)} after=${hex(after)} accepted=${accepted} applied=${String(applied)} code=${code}`,
         );
         return false;
     }
-    ctx.log(
-        "info",
+    log.info(
         `guest-globals: hideBattleHelp ⇒ global=${BATTLE_HELP_GLOBAL_ID} ` +
             `before=${hex(before)} after=${hex(after)}（bit ${BATTLE_HELP_HIDE_BIT} 置位）`,
     );
@@ -206,36 +213,6 @@ export function readIntGlobal(ctx, id) {
 }
 
 /**
- * 读一格 int global，并**响亮失败**（`null` 之外的形状一律 throw）—— 给"读数即证据"的调用方用。
- *
- * @param {RunCtx} ctx RunCtx。
- * @param {number} id raw 池下标。
- * @returns {number}
- */
-export function readIntGlobalStrict(ctx, id) {
-    return readIntGlobal(ctx, id) >>> 0;
-}
-
-/**
- * 一次性读 `FIELD_OBJECT_TYPE_GLOBAL_ID` / `FIELD_OBJECT_FLAGS_GLOBAL_ID` 的 32 槽快照。
- *
- * @param {RunCtx} ctx RunCtx。
- * @returns {{ slot: number, type: number, flags: number }[]} 下标 0..31（`[0]` 恒不用）。
- */
-export function readFieldObjectSlots(ctx) {
-    /** @type {{ slot: number, type: number, flags: number }[]} */
-    const out = [];
-    for (let slot = 0; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
-        out.push({
-            slot,
-            type: readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot),
-            flags: readIntGlobal(ctx, FIELD_OBJECT_FLAGS_GLOBAL_ID + slot),
-        });
-    }
-    return out;
-}
-
-/**
  * 把"有点位且类型命中"的槽的**派生渲染位**补上"要画"这一位：`flags |= 0x1`。
  *
  * ★ 为什么只写 bit0（2026-11-26 最终模型，取证见文件头）：
@@ -248,13 +225,15 @@ export function readFieldObjectSlots(ctx) {
  *     与 `FIELD` 的战利品抽取消费）、⛔ 不碰 bit2（静态 / 动效选择位）。
  *   · 作用面 = `50ff9f`（派生表）⇒ 不是改"这一点位发现过没有"的真值；持久输入一个都不写。
  *   · 只在 `on == 1` 时由调用方调用；`on == 0` ⇒ 连这个函数都不进（0 读 / 0 写）。
+ * ★ v2：读走 `ctx.read`、写走**这一拍的 Tick**（`tick.edit.global.set`）。
  *
- * @param {RunCtx} ctx RunCtx。
+ * @param {RunCtx} ctx RunCtx（用 `ctx.read.global.get`）。
+ * @param {Tick} tick 本拍的 Tick（用 `tick.edit.global.set`）。
  * @param {{ types?: number[] | null }} [options] 参与强制的类型（缺省 = 採集 + 発掘）。
  * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]}
  *   类型命中的槽的逐槽读数（`applied=false` = bit0 本来就有 / 写回执失败）。
  */
-export function forceFieldPointsVisible(ctx, options) {
+export function forceFieldPointsVisible(ctx, tick, options) {
     const types = options !== null && options !== undefined && Array.isArray(options.types)
         ? options.types
         : [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
@@ -272,13 +251,13 @@ export function forceFieldPointsVisible(ctx, options) {
             continue;
         }
         /** @type {Receipt | null | undefined} */
-        const receipt = ctx.edit.global.set("int", id, after);
+        const receipt = tick.edit.global.set("int", id, after);
         const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
         if (!applied) {
             const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
                 ? String(receipt.code)
                 : "unknown";
-            ctx.log("warn", `guest-globals: forceFieldPointsVisible 未生效 — slot=${slot} global=${hex(id)} ` +
+            log.warn(`guest-globals: forceFieldPointsVisible 未生效 — slot=${slot} global=${hex(id)} ` +
                 `before=${hex(before)} after=${hex(after)} code=${code}`);
         }
         changed.push({ slot, type, before, after, applied });

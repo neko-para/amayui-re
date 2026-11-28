@@ -6,7 +6,7 @@
 //     （第一屏 = `LOAD 010..019`）⇒ 那一行点空 ⇒ `await position SBUNKI` 超时 / `exit 5` / `pending=51`；
 //   · 用户的既定口径：**「`loadsave` 里面应该要自行判断到底是哪一页」** ⇒ 翻页这件事属于 `save.js` 的 `loadSave`
 //     （它自己读页号 `0x138e`、按更短方向点左右大箭头、等页号真的变、翻完等列表刷新），⛔ 不在场景里重算坐标。
-//   ⇒ 本文件 = `bootToTitle` → `loadSave(9, { expect })` → 本场景（三层 `route`，见下）。
+//   ⇒ 本文件 = `bootToTitle(t)` → `loadSave(t, 9, { expect })` → 本场景（一条 `ctx.task` 的顺序 `await`）。
 //
 // 用法（cwd = apps/emulator-lift；**今天的 `saves/`** 即可，不需要 `git archive` 还原 2026-11-21 那份）：
 //   scripts/clean-appdata.sh ../../.tmp/fellow-js/appdata-1
@@ -26,14 +26,14 @@
 //   ⇒ 窗口 = `click` → 等 `SETTOOLLIST` → 等回 `FELLOW` → 等 FELLOW 主轮询体 `[0x1570,0x15A8)` → `profile.end`
 //   （`profile.begin/end` 夹住的窗口名沿用配方里的 `s1-to-avaro` / `s1-to-fia` / `s2-…` / `s3-…`，
 //     方便与 `.tmp/fellow-profile/` 那份已入库读数（`docs/03-emulator/perf-fellow-switch.md` §3.2）对齐）
-//   ⛔ 全篇零 `wait` / 零 `afterDelay`：每一道等都是 guest 可见状态门。
+//   ⛔ 全篇零 `wait` / 零 `delay`：每一道等都是 guest 可见状态门。
 //
 // ★ 右键为什么**不**手写 down/up，也**不**在回调体那一拍直接点：
 //   · `.plan` 当年要 `mouse_down` → 等回主轮询体 → 等下一趟读段 → `mouse_up`，因为单发 `click … right`
 //     实测会丢（抬起落在**同一个** guest 回调里 ⇒ 回调体的电平状态机没看见按下）。
 //   · 插件这条路上**没有**分开发 press/release 的手段：`ctx.input.down/up` 根本不施加
 //     （`src/runtime/intent_executor.cpp` 的 `IntentStep`：`MouseDown`/`MouseUp` 是 C1 的**不施加**档）
-//     ⇒ 只剩一条 `ctx.input.click(x, y, "right")` 可用。
+//     ⇒ 只剩一条 `tick.input.click(x, y, "right")` 可用。
 //   · ⇒ 点的那一拍**往后挪到回调尾的读输入段**：按下在回调尾落地、抬起要等之后两个 KeyLevel 读点
 //     （`PointerCore::releaseDue` 闸门①）⇒ 按下必然跨过至少一个完整 guest 回调，也就是 `.plan`
 //     那个形状压成一条 click。★ 这是本文件对"哪一拍点"的**唯一**新增判断依据。
@@ -51,17 +51,22 @@
 //     → `6 次切换全部走完` → `run=finished exit=0`（进程 exit 0）。
 //   ⚠ 这 3 次只证明"这个形状在这台机器上连过 3 次"，不是"结构上不可能被吞"——闸门②' 那条仍然缺。
 //
-// ★ 结构（同 `./scenario-save10-field.js`）：**三层 `route`，前缀两两不相交**
-//     boot:     启动到 TITLE            （`./lib/boot-to-title.js`）
-//     load:     载入存档 + 翻页 + 终态  （`./lib/save.js` 的 `loadSave`；前提是已经在 TITLE）
-//     scenario: 载入之后的场景动作      （本文件）
-//   外层剥 `boot:`，内层剥 `load:`，剩下全是 `scenario:`。
-// ★ **无状态**：进度只在 `ev.name`（宿主每回调新建实例也能接旧链 —— `plugin-runtime.md` §4.6；
-//   ⛔ 不把进度塞进闭包 / `ctx.state`）。
+// ★ v2 结构（2026-11-28）：**一条 `ctx.task`，六轮 `for` 循环**：
+//     bootToTitle(t) → loadSave(t, 9, { expect }, titleTick)
+//     → REIGN 回调体门 → move → REIGN 读输入段门 → 右键
+//     → for (const sw of SWITCHES) { FELLOW 读输入段门 → profile.begin → click → SETTOOLLIST →
+//       回 FELLOW → FELLOW 主轮询体门 → profile.end }
+//     → t.finish(0, "scenario-fellow: 6 switches done")
+//   v1 的 `scenario:<kind>:<i>` 具名状态 + 6×4 预注册门**不再需要**：P0 起 `ctx.once` 可以在 task
+//   continuation 里注册 ⇒ 每一轮按顺序等下一道门即可（动态链就是 async 链）。
+//   `profile.begin/end` 也走 Run 侧门（P0）⇒ 6 个窗口照旧；`finish(0)` 在 continuation 里可用。
+// ★ **无模块级进度状态**：轮次是局部 `for` 循环（`SWITCHES` 只是**数据**，不是进度）。
+//
+// ★ 超时那拍**不** `profile.end()`：超时可能没有开着的窗口，硬关会 TypeError；半开的窗口随 Run 收口
+//   一起放着（v1 同一条）。`awaitPosition` 超时 = `finish(5)` + 结束。
 
 import { bootToTitle } from "./lib/boot-to-title.js";
-import { route } from "./lib/chains.js";
-import { awaitPosition, awaitScript, failOnTimeout, failOnUnknown } from "./lib/gates.js";
+import { awaitPosition, awaitScript } from "./lib/gates.js";
 import { loadSave } from "./lib/save.js";
 import {
     FELLOW_POLL_HI,
@@ -75,20 +80,10 @@ import {
 } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
-/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
-/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
-/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
-/**
- * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./lib/chains.js` 的 `Chain` 同形）。
- *
- * @typedef {object} Chain
- * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
- * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
- */
 
 // marker 身份 = **文件名**（含 `.BIN`；C1 的门是精确 `==`，⛔ 不剥后缀）。
-// ★ `SETTOOLLIST.BIN` 只当**脚本身份**用（`afterScript`），没有一个取证过的位置区间 ⇒ 它不是位置常量。
+// ★ `SETTOOLLIST.BIN` 只当**脚本身份**用（`{script}` = 该脚本下一条指令），没有一个取证过的位置区间
+//   ⇒ 它不是位置常量。
 const SCRIPT_REIGN = "REIGN.BIN";
 const SCRIPT_FELLOW = "FELLOW.BIN";
 const SCRIPT_SETTOOLLIST = "SETTOOLLIST.BIN";
@@ -113,7 +108,7 @@ const FELLOW_TIMEOUT_MS = 120000;
 const SWITCH_TIMEOUT_MS = 60000;
 
 // 6 次切换（顺序 = 配方 ⑤ 的 3 轮 × 2 个方向；窗口名逐字沿用 `s1-to-avaro` … `s3-to-fia`）。
-// ⛔ 这是**数据**，不是进度：链上哪一步只看 `ev.name` 里的下标。
+// ⛔ 这是**数据**，不是进度：`for` 的下标就是进度。
 /** @type {ReadonlyArray<{ label: string, x: number }>} */
 const SWITCHES = [
     { label: "s1-to-avaro", x: AVARO_X },
@@ -124,25 +119,11 @@ const SWITCHES = [
     { label: "s3-to-fia", x: FIA_X },
 ];
 
-// 场景状态名一律 `scenario:` 前缀（`route` 只看前缀，三层两两不相交）；进度全在名字里。
+// 场景门名一律 `scenario:` 前缀（与 v1 逐字同名；失败文案按它分链）；只是一条 `ctx.task` 里的
+// 顺序门，⛔ 不再参与路由。
 const SCENARIO_PREFIX = "scenario:";
 const REIGN_NAME = "scenario:reign";
 const REIGN_CLICK_NAME = "scenario:reign-click";
-
-/**
- * 从 `scenario:<kind>:<下标>` 里取下标；不是这个形状 / 越界 ⇒ -1（调用方按 `ctx.fail` 响亮拒绝）。
- *
- * @param {string} name
- * @param {string} kind
- * @returns {number}
- */
-function stepOf(name, kind) {
-    const parts = name.split(":");
-    if (parts.length !== 3 || parts[0] !== "scenario" || parts[1] !== kind) return -1;
-    const i = Number(parts[2]);
-    if (!Number.isInteger(i) || i < 0 || i >= SWITCHES.length) return -1;
-    return i;
-}
 
 /** @param {number} i @returns {string} */
 const fellowName = (i) => `${SCENARIO_PREFIX}fellow:${i}`;
@@ -153,133 +134,90 @@ const backName = (i) => `${SCENARIO_PREFIX}back:${i}`;
 /** @param {number} i @returns {string} */
 const settleName = (i) => `${SCENARIO_PREFIX}settle:${i}`;
 
-/** @type {Chain} */
-const scenario = {
-    // 载入链到终态 ⇒ 本函数被调起（`onLoaded`）：此刻脚本已是 `REIGN.BIN`（或先到 `FIELD.BIN`）。
+/** @type {import("@amayui/lift-plugin").PluginModule} */
+const plugin = {
     start(ctx) {
-        ctx.log("info", "scenario-fellow: save loaded ⇒ 等 REIGN 的输入回调体（目录屏就绪）");
-        return awaitPosition(
-            ctx,
-            SCRIPT_REIGN,
-            REIGN_CALLBACK_LO,
-            REIGN_CALLBACK_HI,
-            REIGN_NAME,
-            REIGN_TIMEOUT_MS,
-        );
-    },
+        ctx.task(async (t) => {
+            const titleTick = await bootToTitle(t);
+            await loadSave(t, SLOT, { expect: EXPECT }, titleTick);
 
-    onTrigger(ctx, ev) {
-        // 场景自己的门超时：响亮收口（⛔ 不静默 done）。⚠ 这里**不** `profile.end()`：超时那拍可能没有开着的
-        // 窗口，硬关会抛错（`ctx.profile.end` 对"没开窗"是 TypeError）；半开的窗口随 Run 收口一起放着。
-        if (ev.kind === "timeout") {
-            failOnTimeout(ctx, ev, "scenario-fellow");
-            return [];
-        }
-        const name = String(ev.name);
-
-        if (name === REIGN_NAME) {
+            // 载入到终态（脚本已是 `REIGN.BIN` 或先到 `FIELD.BIN`）。
+            log.info("scenario-fellow: save loaded ⇒ 等 REIGN 的输入回调体（目录屏就绪）");
+            let tick = await awaitPosition(
+                t,
+                SCRIPT_REIGN,
+                REIGN_CALLBACK_LO,
+                REIGN_CALLBACK_HI,
+                REIGN_NAME,
+                REIGN_TIMEOUT_MS,
+                "scenario-fellow",
+            );
             // 第 1 拍：目录屏就绪（回调体）⇒ 先把光标放到目录中心，再等**它这一趟的读输入段**才点。
-            ctx.log(
-                "info",
+            log.info(
                 `scenario-fellow: REIGN 回调体到了 ⇒ move (${REIGN_MENU_X},${REIGN_MENU_Y}) 并等这一趟的读输入段`,
             );
-            ctx.input.move(REIGN_MENU_X, REIGN_MENU_Y);
-            return awaitPosition(
-                ctx,
+            tick.input.move(REIGN_MENU_X, REIGN_MENU_Y);
+            tick = await awaitPosition(
+                t,
                 SCRIPT_REIGN,
                 REIGN_READ_INPUT_LO,
                 REIGN_READ_INPUT_HI,
                 REIGN_CLICK_NAME,
                 REIGN_TIMEOUT_MS,
+                "scenario-fellow",
             );
-        }
-
-        if (name === REIGN_CLICK_NAME) {
             // 第 2 拍：在**回调尾的读输入段**提交单条右键 —— 按下落在回调尾、抬起要等之后两个 KeyLevel 读点
             // ⇒ 按下跨过一个完整 guest 回调（`.plan` 的 `mouse_down` → 门 → 门 → `mouse_up` 的那个形状）。
-            ctx.log(
-                "info",
+            log.info(
                 `scenario-fellow: REIGN 读输入段到了 ⇒ right click (${REIGN_MENU_X},${REIGN_MENU_Y}) 进 FELLOW`,
             );
-            ctx.input.click(REIGN_MENU_X, REIGN_MENU_Y, "right");
-            return awaitPosition(
-                ctx,
-                SCRIPT_FELLOW,
-                FELLOW_READ_INPUT_LO,
-                FELLOW_READ_INPUT_HI,
-                fellowName(0),
-                FELLOW_TIMEOUT_MS,
-            );
-        }
+            tick.input.click(REIGN_MENU_X, REIGN_MENU_Y, "right");
 
-        const iFellow = stepOf(name, "fellow");
-        if (iFellow >= 0) {
-            const sw = SWITCHES[iFellow];
-            ctx.log(
-                "info",
-                `scenario-fellow: FELLOW 输入读段到了 ⇒ profile_begin(${sw.label}) + click (${sw.x},${PORTRAIT_Y})`,
-            );
-            ctx.profile.begin(sw.label);
-            ctx.input.click(sw.x, PORTRAIT_Y);
-            return awaitScript(ctx, SCRIPT_SETTOOLLIST, toolName(iFellow), SWITCH_TIMEOUT_MS);
-        }
-
-        const iTool = stepOf(name, "tool");
-        if (iTool >= 0) {
-            ctx.log("info", "scenario-fellow: SETTOOLLIST 到了 ⇒ 等回到 FELLOW");
-            return awaitScript(ctx, SCRIPT_FELLOW, backName(iTool), SWITCH_TIMEOUT_MS);
-        }
-
-        const iBack = stepOf(name, "back");
-        if (iBack >= 0) {
-            ctx.log("info", "scenario-fellow: 回到 FELLOW ⇒ 等主轮询体（切换完成后的稳态）");
-            return awaitPosition(
-                ctx,
-                SCRIPT_FELLOW,
-                FELLOW_POLL_LO,
-                FELLOW_POLL_HI,
-                settleName(iBack),
-                SWITCH_TIMEOUT_MS,
-            );
-        }
-
-        const iSettle = stepOf(name, "settle");
-        if (iSettle >= 0) {
-            ctx.log("info", `scenario-fellow: 窗口收口 profile_end(${SWITCHES[iSettle].label})`);
-            ctx.profile.end();
-            const next = iSettle + 1;
-            if (next < SWITCHES.length) {
-                // 下一轮的第一件事与第一轮同形：等 FELLOW 的**输入读段**（点得进去的那一档）再点。
-                return awaitPosition(
-                    ctx,
+            // ---- 6 轮 × 4 阶段（v1 的 `scenario:<kind>:<i>` 状态机 ⇒ 一个 for）----------------
+            for (let i = 0; i < SWITCHES.length; i += 1) {
+                const sw = SWITCHES[i];
+                // FELLOW 的**输入读段**（点得进去的那一档）—— 下一轮的第一件事与第一轮同形。
+                // ★ 超时与 v1 一致（P1 复审 S3）：第 1 轮用 `FELLOW_TIMEOUT_MS`（120 s，进目录屏
+                //   第一次要等列表就绪）；**第 2–6 轮**用 `SWITCH_TIMEOUT_MS`（60 s）—— v1 的
+                //   `awaitPosition(..., fellowName(next), SWITCH_TIMEOUT_MS)` 就是 60 s。
+                //   P1 迁移时 6 轮一律用了 120 s ⇒ 第 2–6 轮的失败截止被静默放宽一倍（没有用例会红，
+                //   但"卡在第 3 轮"要多等一分钟才报）。这里改回按轮取值，⛔ 不再统一。
+                tick = await awaitPosition(
+                    t,
                     SCRIPT_FELLOW,
                     FELLOW_READ_INPUT_LO,
                     FELLOW_READ_INPUT_HI,
-                    fellowName(next),
-                    SWITCH_TIMEOUT_MS,
+                    fellowName(i),
+                    i === 0 ? FELLOW_TIMEOUT_MS : SWITCH_TIMEOUT_MS,
+                    "scenario-fellow",
                 );
+                log.info(
+                    `scenario-fellow: FELLOW 输入读段到了 ⇒ profile_begin(${sw.label}) + click (${sw.x},${PORTRAIT_Y})`,
+                );
+                t.profile.begin(sw.label);
+                tick.input.click(sw.x, PORTRAIT_Y);
+                // 转场：`click` → `SETTOOLLIST` → 回 `FELLOW`（v1 的 `awaitScript`）。
+                await awaitScript(t, SCRIPT_SETTOOLLIST, toolName(i), SWITCH_TIMEOUT_MS, "scenario-fellow");
+                log.info("scenario-fellow: SETTOOLLIST 到了 ⇒ 等回到 FELLOW");
+                await awaitScript(t, SCRIPT_FELLOW, backName(i), SWITCH_TIMEOUT_MS, "scenario-fellow");
+                log.info("scenario-fellow: 回到 FELLOW ⇒ 等主轮询体（切换完成后的稳态）");
+                tick = await awaitPosition(
+                    t,
+                    SCRIPT_FELLOW,
+                    FELLOW_POLL_LO,
+                    FELLOW_POLL_HI,
+                    settleName(i),
+                    SWITCH_TIMEOUT_MS,
+                    "scenario-fellow",
+                );
+                log.info(`scenario-fellow: 窗口收口 profile_end(${sw.label})`);
+                t.profile.end();
             }
-            ctx.log("info", `scenario-fellow: ${SWITCHES.length} 次切换全部走完`);
-            ctx.finish(0, `scenario-fellow: ${SWITCHES.length} switches done`);
-            return [];
-        }
 
-        failOnUnknown(ctx, ev);
-        return [];
+            log.info(`scenario-fellow: ${SWITCHES.length} 次切换全部走完`);
+            t.finish(0, `scenario-fellow: ${SWITCHES.length} switches done`);
+        });
     },
 };
 
-// 载入链：`SAVE09` 落在 `REIGN.BIN`（`EXPECT` 见上）；到终态把控制权交给场景。
-const load = loadSave(SLOT, {
-    expect: EXPECT,
-    onLoaded: (ctx) => scenario.start(ctx),
-});
-
-// 启动链：TITLE 命中 ⇒ 才拉起载入链（"进程启动"与"读取存档"是两件事 —— `boot-to-title.js` 头）。
-const boot = bootToTitle({ onDone: (ctx) => load.start(ctx) });
-
-// 内层：`load:` 前缀（含它的 timeout）归载入链，其余（`scenario:`）归场景。`boot:` 已由外层剥掉。
-const afterBoot = route((ev) => String(ev.name).startsWith("load:"), load, scenario);
-
-// 外层：`boot:` 归启动链，其余交给内层。★ 三层前缀两两不相交 —— `route` 只看 `isFirst(ev)`。
-export default route((ev) => String(ev.name).startsWith("boot:"), boot, afterBoot);
+export default plugin;

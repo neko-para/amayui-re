@@ -1,4 +1,4 @@
-// scripts/plugins/load-save.js —— **根入口**：`loadSave` 的参考插件（S1 从 `lib/save.js` 拆出来）
+// scripts/plugins/load-save.js —— **根入口**：`loadSave` 的参考插件（S1 从 `lib/save.js` 拆出来；v2）
 //
 // 为什么在根（用户口径 2026-11-25）：
 //   · `--plugin` 的 id 只查 `scripts/plugins/` **根**（非递归），`lib/` **永远不是 id 目标**；
@@ -23,16 +23,17 @@
 //   `scriptListSetting` / `textSetting` / `intSetting` / `boolSetting`）；本文件只保留"哪几个 key + 默认值"。
 //   行为逐字不变（`slot` 的整数校验 / `expect` 归一 / `precheck` 并集语义 / `timeoutMs` 的正整数）。
 //
-// `slot`：非整数 / 越界 ⇒ `loadSave` 构造时 throw ⇒ 宿主记 `run=failed`（进程 exit 不受影响）。
+// `slot`：非整数 / 越界 ⇒ `loadSave` 调用时 throw ⇒ 宿主记 `run=failed`（进程 exit 不受影响）。
 // `expect`：裸名自动补 `.BIN`，带 `.BIN` 也接受。
 //
-// ★ 参考入口**自带 TITLE 门**（`./lib/boot-to-title.js`）：它可以在**任意启动点**当插件直接跑
-//   （`plugin/load-save-e2e` 就是这么用的），所以形状 = `boot:` 前缀归 boot、其余归 load。
+// ★ v2 形状（2026-11-28）：参考入口**自带 TITLE 门**（`./lib/boot-to-title.js`）—— 它可以在
+//   **任意启动点**当插件直接跑，所以形状 = 一条 `ctx.task`：
+//     `await bootToTitle(t, …)`（拿 TITLE 命中那一拍的 Tick）→ `await loadSave(t, slot, options, tick)`。
+//   ⛔ 没有 `onTrigger` / `route`；两段就是顺序 `await`（前缀分流的概念随 `lib/chains.js` 一起删了）。
 //   ⚠ 这与库接口不同：`loadSave(...)` 单独用时**调用方**保证已在 TITLE（`./lib/save.js` 文件头）。
 // ---------------------------------------------------------------------------
 import { bootToTitle } from "./lib/boot-to-title.js";
-import { route } from "./lib/chains.js";
-import { loadSave } from "./lib/save.js";
+import { loadSave, validateLoadSave } from "./lib/save.js";
 import {
     boolSetting,
     intSetting,
@@ -43,17 +44,13 @@ import {
 } from "./lib/settings.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {{ start: (ctx: RunCtx) => any, onTrigger: (ctx: RunCtx, ev: any) => any }} Chain */
+/** @typedef {import("@amayui/lift-plugin").ConfigDomain} ConfigDomain */
 /** @typedef {{ expect?: string[], saveDir?: string, timeoutMs?: number, precheck?: boolean }} LoadSaveOptions */
 
 /** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
 const CONFIG_DOMAIN = "save";
 /** `expect` 的默认落点（只在该入口既没有 config 也没有 params 时用；打一行 info 说明）。 */
 const DEFAULT_EXPECT = ["FIELD.BIN", "SC0000.BIN"];
-
-/**
- * @typedef {import("@amayui/lift-plugin").ConfigDomain} ConfigDomain
- */
 
 /**
  * 本入口的四个可选值：**唯一**的取配置入口 = `./lib/settings.js`（2026-11-25 抽取）。
@@ -81,47 +78,33 @@ function optionsFor(ctx, domain) {
     return options;
 }
 
-// ★ 参考入口的链**只构造一次**（一次 Run 内 config / params 不变；链本身无状态 ⇒ 缓存链对象
-//   不影响"进度只在 ev.name"）。⚠ 这**不是**在修预算问题：2026-11-21 实测缓存与"每次重建"
-//   在 `plugin/load-save-e2e` 上**同样**会撞 `onTrigger: callback budget exceeded: load:confirm2`
-//   （2 ms 那条线；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`，⛔ 不靠放宽预算 / 删日志来"修"）。
-//   ★ 2026-11-25：参数源改成 `ctx.config` 之后，**每拍重读 config 的代价也要省掉**
-//   （`domain()` 每次新建一个绑定对象 + 若干宿主调用；2 ms 窗口里那是可观测的份额）⇒ 第一次
-//   `chainFor` 之后直接复用整条链。
-/** @type {Chain | null} */
-let entryChain = null;
-
-/**
- * `boot:` 前缀归启动链（含它的 timeout），其余归载入链 —— 两段名字不相交（`./chains.js` 头）。
- *
- * @param {RunCtx} ctx
- * @returns {Chain}
- */
-function chainFor(ctx) {
-    if (entryChain !== null) return entryChain;
-    const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
-    const slot = slotSetting(ctx, domain, undefined, CONFIG_DOMAIN);
-    const load = loadSave(slot, optionsFor(ctx, domain));
-    const boot = bootToTitle({ onDone: (ctx2) => load.start(ctx2) });
-    entryChain = route((ev) => String(ev.name).startsWith("boot:"), boot, load);
-    return entryChain;
-}
-
-/** @type {Chain} */
+/** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
     start(ctx) {
+        // ★ config / params 的读取只在 `start`（Run 回调）里做一次：一次 Run 内它们不变
+        //   （v1 用模块级 `entryChain` 缓存省掉的就是这个；v2 的 task 只捕这一份值）。
         const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
         if (scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN) === null) {
-            ctx.log(
-                "info",
+            log.info(
                 `load-save: expect 未给 ⇒ 用默认 ${DEFAULT_EXPECT.join(",")}` +
                     `（写在 plugin-config.json 的 ${CONFIG_DOMAIN}.expect，或用 --plugin-param expect=FIELD,SC0000）`,
             );
         }
-        return chainFor(ctx).start(ctx);
-    },
-    onTrigger(ctx, ev) {
-        return chainFor(ctx).onTrigger(ctx, ev);
+        const slot = slotSetting(ctx, domain, undefined, CONFIG_DOMAIN);
+        const options = optionsFor(ctx, domain);
+        // ★ P1 复审 S3：**同步首段**先把纯参数校验跑掉（slot / expect / timeoutMs / saveDir / precheck），
+        //   再进 `ctx.task`。理由 = 找回 v1 的"**构造时**失败"时序：v1 在 `chainFor` 里构造
+        //   `loadSave(slot, …)`，坏 slot / 坏 expect 在**第一个 Run 回调**里就 throw ⇒ `run=failed`
+        //   并点名参数；P1 把校验留在 `loadSave()` 里（= `await bootToTitle` **之后**）会让它晚一步 ——
+        //   启动永远到不了 TITLE 时只报 boot 门超时，把"参数非法"与"启动没到"混成同一条。
+        //   ★ 这里不重复实现判据：`validateLoadSave` 与 `loadSave` 内部用的是**同一个**函数
+        //     （⛔ 不要在入口再抄一份范围 / 文案）。
+        validateLoadSave(slot, options);
+        ctx.task(async (t) => {
+            // TITLE 门的超时沿用 `bootToTitle` 的缺省（30000 ms；v1 参考入口也是缺省）。
+            const tick = await bootToTitle(t);
+            await loadSave(t, slot, options, tick);
+        });
     },
 };
 

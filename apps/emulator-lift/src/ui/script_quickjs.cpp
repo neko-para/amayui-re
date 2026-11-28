@@ -190,6 +190,31 @@ struct DelayEntry {
     std::uint64_t deadline_ns = 0;  // steadyNowNs() 绝对
     std::uint32_t ms = 0;
 };
+// ---- 插件（P1-fix S2）：`ctx.waitAny(arms, { timeoutMs })` 的待命中账 ----
+// ★ 语义（父级裁决）：`arms: AtWhere[]`（≥1）；**第一条命中胜出**，立刻撤掉其余臂的临时 hook；
+//   返回 `{ index, tick }`；`timeoutMs` 必填 > 0 ⇒ 到期 reject（reason 列出 arms），由泵 drain
+//   之后 fail Run（与 `once` 的"失败截止"同一条）。门 = Run 侧入口；计入 `hasPendingWork`。
+// ★ 实现 = **一组** `InstrHookKind::Once` 临时 hook（与 `ctx.once` 同一个 kind：被动观察者、
+//   不参与 at 链、算 Run 存活）+ 一条组账。⛔ 不复用 `onces` 的 1 句柄 : 1 账（多臂要一个整体结算）。
+// ★ `handles` / `wait_any_arms`（handle → 组 + 臂序）是**同一条账的两半**：正常结算（命中 / 超时）
+//   必须**先摘两半、再撤 hook**（与 `runOnceResolve` 同一条纪律）⇒ `on_released` 不会把这次
+//   正常结算当成"被 `hook.clear()` 撤掉"而再 reject 一次。
+struct WaitAnyEntry {
+    std::vector<std::uint32_t> handles;  // 各臂的临时 hook（下标 = arm index）
+    Value promise;
+    Value resolve;
+    Value reject;
+    std::uint64_t deadline_ns = 0;  // steadyNowNs() 绝对（timeoutMs 必填 > 0 ⇒ 恒非 0）
+    std::uint32_t timeout_ms = 0;
+    std::uint64_t serial = 0;       // 组号（日志 / 诊断）
+    std::string arms_text;          // `describeAtWhere` 的列表（timeout reason 用）
+};
+// handle → 它属于哪个组 / 第几条臂。`on_released` 只认这张表（`wait_anys` 按组号键）。
+struct WaitAnyArmRef {
+    std::uint64_t serial = 0;
+    std::uint32_t index = 0;
+};
+
 // ---- 插件（S2c）：`ctx.at` 的一条同步订阅 ----
 // ★ 与 `hook_handlers`（v1 `onTick`：1 句柄 : 1 handler、被动）**分开**：at 订阅参与链、算 Run 存活、
 //   失败摘**整条**订阅。`serial` 只给日志唯一性（`at #N`；`PluginHost::log` 会对连续同文去重）。
@@ -265,6 +290,11 @@ struct Impl {
     // ---- 插件（P0）：`ctx.delay(ms)`（见 `DelayEntry`）----
     std::map<std::uint32_t, DelayEntry> delays;
     std::uint32_t next_delay_serial = 1;
+    // ---- 插件（P1-fix S2）：`ctx.waitAny(arms, { timeoutMs })`（见 `WaitAnyEntry`）----
+    // ★ 组号 → 账；handle → (组号, 臂序)。两半必须在同一步摘（正常结算先摘再撤 hook）。
+    std::map<std::uint64_t, WaitAnyEntry> wait_anys;
+    std::map<std::uint32_t, WaitAnyArmRef> wait_any_arms;
+    std::uint64_t next_wait_any_serial = 1;
     // ---- 插件（P0）：**Run 侧入口**作用域（H1/H2 的落点）----
     // ★ 谁能调"注册 / 控制"面（`once` / `at` / `task` / `finish` / `fail` / `quit` / `profile` /
     //   `appdata.stat` / `config` / `delay`）：`call()`（Run 回调）、`runInstrHits()`（tick handler）、
@@ -381,6 +411,11 @@ struct Impl {
             onces.clear();
             // ★ P0：`ctx.delay` 的 resolve 也是 `Value` ⇒ 必须在这一行之前释放（不 resolve、不跑 JS）。
             delays.clear();
+            // ★ P1-fix S2：`ctx.waitAny` 的 promise/resolve/reject 同样是 `Value` ⇒ 同一时刻释放。
+            //   正常路径已由 `on_released`（整组被撤 ⇒ reject） / 命中 / 超时逐组清；这里兜住
+            //   "先 shutdown、后 releaseOwner"的顺序。
+            wait_anys.clear();
+            wait_any_arms.clear();
             tasks.clear();
             current_run_ctx.invalidate();
             JS_FreeContext(ctx);
@@ -409,6 +444,13 @@ struct Impl {
     //   为什么要清：那些 `resolve` 是 `Value`（必须在 `JS_FreeContext` 之前释放）；而且"Run 已
     //   收口还在账上"会让 `hasPendingWork()` 永远真（readout 只能等 `--time-limit`）。
     void clearDelays() { delays.clear(); }
+    // ★ P1-fix S2：Run 收口 ⇒ 丢掉 `waitAny` 的组账（**不 resolve、也不再跑 JS**）。
+    //   正常路径 `releaseRunHooks` 会先 `instrHookReleaseOwner` ⇒ `on_released` 逐组 reject + 摘账；
+    //   这里兜住"没有 hook 可撤 / 顺序不同"的残余（与 `clearDelays` 同一条纪律）。
+    void clearWaitAnys() {
+        wait_anys.clear();
+        wait_any_arms.clear();
+    }
 };
 
 // ★ P0：**Run 侧入口**作用域（H1/H2 取消的落点）。`value=true` 用于 `call()` / `runInstrHits()` /
@@ -2071,6 +2113,8 @@ JSValue jsCtxHookClear(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxOnce(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- P0：`ctx.delay(ms)` → `Promise<void>`（墙钟；NON-DIFFABLE；由泵推进）----
 JSValue jsCtxDelay(JSContext*, JSValueConst, int, JSValueConst*);
+// ---- P1-fix S2：`ctx.waitAny(arms, { timeoutMs })` → `Promise<{index, tick}>` ----
+JSValue jsCtxWaitAny(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxTask(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- S2c：同步订阅面（`at` / `off`）与 Tick 的只读 `local` ----
 JSValue jsCtxAt(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2560,6 +2604,8 @@ bool buildRunCtx(Impl& impl, Value* out) {
     //   `task` 登记一个 async 协程。三者都让 Run 保持存活（`PluginScript::hasPendingWork`）。
     if (ok) ok = setFunction(ctx, obj.raw(), "once", jsCtxOnce, 2, nullptr);
     if (ok) ok = setFunction(ctx, obj.raw(), "delay", jsCtxDelay, 1, nullptr);
+    // ★ P1-fix S2：多臂等待（第一条命中胜出；wall-clock 超时 = 失败截止）——见 `WaitAnyEntry`。
+    if (ok) ok = setFunction(ctx, obj.raw(), "waitAny", jsCtxWaitAny, 2, nullptr);
     if (ok) ok = setFunction(ctx, obj.raw(), "task", jsCtxTask, 1, nullptr);
     // ---- S2c：同步订阅面 = { at, off }（只 RunCtx）----
     //   `at` / `once` / `task` / `delay` 的门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；
@@ -3884,6 +3930,148 @@ std::string describeAtWhere(const lift::InstrHookWhere& where) {
     return "?";
 }
 
+// =====================================================================================
+// P1-fix S2 · `ctx.waitAny(arms, { timeoutMs })` → `Promise<{ index, tick }>`
+//
+// 语义（父级裁决，写死）：
+//   · `arms` = **至少 1 条** `AtWhere`（与 `ctx.at` / `ctx.once` 同一个 `readAtWhere`，五种形态）；
+//     形状非法 / 空数组 ⇒ **TypeError**（⛔ 不返回一个永远不会 settle 的 Promise）；
+//   · 返回 `Promise<{ index, tick }>`：`index` = 第几条臂（注册序），`tick` = 命中那一拍的 Tick
+//     （与 `ctx.once` 的 Tick 同形；它的临时条目已结算 ⇒ `tick.patch` 回执 `once_tick`）；
+//   · **第一条命中胜出**（同一次派发里按注册序），其余臂的临时 hook **立刻撤掉**（不留 pending）；
+//   · `timeoutMs` **必填且 > 0**：到期 ⇒ **先 reject**（reason 列出全部 arms；让 `catch` 在泵里
+//     drain 到、可以 log），随后泵记 timeout 并在 drain 之后 **fail Run**（与 `once` 的失败截止
+//     同一条；用户 catch 了也照样 fail —— 除非它自己 `finish`）；
+//   · 门 = **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation / 泵）；render 里 TypeError；
+//   · 计入 `hasPendingWork`（等待期间 Run 保持存活）；Run 收口清账（`onRunClosed`）；
+//   · `ctx.hook.clear()` / `handle.clear()` / owner release 撤掉臂 ⇒ 整组被外部清掉时 reject
+//     （⛔ 不留下永不 settle 的 Promise —— 否则 Run 只能等 `--time-limit`）。
+// ★ 实现 = 一组 `InstrHookKind::Once` 临时 hook（被动观察者、与 `once` 同一个 kind）+ 一条组账；
+//   ⛔ 不用 `ctx.at` 多订阅：那需要 JS 侧 `off` 竞态（`waitFirst` 的老实现），且超时只能靠 guest 状态。
+// =====================================================================================
+JSValue jsCtxWaitAny(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.waitAny: 只用于 Run 侧入口（Run 回调 / task continuation / 泵）里");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.waitAny(arms, { timeoutMs })");
+        if (!JS_IsArray(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: arms 必须是 AtWhere[]（至少 1 条）");
+        }
+        std::uint32_t arm_count = 0;
+        {
+            Value len_v = qjs::getProperty(ctx, argv[0], "length");
+            if (len_v.isException()) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.waitAny: arms.length 读取失败");
+            }
+            if (!qjs::toUint32(ctx, len_v.raw(), &arm_count)) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.waitAny: arms.length 必须是数字");
+            }
+        }
+        if (arm_count == 0) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: arms 至少 1 条（空数组 = 永远不会命中）");
+        }
+        // ★ 上限：每条臂 = 一条临时 hook（与 `ctx.at` 同一个 runtime 表）；给一个响亮的硬上限，
+        //   ⛔ 不静默接受一个能在一拍里装几千条 hook 的调用。
+        if (arm_count > 32) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: arms 最多 32 条（收到 %u）", arm_count);
+        }
+        if (!JS_IsObject(argv[1])) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: opts 必须是 { timeoutMs }（timeoutMs 必填且 > 0）");
+        }
+        std::string why;
+        // ★ **先校验全部 where**：任何一条非法 ⇒ TypeError，且**一条 hook 都还没装**（不留半组）。
+        std::vector<lift::InstrHookWhere> wheres;
+        std::string arms_text;
+        wheres.reserve(arm_count);
+        for (std::uint32_t i = 0; i < arm_count; i += 1) {
+            Value item = Value(ctx, JS_GetPropertyUint32(ctx, argv[0], i));
+            if (item.isException()) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.waitAny: arms[%u] 读取失败", i);
+            }
+            lift::InstrHookWhere where;
+            if (!readAtWhere(ctx, item.raw(), &where, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.waitAny: arms[%u] %s", i, why.c_str());
+            }
+            if (!arms_text.empty()) arms_text += ", ";
+            arms_text += describeAtWhere(where);
+            wheres.push_back(where);
+        }
+        std::int64_t timeout = 0;
+        if (!readPluginInt(ctx, argv[1], "timeoutMs", true, 0, &timeout, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: %s", why.c_str());
+        }
+        if (timeout <= 0) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.waitAny: opts.timeoutMs 必填且 > 0（0 / 缺省 = 不允许永不结束的等待）");
+        }
+        const std::uint64_t now_ns = steadyNowNs();
+        const std::uint64_t timeout_u = static_cast<std::uint64_t>(timeout);
+        if (timeout_u > (std::numeric_limits<std::uint64_t>::max() - now_ns) / 1'000'000ull) {
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: opts.timeoutMs 过大（deadline 溢出）");
+        }
+        const std::uint64_t timeout_ns = timeout_u * 1'000'000ull;
+
+        // ★ 与 `ctx.once` 同一条：**先建 Promise 再注册 hook**（失败路径一律返回 Promise）。
+        JSValue funcs[2] = {JS_UNDEFINED, JS_UNDEFINED};
+        Value promise(ctx, JS_NewPromiseCapability(ctx, funcs));
+        if (promise.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.waitAny: Promise 创建失败");
+        }
+        Value resolve_fn(ctx, funcs[0]);
+        Value reject_fn(ctx, funcs[1]);
+
+        std::vector<std::uint32_t> handles;
+        handles.reserve(arm_count);
+        for (std::uint32_t i = 0; i < arm_count; i += 1) {
+            const char* code = nullptr;
+            const std::uint32_t handle =
+                host->instrHookAddWhere(wheres[i], lift::InstrHookKind::Once, &code);
+            if (handle == 0) {
+                // ★ 半组装失败：把已经装上的臂逐条撤掉（⛔ 留下"没有账的幽灵 hook"）。
+                for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+                rejectOnceValue(ctx, reject_fn.raw(),
+                                std::string("ctx.waitAny: 第 ") + std::to_string(i) + " 条臂注册失败（" +
+                                    (code != nullptr ? code : "unknown") + "）");
+                return promise.take();
+            }
+            handles.push_back(handle);
+        }
+        const std::uint64_t serial = impl->next_wait_any_serial++;
+        WaitAnyEntry entry;
+        entry.handles = handles;
+        entry.promise = promise.dup();
+        entry.resolve = std::move(resolve_fn);
+        entry.reject = std::move(reject_fn);
+        entry.deadline_ns = now_ns + timeout_ns;
+        entry.timeout_ms = static_cast<std::uint32_t>(timeout);
+        entry.serial = serial;
+        entry.arms_text = arms_text;
+        try {
+            impl->wait_anys.emplace(serial, std::move(entry));
+            for (std::uint32_t i = 0; i < handles.size(); i += 1) {
+                impl->wait_any_arms[handles[i]] = WaitAnyArmRef{serial, i};
+            }
+        } catch (...) {
+            // 入账失败（分配失败）⇒ 撤掉全部臂 + 摘两半账，⛔ 不留幽灵。
+            impl->wait_anys.erase(serial);
+            for (const std::uint32_t h : handles) impl->wait_any_arms.erase(h);
+            for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+            throw;
+        }
+        return promise.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.waitAny: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
 JSValue jsCtxAt(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
@@ -4465,6 +4653,80 @@ void runDelayDue(Impl& impl, std::uint32_t serial) {
     if (ignored.isException()) qjs::clearException(impl.ctx);
 }
 
+// =====================================================================================
+// P1-fix S2 · `ctx.waitAny` 的命中 / 超时结算
+// =====================================================================================
+
+/**
+ * 摘掉一组的**两半账**（`wait_anys` + `wait_any_arms`）并返回它的 handles。
+ *
+ * ★ 顺序 = 承重（与 `runOnceResolve` 同一条）：**先摘账、再撤 hook** ⇒ 逐条 `instrHookRemove` 触发的
+ *   `on_released` 找不到这张 handle（⇒ 不会把一次正常结算当成"整组被 `hook.clear()` 撤掉"而再 reject）。
+ * ⛔ 返回的 handles 由调用方撤（本函数不 `instrHookRemove`：超时路径要先 reject 再撤）。
+ */
+std::vector<std::uint32_t> takeWaitAnyHandles(Impl& impl, std::uint64_t serial) {
+    std::vector<std::uint32_t> handles;
+    const auto it = impl.wait_anys.find(serial);
+    if (it == impl.wait_anys.end()) return handles;
+    handles = it->second.handles;
+    for (const std::uint32_t h : handles) impl.wait_any_arms.erase(h);
+    impl.wait_anys.erase(it);
+    return handles;
+}
+
+// 命中：组 `{ index, tick }` → resolve → 摘两半账 → 撤**整组** hook（含赢家自己）。
+// ★ `makeTickObject` 必须先把 `hit.script` 拷进 JS 字符串（同 `runOnceResolve`）。
+void runWaitAnyResolve(Impl& impl, std::uint64_t serial, std::uint32_t index,
+                       const lift::InstrHit& hit) {
+    const auto group = impl.wait_anys.find(serial);
+    if (group == impl.wait_anys.end()) return;
+    Value tick;
+    if (!makeTickObject(impl, hit, /*once=*/true, &tick)) {
+        // 组 Tick 失败（宿主分配失败）⇒ 与"注册失败"同一口径：reject + 撤整组（⛔ 不 fail Run）。
+        rejectOnceValue(impl.ctx, group->second.reject.raw(), "ctx.waitAny: 组 Tick 失败");
+        const std::vector<std::uint32_t> handles = takeWaitAnyHandles(impl, serial);
+        for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+        return;
+    }
+    // ★ 返回 `{ index, tick }`（`index` 是**注册序**的臂下标；`tick` 与 `ctx.once` 的 Tick 同形）。
+    Value result = qjs::newObject(impl.ctx);
+    bool built = !result.isException();
+    if (built) {
+        built = defineReadOnly(impl.ctx, result.raw(), "index",
+                               qjs::newInt32(impl.ctx, static_cast<std::int32_t>(index))) &&
+                defineReadOnly(impl.ctx, result.raw(), "tick", std::move(tick));
+    }
+    if (!built) {
+        qjs::clearException(impl.ctx);
+        rejectOnceValue(impl.ctx, group->second.reject.raw(), "ctx.waitAny: 结果对象创建失败");
+        const std::vector<std::uint32_t> handles = takeWaitAnyHandles(impl, serial);
+        for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+        return;
+    }
+    // `group` 在 resolve 之后仍有效（erase 在下一行）；resolve 只排队微任务，不在本次 JS_Call 里跑
+    // continuation ⇒ 可以在它之后马上撤 hook。
+    JSValueConst args[1] = {result.raw()};
+    Value ignored(impl.ctx, JS_Call(impl.ctx, group->second.resolve.raw(), JS_UNDEFINED, 1, args));
+    if (ignored.isException()) qjs::clearException(impl.ctx);
+    const std::vector<std::uint32_t> handles = takeWaitAnyHandles(impl, serial);
+    for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+}
+
+// 超时：reject（reason 列出全部 arms + timeoutMs）→ 摘两半账 → 撤整组。**不在这里 fail Run** ——
+// 与 `runOnceTimeout` 同一条：先 drain 让 `catch` 有机会 log，fail 统一由 `pumpImpl` 在 drain 之后做。
+bool runWaitAnyTimeout(Impl& impl, std::uint64_t serial, std::string* reason_out) {
+    const auto it = impl.wait_anys.find(serial);
+    if (it == impl.wait_anys.end()) return false;
+    const std::string reason = "wait-any timeout (#" + std::to_string(it->second.serial) + "): [" +
+                               it->second.arms_text + "]（timeoutMs=" +
+                               std::to_string(it->second.timeout_ms) + "）";
+    rejectOnceValue(impl.ctx, it->second.reject.raw(), reason);
+    const std::vector<std::uint32_t> handles = takeWaitAnyHandles(impl, serial);
+    for (const std::uint32_t h : handles) lift::instrHookRemove(h);
+    if (reason_out != nullptr && reason_out->empty()) *reason_out = reason;
+    return true;
+}
+
 // 每个入口末尾（drain 之后）检查 task：FULFILLED ⇒ 移除；REJECTED ⇒ **fail Run**；PENDING ⇒ 保留。
 // ★ S2b-1（复审 S2-1）：判据是 `runTerminal()`（failed / finished / quit / runner failed），
 //   ⛔ 不是只判 `failed()`：`ctx.finish()` / `ctx.quit()` 之后同一入口里拒绝的 task 若走 `fail()`，
@@ -4515,8 +4777,10 @@ void settleTasks(Impl& impl, lift::ui::PluginCallHost* host) {
 void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Budget& budget) {
     if (impl.ctx == nullptr) return;
     // ★ P0：Run 已到终态 ⇒ 不再推进任何异步状态（`delay` 的 resolve 也不调）：清表 + 早退。
+    // ★ P1-fix S2：Run 已到终态 ⇒ `waitAny` 的组账也一并丢（⛔ 不留 pending / 不再跑 JS）。
     if (host != nullptr && host->runTerminal()) {
         impl.clearDelays();
+        impl.clearWaitAnys();
         return;
     }
     // ★ P0：泵是 **Run 侧入口** ⇒ 里面的 continuation 可以注册 once/at/task、可以 finish/fail/quit、
@@ -4540,6 +4804,15 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
     std::string timeout_reason;
     for (const std::uint32_t handle : expired) {
         runOnceTimeout(impl, handle, &timeout_reason);
+    }
+    // ①b `ctx.waitAny` 的组 deadline（同一把墙钟；与 once 同一条"先 reject、drain 之后 fail"）。
+    std::vector<std::uint64_t> expired_any;
+    for (const auto& kv : impl.wait_anys) {
+        if (now_ns >= kv.second.deadline_ns) expired_any.push_back(kv.first);
+    }
+    std::string wait_any_reason;
+    for (const std::uint64_t serial : expired_any) {
+        runWaitAnyTimeout(impl, serial, &wait_any_reason);
     }
 
     // ② 同一 CPU 预算窗 drain（先保存外层的 7 个字段）。
@@ -4590,6 +4863,10 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
     // ⑤ timeout 是**失败截止**：drain 已让 catch 有机会 log，现在才 fail（用户 catch 了也照样 fail）。
     if (!timeout_reason.empty() && host != nullptr && !host->runTerminal()) {
         host->fail("once-timeout", timeout_reason);
+    }
+    // ⑤b `ctx.waitAny` 的超时同一条：`catch` 里 `finish(5)` 了 ⇒ runTerminal 已真 ⇒ 不覆盖读数。
+    if (!wait_any_reason.empty() && host != nullptr && !host->runTerminal()) {
+        host->fail("wait-any-timeout", wait_any_reason);
     }
     // 恢复外层字段（`overran` = 外层 or 泵自己的；别把泵的超预算读数冲掉）。
     impl.deadline_ns = prev_deadline_ns;
@@ -4691,13 +4968,17 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) {
         const std::uint32_t handle = hits[i].handle;
         const bool is_once = impl.onces.find(handle) != impl.onces.end();
-        const bool is_sub = !is_once && impl.at_subs.find(handle) != impl.at_subs.end();
-        const bool is_v1 = !is_once && !is_sub &&
+        const bool is_wait_any = !is_once && impl.wait_any_arms.find(handle) != impl.wait_any_arms.end();
+        const bool is_sub = !is_once && !is_wait_any && impl.at_subs.find(handle) != impl.at_subs.end();
+        const bool is_v1 = !is_once && !is_wait_any && !is_sub &&
                            impl.hook_handlers.find(handle) != impl.hook_handlers.end();
-        if (!is_once && !is_sub && !is_v1) continue;  // 别的 Impl 的句柄：⛔ 不参与本实例的任何判定
+        if (!is_once && !is_wait_any && !is_sub && !is_v1) {
+            continue;  // 别的 Impl 的句柄：⛔ 不参与本实例的任何判定
+        }
         if (owner_first == n) owner_first = i;
         any = true;
-        if (!is_once) need_tick = true;
+        // `once` / `waitAny` 的 Tick 由各自的 resolve 造（不是链共享的那一个）。
+        if (!is_once && !is_wait_any) need_tick = true;
     }
     if (!any || owner_first == n) return;
 
@@ -4768,6 +5049,16 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
                 // ---- 被动观察者：once（命中即 resolve；截断不影响）----
                 if (impl.onces.find(handle) != impl.onces.end()) {
                     runOnceResolve(impl, handle, hits[i]);
+                    js_called = true;
+                    continue;
+                }
+                // ---- 被动观察者：`ctx.waitAny` 的一条臂（第一条命中胜出；截断不影响）----
+                //   ★ 命中 ⇒ resolve `{index, tick}` + 撤**整组** hook。`hits` 已物化成值 ⇒ 同一次派发里
+                //     后面的臂即使也在数组里，查到 `wait_any_arms` 已被摘掉就跳过（不会二次 resolve）。
+                const auto any_arm = impl.wait_any_arms.find(handle);
+                if (any_arm != impl.wait_any_arms.end()) {
+                    const WaitAnyArmRef ref = any_arm->second;
+                    runWaitAnyResolve(impl, ref.serial, ref.index, hits[i]);
                     js_called = true;
                     continue;
                 }
@@ -4907,6 +5198,35 @@ void implOnInstrReleased(void* user, std::uint32_t handle) {
         if (it != impl->onces.end()) {
             rejectOnceValue(impl->ctx, it->second.reject.raw(), "once 被清掉 / hook cleared");
             impl->onces.erase(it);
+        }
+        // ★ P1-fix S2：`ctx.waitAny` 的臂走同一条。**只在整组被外部清掉时 reject**（臂不在公开
+        //   句柄里 ⇒ 外部清 = `hook.clear()` / owner release / `instrHookClear()`，都是**整组**）。
+        //   逐条通知时先摘掉这条臂的映射，再看组里还有没有**活着的**臂（`instrHookStats` 仍能查到）；
+        //   还有 ⇒ 继续等（别的臂仍可命中），没有 ⇒ reject 整组。
+        //   ★ 正常结算（命中 / 超时）是"先摘两半账、再撤 hook"⇒ 这里查不到 ⇒ 不会二次 reject。
+        const auto arm_it = impl->wait_any_arms.find(handle);
+        if (arm_it != impl->wait_any_arms.end()) {
+            const std::uint64_t serial = arm_it->second.serial;
+            impl->wait_any_arms.erase(arm_it);
+            const auto group = impl->wait_anys.find(serial);
+            if (group != impl->wait_anys.end()) {
+                bool any_live = false;
+                for (const std::uint32_t h : group->second.handles) {
+                    lift::InstrHookStatus st;
+                    if (h != handle && lift::instrHookStats(h, &st)) {
+                        any_live = true;
+                        break;
+                    }
+                }
+                if (!any_live) {
+                    rejectOnceValue(impl->ctx, group->second.reject.raw(),
+                                    "waitAny 被清掉 / hook cleared");
+                    for (const std::uint32_t h : group->second.handles) {
+                        impl->wait_any_arms.erase(h);
+                    }
+                    impl->wait_anys.erase(group);
+                }
+            }
         }
         // ★ S2c：v2 订阅的账（`ctx.hook.clear()` / `handle.clear()` / Run 收口 / `ctx.off` 都走这里）。
         impl->at_subs.erase(handle);
@@ -6486,8 +6806,9 @@ public:
     bool hasPendingWork() const override {
         if (impl_ == nullptr) return false;
         // ★ P0：`ctx.delay` 也是待推工作（等待期间 Run 必须活着，否则到期没人推进）。
+        // ★ P1-fix S2：`ctx.waitAny` 的组账同理（多臂还没命中 / 没超时 ⇒ Run 不能收口）。
         return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||
-               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();
+               !impl_->wait_anys.empty() || !impl_->hook_handlers.empty() || !impl_->at_subs.empty();
     }
 
     // ★ S2b：非 tick 入口的泵（唯一实现 = `pumpImpl`；调用点 = `PluginHost::onReadPoint` /
@@ -6501,7 +6822,10 @@ public:
     //   `PluginHost::releaseRunHooks()` 是唯一调用点（fail / finish / quit / runner done /
     //   budget 超限 / 卸载 / 析构都经它）⇒ 不新增"第二个收口点"。
     void onRunClosed() override {
-        if (impl_ != nullptr && impl_->ctx != nullptr) impl_->clearDelays();
+        if (impl_ != nullptr && impl_->ctx != nullptr) {
+            impl_->clearDelays();
+            impl_->clearWaitAnys();
+        }
     }
 
     void shutdown() override { impl_->shutdown(); }

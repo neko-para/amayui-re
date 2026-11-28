@@ -1,4 +1,4 @@
-// scripts/plugins/lib/save.js —— `loadSave(slot)`：**纯 JS 的 callback 链构造器**（C2c）
+// scripts/plugins/lib/save.js —— `loadSave(ctx, slot, options, titleTick)`：**async 载入链**（v2）
 //
 // ★ **S1（2026-11-25）起本文件只是「库」**：只有具名导出 `loadSave` / `SAVE_DIR_REL` 等，
 //   **没有 `export default`、没有 entry 解析**（config 域 `save` / `--plugin-param` / 默认值那套
@@ -6,22 +6,30 @@
 //   理由（用户口径）：`--plugin` 的 id 只查 `scripts/plugins/` 根（非递归），`lib/` 只被 import
 //   ⇒ 「需要单独加载的入口」必须在根上；库永远不是 id 目标。
 //
-// 合同：`.tmp/plugin-runtime/c2c-decisions.md`（D-C2C-1…6）/ `scripts/plugins/plugin.d.ts`
-//       （`RunCtx` / `Trigger` / `FiredEvent` / `TimeoutEvent`）。
+// 合同：`scripts/plugins/plugin.d.ts`（`RunCtx` / `Tick` / `AtWhere`）。
+//
+// ★ v2 形状（2026-11-28）：**一个 async 函数**，不再是 `{ start, onTrigger }` 的具名链。
+//   · 调用方先 `await bootToTitle(t)` 拿到 TITLE 命中那一拍的 `Tick`，再
+//     `await loadSave(t, slot, { expect }, titleTick)`；返回值 = **载入终态命中那一拍的 Tick**
+//     （场景接续用它做 `hideBattleHelp` 之类的写）。
+//   · 每道门 = `await ctx.once(where, { timeoutMs })`；失败文案 / `finish(5)` 语义由 `./gates.js`
+//     逐字保留（`load-save: gate timeout (load:save)` …）。`ctx.once` 的门 = **Run 侧入口**
+//     （P0 起 task continuation 里可注册）⇒ 动态页链可以"翻一页 → 判 → 再等下一拍"地写。
+//   · 写面（click / move）= 刚 `await` 到的那一拍的 `Tick`（`ctx.input` 在 continuation 里是
+//     TypeError）。
 //
 // ★ **前提：调用方保证已经在 TITLE**（2026-11-21 起，TITLE 门不再在本文件里）：
-//   `start(ctx)` 的第一件事就是 `click(1070,480)`（TITLE 的 LoadData 入口），然后 arm SAVE 门。
-//   从**冷启动**跑 ⇒ 用 `./boot-to-title.js` 的 `bootToTitle({ onDone: (ctx) => load.start(ctx) })`
-//   盖在前面（三段组合的样板 = `../scenario-save07-battle.js`，入口在 plugin 根）。
+//   `run` 的第一件事就是 `titleTick.input.click(1070,480)`（TITLE 的 LoadData 入口），然后等 SAVE 门。
+//   从**冷启动**跑 ⇒ 先 `await bootToTitle(ctx)`（样板 = `../scenario-save07-battle.js`）。
 //   ⚠ 不在 TITLE ⇒ 这一下点不进 LoadData ⇒ SAVE 门超时（`load-save: gate timeout (load:save)`）。
 //     那是**响亮失败**、也是本文件想要的形态：⛔ 不自己再等一轮 TITLE（那会把"启动没到"与
 //     "TITLE 上没点进去"混成同一条超时）。
 //
 // 链（slot 5 实测；**终态 = 调用方给的 `expect`**，⛔ 本文件不内置场景清单）：
 //   click(1070,480) → SAVE [0x1104,0x11C4)
-//   → move(300,rowY) → 读点 → click(300,rowY) → SBUNKI [0x0B18,0x0C58)
+//   → move(300,rowY) → 下一拍 → click(300,rowY) → SBUNKI [0x0B18,0x0C58)
 //   → click(640,323) → [expect 里任一脚本 | SBUNKI 0x0AF8]：
-//        expect 命中 ⇒ done（给了 `onLoaded` 就交给它续）
+//        expect 命中 ⇒ done（返回那一拍的 Tick）
 //        SBUNKI [0x0AF8,0x0B18) ⇒ click(690,323) → [expect 里任一脚本] ⇒ done
 //   ★ 为什么确认点击等 [0x0B18,0x0C58)：同一张「要读取吗？」对话框，`save07-battle.plan` 头的
 //     `--input-plan-trace` 读数 —— 轮询体 [0x09A4,0x09F8) 与读段 [0x0AF8,0x0B18) 里点会被吞
@@ -37,8 +45,8 @@
 //   ⇒ `slot` → 目标页 `t = slot / 10`（向下取整）、页内行 `slot % 10`；进屏时先读当前页，再**翻过去**：
 //     · 翻页**只用左右大箭头**（左 `(45,357)` = −1 页、右 `(1235,357)` = +1 页，环形 0..89），
 //       方向按"更短的那一边"选（`pageStep`）。
-//     · 每点一次都**用门等页号真的变**：arm `atReadPoint`，回调里 `readSavePage`；位置动了 ⇒ 按新位置再走一步；
-//       没动满 `PAGE_STALL_LIMIT` 个读点 ⇒ 重试**一次**；再等满一次还没动 ⇒ `ctx.finish(5, …)` 响亮失败
+//     · 每点一次都**等页号真的变**：每拍读一次页号；位置动了 ⇒ 按新位置再走一步；
+//       没动满 `PAGE_STALL_LIMIT` 拍 ⇒ 重试**一次**；再等满一次还没动 ⇒ `finish(5, …)` 响亮失败
 //       （⛔ 不假设"点一下就到下一页"、⛔ 不用 `wait`、⛔ 不无限重试）。
 //     · 页内行行为**一字不变**（0..7 既有读数照旧；8–9 是新补的行）。
 //   ★ 页的读数与取证（2026-11-22 / win32）：
@@ -63,17 +71,28 @@
 //     救不回来** ⇒ `finish(5, "page not reached (target 0, still 1)")`
 //     （= `REQ-01M86VRRTPY8W9RP1SFDT0N200` 的签名）。此外那记多余的重试点击会在页号已变之后落地，
 //     把页**又**翻一格（0 → 89）⇒ 之后按页内行 y 点下去落到空槽（= `load:sbunki` 超时的另一条路）。
-//   ⇒ 修法（本文件）：预算改 **1200**（≈2.6× 实测上界 461 读点）⇒ 正常时 `turn` 自己就看到页号变、
+//   ⇒ 修法（v1）：预算改 **1200 个读点**（≈2.6× 实测上界 461 读点）⇒ 正常时 `turn` 自己就看到页号变、
 //   **不产生**重试点击；只有点击真丢了才重试。另在点行**之前**再核一次页号（不符就回页链、⛔ 不点行）。
+//   （★ v2 的采样单位变成 "SAVE 回调"，1200 这个数字**不适用** —— 见下面 §v2 采样频率与
+//   `PAGE_STALL_LIMIT` 处的重算：205 拍 ≈ 同一墙钟 ≈3.31 s。）
 //   ★ **真游戏 A/B（同一份 `saves/`、同一个 exe）**：把第一下箭头点击**故意点空**（= 模拟"第一下被吞"）⇒
 //     旧 60：`run=finished exit=5 reason=load-save: page not reached (target 0, still 1)`（calls=126）；
 //     新 1200：`page 0 reached` → `reached REIGN.BIN`（calls=723）⇒ 重试窗口是这条链唯一的救命面。
 //   ⛔ 没有放宽任何门（判据仍是"页号真的等于目标页"）；⛔ 没改 `saves/`；⛔ 没有用 `--input-plan`。
+//   ★ v2 的采样频率（2026-11-28；**复审 S1 订正**）：v1 的预算单位是**读点**（366/s）；v2 用
+//     `{script:"SAVE.BIN", pos:SAVE_INPUT_CALLBACK_LO}` 采样 = **每个 SAVE 回调一拍**（回调体入口
+//     指令每回调执行一次）。先量**单位的速率**（`.tmp/plugin-v2/p1fix-save-rate.js`：`ctx.at` 计数 +
+//     `ctx.delay(3000)`）：**61.9 个回调/s**（3/3 run：62.00 / 62.00 / 61.67）；同窗口 `--frame-log`
+//     ≈ 26 fps ⇒ **1 个回调 ≈ 2.4 帧**（复审"1 拍 ≈ 1 帧 / 18 fps"的估法不成立）。
+//     ⇒ `PAGE_STALL_LIMIT` **不能沿用 1200**，也不能按"18 fps ⇒ 60"（那只有 ≈0.97 s = v1 的 1/3）；
+//     按同一墙钟目标重算得 **205**（≈3.31 s；算法与余量见常量定义处）。
+//     ⛔ 不要用 `{script:"SAVE.BIN"}`（= 下一条**指令**）当采样：频率高一个量级 ⇒ 预算会在
+//     ~10 ms 内烧完（远小于实测 210 ms）⇒ 正常点击会被误判成"丢了"。
 //
 // ★ 2026-11-25 —— **缺 `SAVE<NN>.DAT` 在第一个 click 之前就报**（本轮的第二个修复）：
 //   以前缺文件要等 SAVE 屏点行不弹确认框 ⇒ 30 s 门超时（`load-save: gate timeout (load:sbunki)`），
-//   症状和"点击被吞"混在一起。现在 `start(ctx)` 先 `ctx.appdata.stat(<saveDir>/SAVE<NN>.DAT)`：
-//   缺 ⇒ `ctx.finish(5, "load-save: save file missing: <绝对路径> (slot N)")` + 返回 `[]`，
+//   症状和"点击被吞"混在一起。现在 `run(ctx, …)` 先 `ctx.appdata.stat(<saveDir>/SAVE<NN>.DAT)`：
+//   缺 ⇒ `ctx.finish(5, "load-save: save file missing: <绝对路径> (slot N)")` + 结束，
 //   **一个 click 都不发**。只查 `.DAT`（`.STH` 缺失不阻止读档；`SAVE.DAT` 不是槽索引）；
 //   槽 0..99（≥100 的字形未取证 ⇒ 跳过 + warn）；没有 `--appdata` / stat 报 denied/io ⇒ 跳过 + warn
 //   （⛔ 不误杀）。★ 2026-11-25 订正：`saveDir` **目录不存在**（全新 / 空 appdata）也算缺文件 ⇒
@@ -84,34 +103,33 @@
 // ★ 2026-11-21（A 阶段）—— **两个接口，各管一件事**：
 //   · `options.expect: string[]`（**必填**）：载入完成后落在哪个脚本，由**调用方按预期给** ——
 //     ADV = `SC*` / `SG*` / `SP*`（如 `SC0000.BIN`）、战斗 = `BTL.BIN`、地图 = `FIELD.BIN`（可能还有别的名字）。
-//     照宿主读数拼写、**带 `.BIN`**。终态 = `expect.map((s) => afterScript(s, { name: "load:expect:" + s }))`。
-//     缺 / 空数组 / 元素不是非空字符串 ⇒ **构造时 throw**（消息里给出三类别名，⛔ 不猜）。
-//   · `options.onLoaded(ctx)`：到终态**先 log 再回调**；它的返回值就是本次 `onTrigger` 的返回值
-//     （`Trigger | Trigger[] | null`）。⛔ 没给 `onLoaded` 时行为一字不变（`return []`）；
-//     它抛错就让它穿到宿主（⛔ 不 try/catch、⛔ 不代它 fail）。
-//   · ★「载入 → 场景」的**组合**不在本文件：那是使用方拿 `./chains.js` 的 `route(isFirst, first, then)`
-//     自己拼（样板 `../scenario-save07-battle.js`）。本文件**不认识场景**。
+//     照宿主读数拼写、**带 `.BIN`**。终态 = 每个 `expect` 一条 `at` 臂（`{script}` = 该脚本下一条指令）
+//     + 一条 SBUNKI 第二道确认臂；第一条命中的臂赢（`./gates.js` 的 `waitFirst`）。
+//     缺 / 空数组 / 元素不是非空字符串 ⇒ **调用时 throw**（消息里给出三类别名，⛔ 不猜）。
+//   · ★ v2 删掉 `options.onLoaded`：场景现在就是 `loadSave` 之后的顺序 `await`（调用方拿返回的
+//     Tick 自己做下一步），不需要回调把控制权交回去。
 //
 // ★ **本文件没有 default 导出**（S1）：`--plugin <本文件>` 不再是合法用法（id 也不查 `lib/`）。
 //   要"直接当插件跑"请用根入口 `scripts/plugins/load-save.js`（`--plugin load-save` 或给路径）；
 //   它负责 config > `--plugin-param` > 默认 的那套取值，再调本文件的 `loadSave`。
-// 库消费者请用具名 `export function loadSave(slot, { expect, … })`。
-//   ★ 本文件只 import **同目录的兄弟文件**（`./guest-globals.js` / `./script-positions.js`）：
+// 库消费者请用具名 `export async function loadSave(ctx, slot, { expect, … }, titleTick)`。
+//   ★ 本文件只 import **同目录的兄弟文件**（`./gates.js` / `./guest-globals.js` / `./script-positions.js`）：
 //   宿主 QJS 的 import 根 = **入口文件所在目录** ⇒ 入口在根上时，根入口用 `./lib/…` import 本文件，
 //   本文件再用同目录 `./x.js` 找兄弟（向下 import 允许；⛔ 向上 `..` 越根会被 QJS 拒）。
 //
 // ★ 失败面（全部响亮，⛔ 不静默）：
-//   ① slot 非整数 / 不在 0–`MAX_SLOT`（899 = 90 页 × 10 行，界面能选到的范围）⇒ **构造时** throw（参考入口在 `start` 里构造 ⇒ Run fail + 点名）；⚠ 槽 ≥100 的文件名字形**未取证**；
-//   ①' `expect` 缺 / 空 / 元素不是非空字符串 ⇒ **构造时** throw（消息给出 ADV / 战斗 / 地图三类别名）；
-//   ② 未知 `ev.name` ⇒ `ctx.fail(ev.name, …)` + `[]`；
-//   ③ 门超时（`timeoutMs`）⇒ `ctx.finish(5, "load-save: gate timeout …")` + `[]`。
+//   ① slot 非整数 / 不在 0–`MAX_SLOT`（899 = 90 页 × 10 行，界面能选到的范围）⇒ **调用时** throw
+//      （根入口在 `start` 里调 ⇒ Run fail + 点名）；⚠ 槽 ≥100 的文件名字形**未取证**；
+//   ①' `expect` 缺 / 空 / 元素不是非空字符串 ⇒ **调用时** throw（消息给出 ADV / 战斗 / 地图三类别名）；
+//   ② 未知 / 等不到的状态 ⇒ 现在没有"未知事件"这回事（v2 没有 `onTrigger`），门等不到 = `once` 超时；
+//   ③ 门超时（`timeoutMs`）⇒ `ctx.finish(5, "load-save: gate timeout …")` + 结束（`gates.js`）。
 //      ⛔ 不用 `ctx.quit`（那会把归因改成 `plugin: quit`）/ ⛔ 不用 `ctx.run`（C5）。
-// ★ 本对象**无状态**（进度只在 `ev.name`）：宿主每回调新建实例（`plugin-runtime.md` §4.6），
-//   实现必须支持"新实例接旧链"；⛔ 不把进度塞进闭包 / `ctx.state`。
+// ★ 本函数**不依赖**模块级进度状态：所有进度都在这一次 async 调用的局部变量里（v2 的 task 就是
+//   那条链本身）。
 
 // ★ 位置常量是**同目录的兄弟模块**（`./script-positions.js` / `./guest-globals.js`）。
-//   本文件从"已经在 TITLE"开始 ⇒ TITLE 门在 `./boot-to-title.js` 里（由**根入口**组合），不在本文件。
-import { failOnTimeout, failOnUnknown } from "./gates.js";
+//   本文件从"已经在 TITLE"开始 ⇒ TITLE 门在 `./boot-to-title.js` 里（由调用方组合），不在本文件。
+import { awaitPosition, awaitWhere, waitFirst } from "./gates.js";
 import { readSavePage } from "./guest-globals.js";
 import {
     SAVE_INPUT_CALLBACK_HI,
@@ -123,12 +141,12 @@ import {
 } from "./script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
-/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
-/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
-/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
+/** @typedef {import("@amayui/lift-plugin").Tick} Tick */
+/** @typedef {import("@amayui/lift-plugin").AtWhere} AtWhere */
+/** @typedef {{ where: AtWhere, tag: string }} LoadArm */
+/** @typedef {{ tick: Tick, tag: string }} LoadHit */
 /**
- * `loadSave` 的选项。`expect` 在**运行期**必填（缺 / 空 / 元素不是非空字符串 ⇒ 构造时 throw），
+ * `loadSave` 的选项。`expect` 在**运行期**必填（缺 / 空 / 元素不是非空字符串 ⇒ 调用时 throw），
  * 这里标 `?` 只是为了让"省略 options / 省略 expect"能通过类型检查后由那段运行期校验响亮拒绝。
  *
  * @typedef {object} LoadSaveOptions
@@ -138,25 +156,15 @@ import {
  *   （只打一行 info）—— 给"存档确实不在 appdata（`set:UseAppDataFolder != 1`）"的宿主的逃生口；
  *   ⛔ 不是让"真缺文件"静默通过的开关。
  * @property {string} [saveDir] 存档目录，**相对 appdata 根**（缺省 `SAVE_DIR_REL`）。
- *   只影响前置检查；给的值必须是非空相对路径（绝对路径 / `..` / NUL ⇒ 构造时 throw）。
- * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} [onLoaded] 到终态之后要做的事。
- */
-/**
- * 一条链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./chains.js` 的 `Chain` 同形）。
- *
- * @typedef {object} Chain
- * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
- * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
+ *   只影响前置检查；给的值必须是非空相对路径（绝对路径 / `..` / NUL ⇒ 调用时 throw）。
  */
 
 // ★ 脚本身份 = **marker 读数**（`PluginReadings::sample` ⇒ `MarkerSampler::resolveName`），实际是
 //   文件名 `TITLE.BIN` / `SAVE.BIN` / …（实测：`--plugin` 探针在 headless boot 读到
 //   `SYSTEM4.BIN` / `LOADCONFIG.BIN` / `TITLE.BIN`）。C1 的 `afterScript` / `afterPosition` 是
-//   **精确 `==`**（`src/runtime/trigger_runner.cpp`：`now.script == trigger.script`），⛔ 不做
-//   `await script` 那层的"两侧剥 `.BIN` + ASCII 大小写不敏感"（`src/runtime/recipe.cpp`）。
+//   **精确 `==`**；v2 的 `ctx.at` / `ctx.once` 的 `script` 匹配同一个精确相等（⛔ 不做
+//   `await script` 那层的"两侧剥 `.BIN` + ASCII 大小写不敏感"）
 //   ⇒ 链里的名字必须带 `.BIN`，否则门永远不命中（纯假读数用例也要照这个拼写）。
-//   ⚠ 这是 API 文档口径的已知缺口（`plugin.d.ts` / `plugin-runtime.md` 的样本写的是裸名
-//   `TITLE`）：归 docs 轮裁决；本文件按**宿主实际读数**写，⛔ 不假设将来会归一化。
 const SCRIPT_SAVE = "SAVE.BIN";
 const SCRIPT_SBUNKI = "SBUNKI.BIN";
 
@@ -191,24 +199,39 @@ const SAVE_PAGES = 90; // 页号 0..89（环形：0 的上一页 = 89）
 const PAGE_PREV_X = 45; // 左侧大箭头 = 上一页（页号 −1，环形）
 const PAGE_NEXT_X = 1235; // 右侧大箭头 = 下一页（页号 +1，环形）
 const PAGE_ARROW_Y = 357;
-// 点一次箭头后等"页号真的变了"的读点上限。
+// 点一次箭头后等"页号真的变了"的拍数上限（v2：一拍 = SAVE 回调体入口执行一次）。
 //
-// ★ 2026-11-25 改 60 → 1200（**回归修复**；读数见文件头 §2026-11-25）：
+// ★ 2026-11-25 v1 时期 60 → 1200（**回归修复**；读数见文件头 §2026-11-25）：
 //   实测一次箭头点击从"提交"到"页号变"= **76–77 个读点 / ≈210 ms**（5/5 次无干扰的探针 run：
 //   76,77,76,76,77；页号变的那一拍落在 `SAVE.BIN` 的翻页处理段 `pos=0x6EF4` / `0x6F44`），
 //   读点密度 ≈ **366 个/s** ⇒ **60 个读点 ≈ 164 ms ≈ 1.5 帧**，而点击的抬起要等按下之后的
 //   **两个完整 guest 回调**（`PointerCore::kCallbackFramesBeforeRelease`，闸门②′）⇒ 旧值**比点击自身还短**。
 //   真 run 里的落地延迟还**在抖**：12 次 `save.js` run 的页链回调数 = 85…461（≈0.2–1.3 s，
-//   抖动来自"2 个回调"的帧长本身）⇒ 上界按 **461 读点**取。
-//   ⛔ 旧注释写的"一个读点 ≈ 一拍输入轮询 ⇒ 60 拍 ≈ 1 s"是错的（实测 60 拍 ≈ 0.16 s）——
-//   这条错误假设就是 60 的来路，也是 11-24「3 次 2 次 `page not reached`」的来路：
-//   · 每一次**正常**点击都会先撞满 60、再靠 `turnr` 那一拍才接住（所以"有时能过"）；
-//   · 第一下真被吞时，`turnr` 的重试点击自己又要 76 个读点才落地，而重试预算只有 60
-//     ⇒ 重试**结构上救不回来**，必红（真游戏里复现过：见文件头）。
-//   新值 = **1200**（≈2.6× 实测上界）：正常时 `turn` 阶段自己就看到页号变（**不产生**重试点击，
-//   也就不会有多余的第 2 次翻页）；只有点击真丢了才走重试（最坏等 2×1200 读点后响亮失败）。
-const PAGE_STALL_LIMIT = 1200;
-// 点击被吞时的第二次机会（同样是 PAGE_STALL_LIMIT 个读点）。
+//   抖动来自"2 个回调"的帧长本身）⇒ 上界按 **461 个读点**取。
+//   ⛔ 旧注释写的"一个读点 ≈ 一拍输入轮询 ⇒ 60 拍 ≈ 1 s"是错的（实测 60 拍 ≈ 0.16 s）。
+//   1200 这个数字当时（v1）的余量 = 1200 / 461 ≈ **2.6× 实测上界**，墙钟 ≈ **3.3 s**（1200/366）。
+//
+// ★ **2026-11-28 P1 复审 S1：单位变了，数字必须跟着重算**。v2 的采样 = SAVE 回调（不是读点）：
+//   沿用 1200 就是错的数量级。★ 复审报告用 "18 fps ⇒ 1 拍 ≈ 1 帧" 估出 60；本片**直接量了单位的
+//   速率**（宿主 API 探针，`.tmp/plugin-v2/p1fix-save-rate.js`：进读档屏后装
+//   `ctx.at({script:"SAVE.BIN", pos:SAVE_INPUT_CALLBACK_LO})` 计数 + `ctx.delay(3000)`）：
+//     · **SAVE 回调 ≈ 61.9 个/s**（3/3 run：62.00 / 62.00 / 61.67；`hits=186 / 3 s`）；
+//     · 同一窗口 `--frame-log` 是 262 帧 / 10 s ≈ 26 fps ⇒ **1 个回调 ≈ 2.4 帧**（不是 1 帧/回调）
+//       ⇒ "18 fps ⇒ 60 拍" 会把窗压到 ≈0.97 s（v1 的 1/3），**不满足**"同一墙钟目标"。
+//   ⇒ 按 v1 的同一墙钟目标重算（v1 的换算因子仍是既有的 366 读点/s）：
+//     · 目标窗 = 1200 读点 / 366 读点每秒 = **3.279 s**；× 61.9 回调每秒 ≈ **203 拍**；
+//     · v1 的上界 = 461 读点 / 366 = 1.260 s ⇒ **78 拍**；203 / 78 ≈ **2.6×**（与 v1 同一个余量）；
+//     · ⇒ 取 **205 拍**：墙钟 ≈ 205 / 61.9 = **3.31 s**（v1 3.28 s，+1.0%），余量 205/78 ≈ **2.63×**。
+//   正常点击只需 ≈3 拍（slot 7 实测：9 次箭头点击共 28 个页链采样）⇒ 正常时 `turn` 阶段自己就看到
+//   页号变（**不产生**重试点击，也就不会有多余的第 2 次翻页）；只有点击真丢了才走重试
+//   （最坏 ≈2×205 拍 ≈ 6.62 s 后响亮失败，与 v1 的 2×1200/366 ≈ 6.56 s 同量级）。
+//   ⚠ 这个数绑的是"本机 61.9 回调/s 下的 ≈3.3 s"；换机器时**两个方向**都按计数放大/缩小（与 v1 的
+//     1200 同一性质：计数固定、墙钟随机器变）。
+//   ★ 为什么不用墙钟 deadline（`ctx.delay` 兜底）：本片按父级裁决只做**计数换算**；墙钟版需要
+//     "计数与 deadline 谁先到"的第二套判据（且 `delay` 在正常路径会留 pending ⇒ 影响 Run 收口），
+//     属另一张单。这里先把**单位错误**消掉，速率 / 算法 / 余量都写在上面。
+const PAGE_STALL_LIMIT = 205;
+// 点击被吞时的第二次机会（同样是 PAGE_STALL_LIMIT 拍）。
 const PAGE_RETRY_PHASE = "turnr";
 
 // 行 y 的**实测表**（⛔ 不用 91 + 59.5*n 之类的公式猜；0–7 与 9 都有读数，8 与截图逐行吻合）。
@@ -223,14 +246,14 @@ const MAX_SLOT = 90 * SAVE_PAGE_ROWS - 1;
 // ---------------------------------------------------------------------------------------
 // 存档文件前置检查（2026-11-25）——缺 `SAVE<NN>.DAT` 时**在第一个 click 之前** `finish(5)`。
 //
-// ★ 为什么放在本库（而不是某个 scenario）：`../scenario-fellow-switch.js` 也直接调 `loadSave(9)`；
-//   放场景里会漏掉直接消费者。`start(ctx)` 的第一件事 = 这个检查（⛔ 一个 click 都不发）。
+// ★ 为什么放在本库（而不是某个 scenario）：`../scenario-fellow-switch.js` 也直接调 `loadSave`；
+//   放场景里会漏掉直接消费者。`run` 的第一件事 = 这个检查（⛔ 一个 click 都不发）。
 // ★ 为什么只查 `SAVE<NN>.DAT`：
 //   · `.STH` 缺失**不阻止读档**（`docs/03-emulator/save-format.md` §1：缩略图读侧失败返回 1）；
 //   · `SAVE.DAT` 不是槽索引（它是脚本键持久化池；缺它最多让页号回 0）。
 // ★ **存档目录是本标题的实测布局，不是引擎合同**：宿主不知道 title / `set:SavePath`
 //   （`set:UseAppDataFolder != 1` 时存档根本不在 appdata）⇒ 标题名只在这里写一次，
-//   `loadSave(slot, { saveDir })` 允许调用方覆盖（相对 appdata 根）。
+//   `loadSave(..., { saveDir })` 允许调用方覆盖（相对 appdata 根）。
 // ---------------------------------------------------------------------------------------
 export const SAVE_DIR_REL = "Local/Eushully/天結いキャッスルマイスター/SAVE";
 // 文件名形状**已取证**的槽上界（两位 `%2.2d`）：0..99。`slot > 99` ⇒ 跳过检查 + warn。
@@ -271,7 +294,7 @@ function stripTrailingSeparators(text) {
 }
 
 /**
- * 把 `saveDir` 选项归一化成一个**相对 appdata 根**的路径；非法 ⇒ 构造时 throw。
+ * 把 `saveDir` 选项归一化成一个**相对 appdata 根**的路径；非法 ⇒ 调用时 throw。
  *
  * @param {string | undefined} value
  * @returns {string}
@@ -283,7 +306,7 @@ function normalizeSaveDir(value) {
     }
     let dir = stripTrailingSeparators(value.trim().split("\\").join("/"));
     if (dir === "" || dir === ".") return ".";
-    // 绝对路径（`C:` / `C:\` / `/` / `\`）与 `..` 段都是编程错误 ⇒ 构造时响亮拒绝。
+    // 绝对路径（`C:` / `C:\` / `/` / `\`）与 `..` 段都是编程错误 ⇒ 调用时响亮拒绝。
     if ((dir.length >= 2 && isAsciiLetter(dir[0]) && dir[1] === ":") || dir[0] === "/" || dir[0] === "\\") {
         throw new Error(`loadSave: options.saveDir 必须是相对 appdata 根的路径（收到 '${value}'）`);
     }
@@ -328,17 +351,16 @@ function displayPath(appdata, rel) {
  * @param {RunCtx} ctx
  * @param {number} slot
  * @param {string} saveDir 相对 appdata 根
- * @returns {boolean} true = 继续读档；false = 已经 finish(5)，调用方必须返回 []
+ * @returns {boolean} true = 继续读档；false = 已经 finish(5)，调用方必须结束
  */
 function precheckSaveFile(ctx, slot, saveDir) {
     const appdata = ctx.appdata;
     if (appdata === undefined || appdata === null || appdata.available !== true) {
-        ctx.log("warn", `load-save: appdata 不可用 ⇒ 跳过存档文件前置检查（slot ${slot}）`);
+        log.warn(`load-save: appdata 不可用 ⇒ 跳过存档文件前置检查（slot ${slot}）`);
         return true;
     }
     if (slot > SAVE_FILE_PRECHECK_MAX_SLOT) {
-        ctx.log(
-            "warn",
+        log.warn(
             `load-save: slot ${slot} > ${SAVE_FILE_PRECHECK_MAX_SLOT} 的 SAVE<NN>.DAT 文件名字形未取证` +
                 " ⇒ 跳过存档文件前置检查",
         );
@@ -347,14 +369,14 @@ function precheckSaveFile(ctx, slot, saveDir) {
     const rel = `${saveDir}/SAVE${pad2(slot)}.DAT`;
     const st = appdata.stat(rel);
     if (st === undefined || st === null || typeof st !== "object") {
-        ctx.log("warn", `load-save: appdata.stat(${rel}) 没有返回结果对象 ⇒ 跳过前置检查`);
+        log.warn(`load-save: appdata.stat(${rel}) 没有返回结果对象 ⇒ 跳过前置检查`);
         return true;
     }
     if (!st.exists) {
         // ★ 无法证明"缺文件"的读法一律跳过：denied / io 可能是环境问题，no_appdata 是配置晚了。
         const error = typeof st.error === "string" ? st.error : "not_found";
         if (error === "denied" || error === "io" || error === "no_appdata") {
-            ctx.log("warn", `load-save: stat ${rel} 失败（${error}）⇒ 跳过存档文件前置检查`);
+            log.warn(`load-save: stat ${rel} 失败（${error}）⇒ 跳过存档文件前置检查`);
             return true;
         }
         // ★ 再查一次**存档目录**：只有"目录存在但这一槽没有文件"才是缺文件；
@@ -384,10 +406,7 @@ function precheckSaveFile(ctx, slot, saveDir) {
                 dirError === "denied" ||
                 dirError === "io"
             ) {
-                ctx.log(
-                    "warn",
-                    `load-save: stat ${saveDir} 失败（${dirError}）⇒ 跳过存档文件前置检查`,
-                );
+                log.warn(`load-save: stat ${saveDir} 失败（${dirError}）⇒ 跳过存档文件前置检查`);
                 return true;
             }
             // 目录不存在（not_found / not_dir）⇒ 这个路径下不可能有 `SAVE<NN>.DAT` ⇒ 响亮收口。
@@ -395,13 +414,13 @@ function precheckSaveFile(ctx, slot, saveDir) {
             const reason =
                 `load-save: save file missing: ${file} (slot ${slot};` +
                 ` 存档目录 ${saveDir} 不存在)`;
-            ctx.log("error", reason);
+            log.error(reason);
             ctx.finish(5, reason);
             return false;
         }
         const file = displayPath(appdata, rel);
         const reason = `load-save: save file missing: ${file} (slot ${slot})`;
-        ctx.log("error", reason);
+        log.error(reason);
         ctx.finish(5, reason);
         return false;
     }
@@ -410,23 +429,49 @@ function precheckSaveFile(ctx, slot, saveDir) {
 
 const DEFAULT_GATE_TIMEOUT_MS = 30000;
 
-// ★ 载入链的具名状态一律 `load:` 前缀；`chains.js` 的 `route` 与场景命名禁区都只看这一个前缀。
-//   终态的具名状态 = `load:expect:<脚本名>`（脚本名 = 调用方给的 `expect` 元素，含 `.BIN`）。
+// ★ 载入链的具名门一律 `load:` 前缀（失败文案逐字保留；`chains.js` 的路由已删）。
+//   终态的门名 = `load:expect:<脚本名>`（脚本名 = 调用方给的 `expect` 元素，含 `.BIN`）。
 const LOAD_EXPECT_PREFIX = "load:expect:";
 
 /**
- * 构造一条 `loadSave(slot, options)` 的 callback 链（纯函数：只读 slot / options，不读 ctx）。
+ * 采样"下一拍"：每 **SAVE 回调体入口**执行一次 ⇒ 一次调用 = 一个 guest 回调（≈ v1 的一个读点）。
+ *
+ * ★ 为什么不用 `{script: "SAVE.BIN"}`：那是"下一条**指令**"，频率高一个量级 ⇒ `PAGE_STALL_LIMIT`
+ *   的 205 拍会在 ~10 ms 烧完（实测页号要 ≈210 ms 才变）⇒ 正常点击被误判成"丢了"。见文件头。
+ *
+ * @param {RunCtx} ctx
+ * @param {string} name 失败文案里的门名（`load:pg:<target>:<phase>:<i>:<last>`，与 v1 逐字同形）。
+ * @param {number} timeoutMs
+ * @returns {Promise<Tick>}
+ */
+function sampleSave(ctx, name, timeoutMs) {
+    return awaitWhere(
+        ctx,
+        { script: SCRIPT_SAVE, pos: SAVE_INPUT_CALLBACK_LO },
+        name,
+        timeoutMs,
+        "load-save",
+    );
+}
+
+/**
+ * `loadSave` 的**纯校验**（slot / expect / timeoutMs / saveDir / precheck；**不碰 ctx**）。
+ *
+ * ★ 为什么单独导出（P1 复审 S3）：v1 的校验在**构造时**（`loadSave(slot, options)` 里），坏 slot /
+ *   坏 expect 会**当场** throw ⇒ Run 首个回调就 `run=failed`；P1 把它挪到 `loadSave()` 调用时
+ *   （= `await bootToTitle` **之后**）⇒ 坏参数要等 TITLE 才报（启动到不了 TITLE 时只报 boot 门超时，
+ *   把"参数非法"与"启动没到"混成同一条）。⇒ 根入口 `load-save.js` 在 **start 的同步首段**
+ *   （`ctx.task` 之前）调本函数，把"构造时失败"的时序找回来；库调用方仍由 `loadSave` 自己调一次
+ *   （⛔ 不要求调用方记得先校验）。
+ * ★ 纯函数：不读 `ctx` / 不读 appdata（缺文件 stat 仍留在 `loadSave` 里、第一个 click 之前）。
  *
  * @param {number} slot 存档槽（读档界面能选到的 0–899；页 = slot/10，页内行 = slot%10）。
  * @param {LoadSaveOptions | null} [options]
- *   · `expect`（**必填**）：载入完成后**可以算落点**的脚本名表（照宿主读数拼写、带 `.BIN`）——
- *     ADV = `SC*`/`SG*`/`SP*`、战斗 = `BTL.BIN`、地图 = `FIELD.BIN` …；由**调用方按预期给**。
- *   · `timeoutMs`：每道门的超时；缺省 30000 ms。
- *   · `onLoaded`：载入**到终态**之后要做的事（终态先 `ctx.log` 再回调）；它的返回值就是本次
- *     `onTrigger` 的返回值。⚠ 抛错**不**在这里捕获 —— 交给宿主按既有规则记 fail。
- * @returns {Chain}
+ * @returns {{ slot: number, rowY: number, targetPage: number, gateTimeoutMs: number,
+ *             saveDir: string, precheck: boolean, expect: string[] }}
  */
-export function loadSave(slot, options = {}) {
+export function validateLoadSave(slot, options = {}) {
+    const opts = options !== null && options !== undefined ? options : {};
     if (!Number.isInteger(slot) || slot < 0 || slot > MAX_SLOT) {
         throw new Error(`loadSave: slot ${slot} 越界（0–${MAX_SLOT}；读档界面 = 90 页 × 10 行）`);
     }
@@ -436,19 +481,18 @@ export function loadSave(slot, options = {}) {
     }
     const targetPage = Math.floor(slot / SAVE_PAGE_ROWS);
     const gateTimeoutMs =
-        options !== null && options.timeoutMs !== undefined ? options.timeoutMs : DEFAULT_GATE_TIMEOUT_MS;
-    const saveDir = normalizeSaveDir(options !== null ? options.saveDir : undefined);
-    const onLoaded = options !== null ? options.onLoaded : undefined;
-    const precheck = options !== null && options.precheck !== undefined ? options.precheck : true;
+        opts.timeoutMs !== undefined ? opts.timeoutMs : DEFAULT_GATE_TIMEOUT_MS;
+    if (!Number.isInteger(gateTimeoutMs) || gateTimeoutMs <= 0) {
+        throw new Error(`loadSave: options.timeoutMs 必须是正整数（收到 ${String(gateTimeoutMs)}）`);
+    }
+    const saveDir = normalizeSaveDir(opts.saveDir);
+    const precheck = opts.precheck !== undefined ? opts.precheck : true;
     if (typeof precheck !== "boolean") {
         throw new Error(`loadSave: options.precheck 必须是 boolean（收到 ${typeof precheck}）`);
     }
-    if (onLoaded !== undefined && typeof onLoaded !== "function") {
-        throw new Error(`onLoaded must be a function (got ${typeof onLoaded})`);
-    }
     // ★ 终态由**调用方**给（⛔ 本文件不内置场景清单）：ADV / 战斗 / 地图的脚本名都不一样，
     //   只有使用方知道这次载入"应该落在哪"。缺了就当场 throw（⛔ 不猜一个默认值）。
-    const expect = options !== null ? options.expect : undefined;
+    const expect = opts.expect;
     if (!Array.isArray(expect) || expect.length === 0) {
         throw new Error(
             "loadSave: options.expect 必填（string[]，非空）—— 载入完成后落在哪个脚本由调用方按预期给：" +
@@ -463,201 +507,230 @@ export function loadSave(slot, options = {}) {
             );
         }
     }
+    // ★ 校验之后收窄成 `string[]`：调用方（`loadSave` 的闭包）读的是这份局部值 —— TypeScript
+    //   不会把外层 `expect` 的收窄带进嵌套函数。
+    return { slot, rowY, targetPage, gateTimeoutMs, saveDir, precheck, expect };
+}
 
-    // 终态 = 调用方给的**期望落点表**（⛔ 本文件不内置场景清单）。
-    // ★ 具名门：一个 armed 集合内 name 唯一；每个回调返回**完整的新集合**（⛔ 不是增量）。
-    //   第二道确认之后也用它（那里同样只认调用方的 `expect`；点 690,323 那一步在 onTrigger 里）。
-    /** @type {(ctx: RunCtx) => Trigger[]} */
-    const expectTerminals = (ctx) =>
-        expect.map((script) =>
-            ctx.trigger.afterScript(script, {
-                name: LOAD_EXPECT_PREFIX + script,
-                timeoutMs: gateTimeoutMs,
-            }),
+/**
+ * 构造并执行一次 `loadSave`（**async**；进度全在本次调用的局部变量里）。
+ *
+ * @param {RunCtx} ctx RunCtx（`ctx.once` / `ctx.read` / `ctx.appdata.stat` / `ctx.finish` 都是 Run 侧入口）。
+ * @param {number} slot 存档槽（读档界面能选到的 0–899；页 = slot/10，页内行 = slot%10）。
+ * @param {LoadSaveOptions | null} options 见 `LoadSaveOptions`。
+ * @param {Tick} titleTick **TITLE 命中那一拍的 Tick**：LoadData 那一下点击必须用它（Tick 的写面只在
+ *   产生它的那次入口内有效；`ctx.input` 在 task continuation 里是 TypeError）。
+ * @returns {Promise<Tick>} 载入终态命中那一拍的 Tick（场景接续用它做写）。
+ */
+export async function loadSave(ctx, slot, options = {}, titleTick) {
+    // ★ 校验集中在 `validateLoadSave`（根入口在 `start` 的同步首段还会先调一次 —— 见其文档）。
+    const v = validateLoadSave(slot, options);
+    const rowY = v.rowY;
+    const targetPage = v.targetPage;
+    const gateTimeoutMs = v.gateTimeoutMs;
+    const saveDir = v.saveDir;
+    const precheck = v.precheck;
+    /** @type {string[]} */
+    const expected = v.expect;
+    if (titleTick === undefined || titleTick === null) {
+        throw new Error("loadSave: 需要 TITLE 命中那一拍的 Tick（先 await bootToTitle(ctx)）");
+    }
+
+    // ★ **前置检查在第一个 click 之前**（2026-11-25）：缺 `SAVE<NN>.DAT` ⇒ finish(5) + 结束，
+    //   ⛔ 不发任何 click（否则已经进了 SAVE 屏，失败原因会和"点行不进确认框"混在一起）。
+    //   跳过条件见 `precheckSaveFile`（无 appdata / slot>99 / stat 无法证明 / 逃生口 `precheck:false`）。
+    if (!precheck) {
+        log.info("load-save: precheck=false ⇒ 跳过存档文件前置检查（宿主声明存档不在 appdata）");
+    } else if (!precheckSaveFile(ctx, slot, saveDir)) {
+        // Run 已 finished（exit 5）；抛一个标记让 task 结束（`runTerminal` ⇒ 不会覆盖读数）。
+        throw new Error("load-save: save file missing（已 finish(5)）");
+    }
+
+    // ★ **前提：已经在 TITLE**（文件头）。直接点 LoadData 入口，然后等 SAVE 门。
+    //   点不进去（不在 TITLE / 点被吞）⇒ SAVE 门超时 = 响亮失败。
+    log.info(`load-save: start (slot ${slot}) ⇒ click LoadData (${LOAD_MENU_X},${LOAD_MENU_Y})`);
+    titleTick.input.click(LOAD_MENU_X, LOAD_MENU_Y);
+    let tick = await awaitPosition(
+        ctx,
+        SCRIPT_SAVE,
+        SAVE_INPUT_CALLBACK_LO,
+        SAVE_INPUT_CALLBACK_HI,
+        "load:save",
+        gateTimeoutMs,
+        "load-save",
+    );
+    log.info("load-save: SAVE hit");
+    // ★ 页号**可读**（`readSavePage`）：先读当前页，再决定要不要翻。
+    let seen = readSavePage(ctx);
+    log.info(`load-save: page ${seen} (target ${targetPage}, slot ${slot})`);
+
+    if (seen !== targetPage) {
+        // 第一拍：等一个 SAVE 回调（v1 在 SAVE 命中后先 arm 一个读点，再决定点哪个方向）。
+        // ★ 门名带 `:<last>`（v1 逐字：`load:pg:<page>:<phase>:<i>:<last>`；首拍 last = -1）。
+        tick = await sampleSave(ctx, `load:pg:${targetPage}:turn:0:-1`, gateTimeoutMs);
+        seen = readSavePage(ctx);
+        tick = await walkPages(ctx, tick, seen, targetPage, rowY, gateTimeoutMs, "turn", 0, -1, slot);
+    }
+
+    // ---- 页内行：move → 一拍 → 点行前再核页号（v1 `rowMove` + `load:row` 的逐行等价物）----
+    for (;;) {
+        tick.input.move(SLOT_X, rowY);
+        tick = await sampleSave(ctx, "load:row", gateTimeoutMs);
+        const nowPage = readSavePage(ctx);
+        if (nowPage === targetPage) break;
+        // ★ 点行**之前**再核一次页号（2026-11-25）：箭头点击的落地要比 2 个 guest 回调，
+        //   旧预算（60 读点）会让页链提前发一次"重试点击"；那一下在页号已经变了之后
+        //   才落地 ⇒ 把页**又**翻一格（0 → 89），随后按页内行 y 点下去就落到别的槽上
+        //   （空槽 ⇒ 没有确认框 ⇒ `load:sbunki` 30 s 超时）。⇒ 这里发现页不对就回页链，
+        //   ⛔ 不点行、⛔ 不猜"差一格"。
+        log.warn(
+            `load-save: page moved to ${nowPage} before the row click (target ${targetPage}) ⇒ 回页链`,
         );
+        tick = await walkPages(ctx, tick, nowPage, targetPage, rowY, gateTimeoutMs, "turn", 0, nowPage, slot);
+    }
+    log.info("load-save: row hovered");
+    tick.input.click(SLOT_X, rowY);
+    tick = await awaitPosition(
+        ctx,
+        SCRIPT_SBUNKI,
+        SBUNKI_CONFIRM_CLICK_LO,
+        SBUNKI_CONFIRM_CLICK_HI,
+        "load:sbunki",
+        gateTimeoutMs,
+        "load-save",
+    );
+    log.info("load-save: SBUNKI hit (read-segment passed)");
+    tick.input.click(CONFIRM_X, CONFIRM_Y);
 
-    // 点完 640,323 之后的终态集合：`expect` 里任一脚本 **或** 第二道确认（同一张对话框的回环）。
-    /** @type {(ctx: RunCtx) => Trigger[]} */
-    const terminal = (ctx) => {
-        const gates = expectTerminals(ctx);
-        gates.push(
-            ctx.trigger.afterPosition(SCRIPT_SBUNKI, SBUNKI_CONFIRM_READ_SEG_LO, SBUNKI_CONFIRM_READ_SEG_HI, {
-                name: "load:confirm2",
-                timeoutMs: gateTimeoutMs,
-            }),
-        );
-        return gates;
-    };
+    // ★ 终态 = expect 里任一脚本 **或** 第二道确认（同一张对话框的回环）。
+    //   v1 用 armed 集合的"完整替换"表达；v2 用 `ctx.waitAny` 的多臂等待（`waitFirst` 薄封装）——
+    //   ⛔ 不用 `Promise.race([once])`：输的那条 once 不能撤，会一直算 Run 存活直到 timeout ⇒ fail。
+    //   ★ 超时（`gateTimeoutMs`）是**真的 wall-clock 失败截止**（P1 复审 S2）：v1 在这里 30 s 后
+    //     `finish(5, "load-save: gate timeout (load:expect:<name>)")`；v2 由 `waitFirst` 的 catch
+    //     复现同一文案（`finish(5)` 后重新 throw，task 结束；`waitAny` 的 pending 已撤干净）。
+    const first = await waitFirst(ctx, expectTerminals(true), gateTimeoutMs, "load-save");
+    if (first.tag === "load:confirm2") {
+        log.info("load-save: SBUNKI confirm read-segment ⇒ second confirm");
+        first.tick.input.click(CONFIRM2_X, CONFIRM2_Y);
+        // ★ 第二次之后**只剩 expect**：SBUNKI 的读段会在离开对话框前再跑一遍，再挂 confirm2 臂
+        //   会让它命中自己（v1 的 `terminalAfterConfirm` 也是只剩 expect）。
+        const after = await waitFirst(ctx, expectTerminals(false), gateTimeoutMs, "load-save");
+        return reached(after, slot);
+    }
+    return reached(first, slot);
 
-    // 第二道确认之后的终态：只剩 `expect` 里的脚本。
-    /** @type {(ctx: RunCtx) => Trigger[]} */
-    const terminalAfterConfirm = (ctx) => expectTerminals(ctx);
-
-    /** @type {(ctx: RunCtx, script: string) => Trigger | Trigger[] | null} */
-    const reached = (ctx, script) => {
-        ctx.log("info", `load-save: reached ${script} (slot ${slot})`);
-        // ★ 终态**先 log 再回调**：`onLoaded` 的返回值 = 本次 onTrigger 的返回值。
-        //   ⛔ 没给 `onLoaded` ⇒ 与 C2c 一字不变（`return []` = done）。⛔ 不 try/catch：
-        //   它抛错要按宿主的既有规则记 fail（有 file:line 归因），吞掉就变成"静默 done"。
-        if (onLoaded === undefined) return [];
-        return onLoaded(ctx);
-    };
-
-    // ---- 页：读档界面每页 10 行；槽 010 在**第 2 页**（页号 = 可读的 guest int global）------------
-    //
-    // ★ 进度**只在 `ev.name`**（宿主每回调新建实例）：页链的名字 =
-    //   `load:pg:<目标页>:<阶段>:<计数>:<上次看到的位置>` —— 全部从名字解析 ⇒ 不需要闭包 / `ctx.state`。
-    const PAGE_PREFIX = "load:pg:";
-
-    /** @type {(ctx: RunCtx, page: number, phase: string, i: number, last: number) => Trigger} */
-    const armPage = (ctx, page, phase, i, last) =>
-        ctx.trigger.atReadPoint("any", 1, {
-            name: `${PAGE_PREFIX}${page}:${phase}:${i}:${last}`,
-            timeoutMs: gateTimeoutMs,
-        });
-
-    // 页内行：move → 一个读点 → click（与 C2c 一字不变的两段形状）。
-    /** @type {(ctx: RunCtx) => Trigger} */
-    const rowMove = (ctx) => {
-        ctx.input.move(SLOT_X, rowY);
-        return ctx.trigger.atReadPoint("any", 1, { name: "load:row", timeoutMs: gateTimeoutMs });
-    };
-
-    // 往目标页**走一步**：比当前页大 ⇒ 右箭头（下一页），小 ⇒ 左箭头（上一页）；两端环形
-    //   （0 的上一页 = 89）。方向按"更短的那一边"选，⛔ 不假设"只能一步一步往前"。
-    /** @type {(ctx: RunCtx, ctxPage: number, seen: number, phase: string) => Trigger} */
-    const pageStep = (ctx, ctxPage, seen, phase) => {
-        const forward = (ctxPage - seen + 2 * SAVE_PAGES) % SAVE_PAGES;
-        const backward = (seen - ctxPage + 2 * SAVE_PAGES) % SAVE_PAGES;
-        ctx.input.click(forward <= backward ? PAGE_NEXT_X : PAGE_PREV_X, PAGE_ARROW_Y);
-        return armPage(ctx, ctxPage, phase, 0, seen);
-    };
-
-    // 页链的两个阶段（见文件头）：
-    //   turn<i>  点过箭头之后**等页号真的动**：动了 ⇒ 按新位置再走一步；没动 ⇒ 等；
-    //            等满 PAGE_STALL_LIMIT 个读点 ⇒ 再点一次（`turnr`，点击被吞的第二次机会）
-    //   turnr<i> 同上，但再等满一次就 `finish(5)` 响亮失败（⛔ 不无限重试、⛔ 不假设"点一下就到"）
-    /** @type {(ctx: RunCtx, name: string) => Trigger | Trigger[] | null} */
-    const onPageState = (ctx, name) => {
-        const parts = name.split(":"); // ["load","pg",<目标页>,<阶段>,<计数>,<上次位置>]
-        const page = Number(parts[2]);
-        const phase = parts[3];
-        const i = Number(parts[4]);
-        const last = Number(parts[5]);
-        if (!Number.isInteger(page) || !Number.isInteger(i) || !Number.isInteger(last)) {
-            ctx.fail(name, `load-save: 页状态名不合法 (${name})`);
-            return [];
+    /**
+     * `expect` 的终态臂（`{script}` = 该脚本下一条指令）；`withConfirm2` 时再加第二道确认臂。
+     *
+     * @param {boolean} withConfirm2
+     * @returns {readonly LoadArm[]}
+     */
+    function expectTerminals(withConfirm2) {
+        /** @type {LoadArm[]} */
+        const arms = expected.map((script) => ({
+            where: { script },
+            tag: LOAD_EXPECT_PREFIX + script,
+        }));
+        if (withConfirm2) {
+            arms.push({
+                where: {
+                    script: SCRIPT_SBUNKI,
+                    lo: SBUNKI_CONFIRM_READ_SEG_LO,
+                    hi: SBUNKI_CONFIRM_READ_SEG_HI,
+                },
+                tag: "load:confirm2",
+            });
         }
-        if (phase !== "turn" && phase !== PAGE_RETRY_PHASE) {
-            ctx.fail(name, `load-save: 未知页阶段 (${name})`);
-            return [];
-        }
-        const seen = readSavePage(ctx);
-        if (seen === page) {
-            ctx.log("info", `load-save: page ${page} reached (slot ${slot} ⇒ row ${slot % SAVE_PAGE_ROWS})`);
+        return arms;
+    }
+}
+
+/**
+ * 终态：先 log 再返回那一拍的 Tick（⛔ 没有 `onLoaded` 了 —— 场景就是调用方的顺序 `await`）。
+ *
+ * @param {LoadHit} hit
+ * @param {number} slot
+ * @returns {Tick}
+ */
+function reached(hit, slot) {
+    if (!hit.tag.startsWith(LOAD_EXPECT_PREFIX)) {
+        // 走到这里说明多臂等待把"第二道确认"当成了终态 ⇒ 链有 bug，⛔ 不要静默当成落点。
+        throw new Error(`loadSave: 终态臂不合法（tag=${hit.tag}）`);
+    }
+    const script = hit.tag.slice(LOAD_EXPECT_PREFIX.length);
+    log.info(`load-save: reached ${script} (slot ${slot})`);
+    return hit.tick;
+}
+
+/**
+ * 翻页状态机（v1 `armPage` / `pageStep` / `onPageState` 的 async 等价物；进度全在局部变量里）。
+ *
+ * 阶段：
+ *   turn<i>  点过箭头之后**等页号真的动**：动了 ⇒ 按新位置再走一步；没动 ⇒ 等；
+ *            等满 `PAGE_STALL_LIMIT` 拍 ⇒ 再点一次（`turnr`，点击被吞的第二次机会）
+ *   turnr<i> 同上，但再等满一次就 `finish(5)` 响亮失败（⛔ 不无限重试、⛔ 不假设"点一下就到"）
+ *
+ * @param {RunCtx} ctx
+ * @param {Tick} tick 进入状态机时的那一拍（第一次点击用它）。
+ * @param {number} seen 这一拍读到的页号。
+ * @param {number} targetPage 目标页。
+ * @param {number} rowY 本槽的页内行 y（只用于日志文案）。
+ * @param {number} timeoutMs 每次采样的失败截止。
+ * @param {"turn" | "turnr"} phase 当前阶段。
+ * @param {number} i 当前阶段已经等过的拍数。
+ * @param {number} last 上一次决定"没动"时的页号（首拍 = -1 ⇒ 任何读数都算"动了"）。
+ * @param {number} slot 槽号（日志文案）。
+ * @returns {Promise<Tick>} `load:page-ready` 命中那一拍的 Tick。
+ */
+async function walkPages(ctx, tick, seen, targetPage, rowY, timeoutMs, phase, i, last, slot) {
+    for (;;) {
+        if (seen === targetPage) {
+            log.info(
+                `load-save: page ${targetPage} reached (slot ${slot} ⇒ row ${slot % SAVE_PAGE_ROWS} y=${rowY})`,
+            );
             // ★ 翻完页**不能马上点行**：页号在点箭头那一刻就变了，而列表要**重读这一页的 10 份存档头**
             //   —— 刷新期间点下去会被吞（实测：page 0 到了、`click` 之后 `load:sbunki` 30 s 超时）。
             //   所以再等一道"SAVE 的回调体又活了"的位置门（列表刷完、在等输入），然后才 move/click。
-            return ctx.trigger.afterPosition(SCRIPT_SAVE, SAVE_INPUT_CALLBACK_LO, SAVE_INPUT_CALLBACK_HI, {
-                name: "load:page-ready",
-                timeoutMs: gateTimeoutMs,
-            });
+            return awaitPosition(
+                ctx,
+                SCRIPT_SAVE,
+                SAVE_INPUT_CALLBACK_LO,
+                SAVE_INPUT_CALLBACK_HI,
+                "load:page-ready",
+                timeoutMs,
+                "load-save",
+            );
         }
         // 位置**动了**（或第一次进这个阶段：last = -1）⇒ 立刻按新位置再走一步。
-        if (seen !== last) return pageStep(ctx, page, seen, phase);
-        if (i < PAGE_STALL_LIMIT) return armPage(ctx, page, phase, i + 1, last);
+        if (seen !== last) {
+            const forward = (targetPage - seen + 2 * SAVE_PAGES) % SAVE_PAGES;
+            const backward = (seen - targetPage + 2 * SAVE_PAGES) % SAVE_PAGES;
+            tick.input.click(forward <= backward ? PAGE_NEXT_X : PAGE_PREV_X, PAGE_ARROW_Y);
+            last = seen;
+            i = 0;
+            tick = await sampleSave(ctx, `load:pg:${targetPage}:${phase}:${i}:${last}`, timeoutMs);
+            seen = readSavePage(ctx);
+            continue;
+        }
+        if (i < PAGE_STALL_LIMIT) {
+            i += 1;
+            tick = await sampleSave(ctx, `load:pg:${targetPage}:${phase}:${i}:${last}`, timeoutMs);
+            seen = readSavePage(ctx);
+            continue;
+        }
         // 等满了还没动：第一次 ⇒ 重试一次（点击可能被吞）；第二次 ⇒ 响亮失败。
-        if (phase === "turn") return pageStep(ctx, page, seen, PAGE_RETRY_PHASE);
-        ctx.finish(5, `load-save: page not reached (target ${page}, still ${seen})`);
-        return [];
-    };
-
-    return {
-        start(ctx) {
-            // ★ **前置检查在第一个 click 之前**（2026-11-25）：缺 `SAVE<NN>.DAT` ⇒ finish(5) + []，
-            //   ⛔ 不发任何 click（否则已经进了 SAVE 屏，失败原因会和"点行不进确认框"混在一起）。
-            //   跳过条件见 `precheckSaveFile`（无 appdata / slot>99 / stat 无法证明 / 逃生口
-            //   `precheck:false`）。★ 2026-11-25：目录不存在也算缺（复审 I5）。
-            if (!precheck) {
-                ctx.log("info", "load-save: precheck=false ⇒ 跳过存档文件前置检查（宿主声明存档不在 appdata）");
-            } else if (!precheckSaveFile(ctx, slot, saveDir)) {
-                return [];
-            }
-            // ★ **前提：已经在 TITLE**（文件头）。这里不再等 TITLE —— 直接点 LoadData 入口，
-            //   然后 arm SAVE 门。点不进去（不在 TITLE / 点被吞）⇒ SAVE 门超时 = 响亮失败。
-            ctx.log("info", `load-save: start (slot ${slot}) ⇒ click LoadData (${LOAD_MENU_X},${LOAD_MENU_Y})`);
-            ctx.input.click(LOAD_MENU_X, LOAD_MENU_Y);
-            return ctx.trigger.afterPosition(SCRIPT_SAVE, SAVE_INPUT_CALLBACK_LO, SAVE_INPUT_CALLBACK_HI, {
-                name: "load:save",
-                timeoutMs: gateTimeoutMs,
-            });
-        },
-
-        onTrigger(ctx, ev) {
-            // D-C2C-2：门超时 = finish(5)（⛔ 不用 quit：归因会变成 `plugin: quit`）。
-            if (ev.kind === "timeout") {
-                failOnTimeout(ctx, ev, "load-save");
-                return [];
-            }
-            switch (ev.name) {
-                case "load:save": {
-                    ctx.log("info", "load-save: SAVE hit");
-                    // ★ 页号**可读**（`readSavePage`）：先读当前页，再决定要不要翻。
-                    const seen = readSavePage(ctx);
-                    ctx.log("info", `load-save: page ${seen} (target ${targetPage}, slot ${slot})`);
-                    if (seen === targetPage) return rowMove(ctx);
-                    // 不在目标页 ⇒ 走箭头（±1 页、环形）；`last = -1` ⇒ 第一拍就点（见 `onPageState`）。
-                    return armPage(ctx, targetPage, "turn", 0, -1);
-                }
-                case "load:page-ready":
-                    // 列表刷完了（SAVE 的回调体又活了）⇒ 现在才 move/click 那一行。
-                    return rowMove(ctx);
-                case "load:row": {
-                    // ★ 点行**之前**再核一次页号（2026-11-25）：箭头点击的落地要比 2 个 guest 回调，
-                    //   旧预算（60 读点）会让页链提前发一次"重试点击"；那一下在页号已经变了之后
-                    //   才落地 ⇒ 把页**又**翻一格（0 → 89），随后按页内行 y 点下去就落到别的槽上
-                    //   （空槽 ⇒ 没有确认框 ⇒ `load:sbunki` 30 s 超时）。⇒ 这里发现页不对就回页链，
-                    //   ⛔ 不点行、⛔ 不猜"差一格"。
-                    const nowPage = readSavePage(ctx);
-                    if (nowPage !== targetPage) {
-                        ctx.log(
-                            "warn",
-                            `load-save: page moved to ${nowPage} before the row click (target ${targetPage}) ⇒ 回页链`,
-                        );
-                        return armPage(ctx, targetPage, "turn", 0, nowPage);
-                    }
-                    ctx.log("info", "load-save: row hovered");
-                    ctx.input.click(SLOT_X, rowY);
-                    return ctx.trigger.afterPosition(
-                        SCRIPT_SBUNKI,
-                        SBUNKI_CONFIRM_CLICK_LO,
-                        SBUNKI_CONFIRM_CLICK_HI,
-                        {
-                            name: "load:sbunki",
-                            timeoutMs: gateTimeoutMs,
-                        },
-                    );
-                }
-                case "load:sbunki":
-                    ctx.log("info", "load-save: SBUNKI hit (read-segment passed)");
-                    ctx.input.click(CONFIRM_X, CONFIRM_Y);
-                    return terminal(ctx);
-                case "load:confirm2":
-                    ctx.log("info", "load-save: SBUNKI confirm read-segment ⇒ second confirm");
-                    ctx.input.click(CONFIRM2_X, CONFIRM2_Y);
-                    return terminalAfterConfirm(ctx);
-                default:
-                    // ★ 页链（`load:pg:<目标页>:<阶段>:<计数>`）——进度全在名字里。
-                    if (ev.name.startsWith(PAGE_PREFIX)) {
-                        return onPageState(ctx, ev.name);
-                    }
-                    // ★ 终态：`load:expect:<脚本名>`（脚本名 = 调用方给的 `expect` 元素）。
-                    if (ev.name.startsWith(LOAD_EXPECT_PREFIX)) {
-                        return reached(ctx, ev.name.slice(LOAD_EXPECT_PREFIX.length));
-                    }
-                    failOnUnknown(ctx, ev);
-                    return [];
-            }
-        },
-    };
+        if (phase === "turn") {
+            phase = PAGE_RETRY_PHASE;
+            const forward = (targetPage - seen + 2 * SAVE_PAGES) % SAVE_PAGES;
+            const backward = (seen - targetPage + 2 * SAVE_PAGES) % SAVE_PAGES;
+            tick.input.click(forward <= backward ? PAGE_NEXT_X : PAGE_PREV_X, PAGE_ARROW_Y);
+            last = seen;
+            i = 0;
+            tick = await sampleSave(ctx, `load:pg:${targetPage}:${phase}:${i}:${last}`, timeoutMs);
+            seen = readSavePage(ctx);
+            continue;
+        }
+        ctx.finish(5, `load-save: page not reached (target ${targetPage}, still ${seen})`);
+        throw new Error("load-save: page not reached");
+    }
 }

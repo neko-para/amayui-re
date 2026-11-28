@@ -1,11 +1,11 @@
 // scripts/plugins/scenario-save10-field.js —— **复现**「载入存档 10 → 在 FIELD 点 (540,450) → 退出」
 //
-// 三段组合（`plugin-runtime.md` §4.6a 规则 3）：`bootToTitle` → `loadSave(slot)` → 本文件的场景。
-// 它是**一条可复跑的复现入口**（不是产品场景）：所有翻页都走 `loadSave` 的真翻页
-// （读 `0x138e` 页号 + 点顶部页签 + 读点门等页号真的变），⛔ 没有 `.plan`、⛔ 没有把存档改名。
+// 三段组合（v2）：`bootToTitle(t)` → `loadSave(t, slot, …)` → 本文件的场景 —— 一条 `ctx.task` 的
+// 顺序 `await`。它是**一条可复跑的复现入口**（不是产品场景）：所有翻页都走 `loadSave` 的真翻页
+// （读 `0x138e` 页号 + 点左右大箭头 + 等页号真的变），⛔ 没有 `.plan`、⛔ 没有把存档改名。
 //
 // 时序（**这是复现的一部分**，别省）：`expect` 命中只代表 FIELD 脚本刚起来（地图还在加载）⇒
-//   **先等 FIELD 的主轮询体 `[0x579C,0x5860)`**（= 地图就绪、在等输入），再 move → 读点 → click。
+//   **先等 FIELD 的主轮询体 `[0x579C,0x5860)`**（= 地图就绪、在等输入），再 move → 一拍 → click。
 //   直接点会被加载过程吞掉（实测：第一版在 `expect` 命中那一拍就点，什么也没发生）。
 //
 // 用法（cwd = apps/emulator-lift；存档 010/011/… 在**第 2 页**，翻页由 `save.js` 自己做）：
@@ -19,11 +19,18 @@
 //     --plugin scripts/plugins/scenario-save10-field.js
 //   ★ 回退（夹具 / 诊断）：`--plugin-param slot=10 --plugin-param expect=FIELD`。
 //
-// 判据（"点击之后能继续"）：点完**再活 `SURVIVE_MS`** ⇒ `finish(0)`；期间进程没了 ⇒ stderr 的 `stop :` 就是现场。
+// 判据（"点击之后能继续"）：点完**再活 `SURVIVE_MS`** ⇒ `ctx.finish(0)`；期间进程没了 ⇒ stderr 的 `stop :` 就是现场。
+//
+// ★ v2 的两处机械变化（2026-11-28）：
+//   · `atReadPoint("any", 1)`（"下一个读点"）⇒ `{script:"FIELD.BIN"}`（该脚本的下一条指令）：
+//     输入是**排队**的（move 先入队、click 后入队，一读点最多落地一条）⇒ 顺序保证不变，
+//     这一拍只是保持"move 之后隔一拍再点"的旧形状。
+//   · `afterDelay(8000)` ⇒ `await t.delay(SURVIVE_MS)`（**墙钟、NON-DIFFABLE**；P0 的 `ctx.delay`）。
+//     它是**诊断判据**（"点完之后还活着"），不是业务门；⛔ 不要拿它做 A/B 或指纹。
+//   · 终点 `ctx.finish(0)` 在 task 里可用（P0 起 Run 侧门）⇒ 读数仍是 `run=finished exit=0`。
 
 import { bootToTitle } from "./lib/boot-to-title.js";
-import { route } from "./lib/chains.js";
-import { awaitPosition, awaitReadPoint, failOnTimeout, failOnUnknown } from "./lib/gates.js";
+import { awaitPosition, awaitWhere } from "./lib/gates.js";
 import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.js";
 import { loadSave } from "./lib/save.js";
 import {
@@ -33,10 +40,6 @@ import {
 } from "./lib/settings.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
-/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
-/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
-/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
 
 // 点击点（用户报的坐标；1280×720 参考系，原样照抄 —— ⛔ 不要按"看起来像"改）。
 const CLICK_X = 540;
@@ -45,44 +48,6 @@ const CLICK_Y = 450;
 const READY_TIMEOUT_MS = 60000;
 // 点完之后还要活多久才算"没崩"（宿主墙钟；这一条是**诊断判据**，不是 wait 出来的业务门）。
 const SURVIVE_MS = 8000;
-
-/** @type {import("./lib/chains.js").Chain} */
-const scenario = {
-    start(ctx) {
-        ctx.log("info", "scenario-save10: FIELD.BIN reached ⇒ 等主轮询体（地图就绪）");
-        return awaitPosition(
-            ctx,
-            "FIELD.BIN",
-            FIELD_MAIN_LOOP_LO,
-            FIELD_MAIN_LOOP_HI,
-            "scenario:field-ready",
-            READY_TIMEOUT_MS,
-        );
-    },
-    onTrigger(ctx, ev) {
-        if (ev.kind === "timeout") {
-            failOnTimeout(ctx, ev, "scenario-save10", "timeout");
-            return [];
-        }
-        switch (ev.name) {
-            case "scenario:field-ready":
-                ctx.log("info", `scenario-save10: FIELD 主轮询体到了 ⇒ move (${CLICK_X},${CLICK_Y})`);
-                ctx.input.move(CLICK_X, CLICK_Y);
-                return awaitReadPoint(ctx, "scenario:hovered", READY_TIMEOUT_MS);
-            case "scenario:hovered":
-                ctx.log("info", `scenario-save10: click (${CLICK_X},${CLICK_Y})`);
-                ctx.input.click(CLICK_X, CLICK_Y);
-                return ctx.trigger.afterDelay(SURVIVE_MS, { name: "scenario:survive" });
-            case "scenario:survive":
-                ctx.log("info", `scenario-save10: 点击之后 ${SURVIVE_MS} ms 仍在跑`);
-                ctx.finish(0, "scenario-save10: survived");
-                return [];
-            default:
-                failOnUnknown(ctx, ev);
-                return [];
-        }
-    },
-};
 
 // ★ **没有** `startPage` 旋钮（2026-11-22 删）：读档界面进屏时 `SAVE.BIN` 第 11 行
 //   `load-int (global-int 138e)` 会把页号**从 `SAVE.DAT` 重新读回** ⇒ 在进屏之前写它会被覆盖
@@ -98,46 +63,48 @@ const DEFAULT_EXPECT = ["FIELD.BIN"];
 /** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
 const CONFIG_DOMAIN = "scenario.save10-field";
 
-/** @type {import("./lib/chains.js").Chain | null} */
-let chain = null;
-
-/**
- * 一次 Run 内 config / params 不变 ⇒ 链只构造一次（链本身无状态：进度只在 `ev.name`）。
- * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍重读会在 2 ms 窗口里占可观测的份额）；
- *   取配置的语义统一在 `./lib/settings.js`（`slot` 整数校验 / `expect` 归一 / 默认 10）。
- *
- * @param {RunCtx} ctx
- * @returns {import("./lib/chains.js").Chain}
- */
-function chainFor(ctx) {
-    if (chain !== null) return chain;
-    const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
-    const slot = slotSetting(ctx, domain, SLOT, CONFIG_DOMAIN);
-    const listed = scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN);
-    // ★ 与旧行为逐字一致：config 给了空表 ⇒ `normalizeScriptList` 已 throw；params 给空（如 `","`）
-    //   也回退 `DEFAULT_EXPECT`（旧代码就是这么判的）。
-    const expect = listed === null || listed.length === 0 ? DEFAULT_EXPECT : listed;
-    const load = loadSave(slot, {
-        expect,
-        onLoaded: (ctx2) => scenario.start(ctx2),
-    });
-    const boot = bootToTitle({
-        onDone: (ctx2) => load.start(ctx2),
-    });
-    // 两层 route：外层剥 `boot:`，内层剥 `load:`，剩下的是场景自己的 `scenario:` 前缀。
-    // ★ 三个前缀两两不相交（`boot:` / `load:` / `scenario:`）—— `route` 只看 `isFirst(ev)`。
-    const afterBoot = route((ev) => String(ev.name).startsWith("load:"), load, scenario);
-    chain = route((ev) => String(ev.name).startsWith("boot:"), boot, afterBoot);
-    return chain;
-}
-
 /** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
     start(ctx) {
-        return chainFor(ctx).start(ctx);
-    },
-    onTrigger(ctx, ev) {
-        return chainFor(ctx).onTrigger(ctx, ev);
+        // ★ 一次 Run 内 config / params 不变 ⇒ 只在 `start`（Run 回调）里读一次。
+        //   取配置的语义统一在 `./lib/settings.js`（`slot` 整数校验 / `expect` 归一 / 默认 10）。
+        const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
+        const slot = slotSetting(ctx, domain, SLOT, CONFIG_DOMAIN);
+        const listed = scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN);
+        // ★ 与旧行为逐字一致：config 给了空表 ⇒ `normalizeScriptList` 已 throw；params 给空（如 `","`）
+        //   也回退 `DEFAULT_EXPECT`（旧代码就是这么判的）。
+        const expect = listed === null || listed.length === 0 ? DEFAULT_EXPECT : listed;
+
+        ctx.task(async (t) => {
+            const titleTick = await bootToTitle(t);
+            await loadSave(t, slot, { expect }, titleTick);
+            log.info("scenario-save10: FIELD.BIN reached ⇒ 等主轮询体（地图就绪）");
+            let tick = await awaitPosition(
+                t,
+                "FIELD.BIN",
+                FIELD_MAIN_LOOP_LO,
+                FIELD_MAIN_LOOP_HI,
+                "scenario:field-ready",
+                READY_TIMEOUT_MS,
+                "scenario-save10",
+                "timeout",
+            );
+            log.info(`scenario-save10: FIELD 主轮询体到了 ⇒ move (${CLICK_X},${CLICK_Y})`);
+            tick.input.move(CLICK_X, CLICK_Y);
+            tick = await awaitWhere(
+                t,
+                { script: "FIELD.BIN" },
+                "scenario:hovered",
+                READY_TIMEOUT_MS,
+                "scenario-save10",
+                "timeout",
+            );
+            log.info(`scenario-save10: click (${CLICK_X},${CLICK_Y})`);
+            tick.input.click(CLICK_X, CLICK_Y);
+            await t.delay(SURVIVE_MS);
+            log.info(`scenario-save10: 点击之后 ${SURVIVE_MS} ms 仍在跑`);
+            t.finish(0, "scenario-save10: survived");
+        });
     },
 };
 

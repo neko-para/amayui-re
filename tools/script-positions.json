@@ -239,7 +239,7 @@
         "//   `FIELD` #2722 / #9688、`RESETMAPAN` #1）都从这里进 ⇒ `field-point-visible` 只挂**它的入口**就够",
         "//   （补 `50ff9f` 的 bit0）。`SETOBJ` 只在 `RENDERMAP` 里跑（#117）⇒ 那一趟进 DRAWOBJ 时派生位",
         "//   已是重算值；入口施加 ⇒ 4 条路都成立。",
-        "//   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；`mode:\"reenter\"` ⇒ 每进一次 DRAWOBJ 一次。",
+        "//   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；v2 用 `ctx.at({ script, pos: DRAWOBJ_ENTRY_LO })` ⇒ 每进一次 DRAWOBJ 一次。",
         "// ==========================================================================="
       ]
     },
@@ -1004,8 +1004,8 @@
       "note": [
         "// **静态门的第一条读**（`eq (local-int c) (local-ptr 2) 1` @`0x03A0`）：它读的 dword =",
         "// `eb5c1[map*50 + slot]`（视图里 `lookup-array-2d … 32 …` 的 `32` 是**十六进制** = 50）。",
-        "// `ctx.hook.at(\"DRAWOBJ.BIN\", DRAWOBJ_GATE_EQ)` + `handle.patch({ ptrLocal: 2 }, 1)` 在这一条",
-        "// **临时**把 `local-ptr 2` 指向的 dword 改成 1、执行完恢复 ⇒ 静态门通过、净变化 0。",
+        "// `ctx.at({ script: \"DRAWOBJ.BIN\", pos: DRAWOBJ_GATE_EQ }, …)` 里每拍 `tick.patch({ ptrLocal: 2 }, 1)` 在这一条",
+        "// **临时**把 `local-ptr 2` 指向的 dword 改成 1（handler 之后、指令执行之前写；下一拍按 CAS 恢复）⇒ 静态门通过、净变化 0。",
         "// 门的另外三腿：`511080[type]==3`、`flags&6==2`、`25c00[map*100 + row]` 的 bit `col`（实测为 1）。"
       ]
     },

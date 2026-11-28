@@ -3,8 +3,8 @@
 // 插件文件 = ES module；`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
 // 宿主 QJS 装载后读 default 导出；不再读 globalThis.render/start/onTrigger。
 //
-// ★ v2（S2c/S3，2026-11-28；P0 补 `once` 全形态 / `delay` / Run 侧门）：
-//   新插件写 `start(ctx)` 装 `ctx.at` / `ctx.once` / `ctx.delay` / `ctx.task`，
+// ★ v2（S2c/S3，2026-11-28；P0 补 `once` 全形态 / `delay` / Run 侧门；P1-fix 补 `waitAny`）：
+//   新插件写 `start(ctx)` 装 `ctx.at` / `ctx.once` / `ctx.delay` / `ctx.task` / `ctx.waitAny`，
 //   `start` 返回 `void`（不再返回 Trigger 集合）；指令点回调 / `once` 的 resolve 给一个 `Tick`，
 //   写面在 Tick 上（`now` / `local` / `edit` / `input` / `patch` / `log`）。
 //   `ctx.at` / `ctx.once` / `ctx.delay` / `ctx.task` 的门 = **Run 侧入口**（Run 回调 / task
@@ -522,9 +522,9 @@ export interface ConfigApi {
  *
  * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`；
  *   2026-11-26 `config` 加回 `RenderCtx`；S2b/S2c 追加 `once` / `task` / `at` / `off`；
- *   P0 追加 `delay`，`once` 放开全部 `AtWhere`）：
- *   - **v2（推荐）**：`at` / `off` / `once` / `delay` / `task` + `config` / `appdata` / `read` / `log` /
- *     `fail` / `finish` / `quit`；
+ *   P0 追加 `delay`，`once` 放开全部 `AtWhere`；P1-fix S2 追加 `waitAny`（多臂 + wall-clock 超时））：
+ *   - **v2（推荐）**：`at` / `off` / `once` / `waitAny` / `delay` / `task` + `config` / `appdata` / `read` /
+ *     `log` / `fail` / `finish` / `quit`；
  *   - **v1 兼容层（deprecated）**：`trigger` / `hook` / `now`（新代码见各成员的 `@deprecated`）；
  *   - 其它已实现：`edit` / `input` / `read.global.get` / `ui`（**只写**宿主本地状态，v2 里 UI 只归
  *     render）/ `profile` / `state` / `params`；
@@ -567,6 +567,25 @@ export interface RunCtx<State = Record<string, unknown>> {
      *  · 同一个 Run 可以有多个 `once`（与 `ctx.hook.at` 走同一张 owner 表）。
      *  ★ 它让 Run **保持存活**（与 task / delay 一样）：等待期间的 Run 不收口。 */
     once(where: AtWhere, opts: { readonly timeoutMs: number }): Promise<Tick>;
+    /**
+     * **多臂等待**（P1-fix S2）：同时装 `arms.length` 条**临时**订阅，**第一条命中胜出**。
+     *  · `arms` = **至少 1 条** `AtWhere`（与 `ctx.once` 完全相同的五种形态），最多 **32** 条；
+     *    空数组 / 超过 32 条 / 形状非法 ⇒ **TypeError**（⛔ 不返回一个永不 settle 的 Promise）；
+     *  · resolve `{ index, tick }`：`index` = 胜出的那一条在 `arms` 里的下标（注册序），`tick` =
+     *    命中那一拍的 Tick（与 `ctx.once` 的 Tick 同形；临时条目已结算 ⇒ `tick.patch` 回执
+     *    `once_tick`，`tick.local` / `edit` / `input` 仍可用）；
+     *  · 胜出后**其余臂的临时 hook 立刻撤掉**（不留 pending）—— 这正是 `Promise.race([ctx.once(...)])`
+     *    做不到的（`once` 不能撤）；
+     *  · `opts.timeoutMs` **必填且 > 0**：到点 = **失败截止**（与 `ctx.once` 同一条）——先 reject
+     *    （reason 列出全部 arms），让 `catch` 在泵里 drain 到；随后宿主记 timeout 并 **fail Run**
+     *    （用户 catch 了也照样 fail；若 catch 里 `ctx.finish(5, …)`，Run 已是终态 ⇒ 读数是 finished）。
+     *    ⛔ 不提供"永不结束的等待"；
+     *  · 门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；render 里 TypeError；
+     *  · 等待期间让 Run **保持存活**（`hasPendingWork`）；命中 / 超时 / Run 收口清账；
+     *  · `ctx.hook.clear()` / owner release 撤掉臂 ⇒ 整组被外部清掉时 **reject**（⛔ 不留永久 pending）。
+     *  @example `const hit = await ctx.waitAny([{script:"FIELD.BIN"},{script:"BTL.BIN"}], {timeoutMs: 30000});`
+     */
+    waitAny(arms: readonly AtWhere[], opts: { readonly timeoutMs: number }): Promise<WaitAnyResult>;
     /** **墙钟延迟**（P0）：`await ctx.delay(ms)` ⇒ 至少等 `ms` 毫秒后 resolve。
      *  · `ms` **必填 / 整数 / `0 <= ms <= 24h`**（越界 / 小数 / 非数字 ⇒ TypeError；⛔ 不截断）；
      *  · **不是 trigger**：到点只 resolve，**不 fail Run**；由**既有泵**推进（读点 / render 入口）——
@@ -752,6 +771,15 @@ export interface Tick {
     readonly pos: number;
     /** @deprecated 用 `now.opcode`。 */
     readonly opcode?: number;
+}
+/** `ctx.waitAny` 的 resolve 值（P1-fix S2）。
+ *  · `index` = 胜出的那一条臂在 `arms` 里的下标（**注册序**；0 基）；
+ *  · `tick` = 命中那一拍的 `Tick`（与 `ctx.once` 的 Tick 同形；它的临时条目已结算 ⇒
+ *    `tick.patch` 回执 `once_tick`）。
+ *  ★ 有效期与 `Tick` 同一条：`local` / `edit` / `input` 只在产生它的那次入口（含 drain）内可用。 */
+export interface WaitAnyResult {
+    readonly index: number;
+    readonly tick: Tick;
 }
 /** S2a/S2b 的旧名（= v2 `Tick` 的**平铺**视图；保留是因为 `handle.onTick` 的既有调用方与夹具
  *  用平铺字段）。★ 运行时两者是**同一个对象**（`handle.onTick` 拿到的也带 `now` / `local` /

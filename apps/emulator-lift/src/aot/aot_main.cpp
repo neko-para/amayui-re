@@ -1477,6 +1477,16 @@ int main(int argc, char** argv) {
     //     host 摘掉（⛔ 不让窗口留一个指向已销毁 `PluginScript` 的指针）。之后不再提交帧。
     if (plugin_host != nullptr) {
         host.cpu().windows->setReadPointObserver(nullptr);
+        // ★ 2026-11-28（P1 复审 S2 · readout 顺序）：**先拍 readout 快照，再 `releaseOwner()`**。
+        //   为什么顺序是承重的：`releaseOwner` → `releaseRunHooks` → `instrHookReleaseOwner` →
+        //   `on_released` 会把本 Run 的 `ctx.at` 订阅（`at_subs`）逐条摘掉；而 readout 的
+        //   `run=done` 判据是 `runner.done() && !hasPendingWork()`，`hasPendingWork` 恰好把
+        //   `at_subs` 算作存活来源 ⇒ 先 release 再打，**只靠 `at` 常驻的插件**会被误读成 `run=done`
+        //   （`plugin-field-switch` 的 e2e 判据是 `run=waiting`）。跳过这一行的症状是"常驻插件
+        //   在 readout 里看起来已经收口"，而它其实还在等指令点。
+        //   ★ `releaseOwner` 仍要清 owner（hook / 输入状态），收口责任不变 —— 只是读数取的是
+        //   **收口前**那一刻的事实（顺序：快照 → release → 打印）。
+        const std::string plugin_readout = plugin_host->readout();
         plugin_host->releaseOwner(*host.cpu().windows);
         // ★ D2（2026-11-25）：config 桥的收口**必须在 `plugin_host` 还活着的时候**做 ——
         //   桥的实现 = `PluginHost`，而它比 `host` / 窗口 sink 后声明 ⇒ 先析构。
@@ -1486,7 +1496,7 @@ int main(int argc, char** argv) {
             sdl_display->releaseOverlayScript();
         }
         host.setConfigBridge(nullptr);
-        std::printf("%s\n", plugin_host->readout().c_str());
+        std::printf("%s\n", plugin_readout.c_str());
         std::fflush(stdout);
     }
     host.printRunSummary(r, stdout, readout_detail);
