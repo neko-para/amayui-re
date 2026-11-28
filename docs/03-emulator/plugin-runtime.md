@@ -2152,3 +2152,26 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 以 `git diff --numstat` 为准（不在此固化数字）：当前是 `d3d9.cpp`/`d3d9_pipeline.{cpp,h}`/
 `d3dx9_sprite.cpp`/`shims/d3dx9.cpp` 的 save06 临时诊断改动，不属于本报告证据面；本报告未引用这些文件。
 复核 D3D/present 结论用 `git show HEAD:<path>`，⛔ 不用工作树临时改动。
+
+---
+
+## §9 v1 兼容层移除（2026-11-28，最终形态）
+
+- **删除的 C++**：`runtime/trigger.{h}` · `trigger_runner.{h,cpp}` · `trigger_factory.cpp` · `runtime/context.h` ·
+  `plugin/readings.{h,cpp}` · `TriggerHandler` / `TriggerFactory` / `Trigger` / `TriggerState` / `AtReadPoint` /
+  `ReadingsSource` / `PluginScript::onTrigger` / `hasRun`（→ `hasStart`）。
+- **删除的 JS 面**：`PluginModule.onTrigger` / `initialState`、`ctx.trigger.*`、`ctx.now`、`ctx.state`、RunCtx 的
+  `ctx.ui`、`ctx.hook.*`（`at/list/clear` + `handle.onTick/capture/stats/patch`）、`ctx.log` / `tick.log`、
+  `RunCtx.edit` / `RunCtx.input`（写面只在 `Tick`）、`Tick` 的 deprecated 平铺、`InstrHookStats`、
+  `InstrHookKind::V1At`。
+- **保留（不是兼容层）**：`ctx.read` / `params` / `config` / `appdata` / `profile` / `finish` / `quit` / `fail`、
+  `IntentExecutor`（input 下一读点落地、timeout/delay/waitAny 泵）、`ReadPointObserver`。
+- **新增的 v2 原语（迁移需要）**：`ctx.waitAny(arms,{timeoutMs})`（多臂等待，第一条命中胜出）、
+  `ctx.delay(ms)`（墙钟 await，NON-DIFFABLE，不是 trigger）。
+- **发行插件全部 `.ts`**：`scripts/plugins/{load-save,quit-at-title,field-point-visible,scenario-*}.ts` +
+  `lib/*.ts`（12 个）；examples 9 个 `.ts`；`pnpm typecheck` 有 plugins 与 examples 两条 tsconfig
+  （`erasableSyntaxOnly`）。装载按扩展名加 `JS_EVAL_FLAG_TYPESCRIPT`；`.js` 仍可作测试夹具但不用于发行插件。
+- **运行模型**：`start(ctx)`（同步）→ `ctx.task`/`once`/`at` 注册 → 读点/render 泵推进 → 全部 settled +
+  无订阅 ⇒ done；`ctx.finish/quit/fail` 收口；timeout = 失败截止（§4.14a）。
+- **回归证据**：全量 `ctest` 143/143；`plugin-runtime` 1281 checks；`plugin-headless` / `plugin-field-switch` /
+  `plugin-overlay` / `aot-quit-exit`（非默认档）行为断言按原样；e2e `load-save.ts` 到 FIELD。
