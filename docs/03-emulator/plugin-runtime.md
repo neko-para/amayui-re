@@ -1487,6 +1487,22 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **门禁**：`plugin/once-resolve` / `once-timeout` / `task-await` / `task-await-close` / `task-keeps-run` / `task-reject` /
   `pump-budget` / `module-start-only`；变异覆盖 `call()` drain / `once` deadline / `hasPendingWork`。
 
+### 4.14a 超时 / 拒绝的终止语义（明确口径）
+
+- **`once` 超时 = 这个 Run 的失败截止**：`reject`（reason 点名 script/pos/timeoutMs）→ 泵 drain（`catch` 在这里跑，
+  只能 `log`/只读）→ **`fail Run`（`once-timeout`）**。**即使用户 `catch` 了、甚至吞掉，Run 仍然失败**。
+- **`ctx.task` 返回的 Promise 被 reject**（含 catch 后 `throw`）⇒ **`fail Run`（reason = 该 rejection）**。
+  若 Run 已经是 `finished` / `quit` / `failed`，rejection 被**静默丢弃**（不覆盖 exit/reason）。
+- **终止的是"这个 Run"，不是进程、不是 guest**：该 Run 的 hook / `at` 订阅 / `once` 账随收口释放；`task` 不再被泵推进；
+  读点 / render / tick 不再跑该 Run 的插件 JS。guest 继续执行；`--time-limit` / `ctx.quit` 才能停进程。
+  当前一个 host 只有一个插件 / 一个 Run（多 Run 属 C5），所以"终止所有插件执行"实际 = 终止**本插件本 Run**。
+- **没被 `ctx.task` 跟踪的浮动 Promise**：宿主不观察、不会因此 fail Run；QuickJS 也不会崩。
+  ⛔ 不要用"裸 Promise"表达需要收口的异步；用 `ctx.task`（或 `once`，它的超时由宿主负责）。
+- **样例**：`examples/timeout.ts` / `dispatch.ts` 用 `try/catch` 只是把原因 `log` 出来/改写成自己的失败原因；
+  `load-save.ts` / `concurrent.ts` 故意不 catch —— 超时同样会让宿主 fail Run（catch 不是"续命"手段）。
+- **门禁**：`plugin/once-timeout`（catch 吞掉 ⇒ 仍 `run=failed`）；`plugin/task-reject`；`plugin/task-finish-*`
+  （终态不被 rejection 翻面）。
+
 ### 4.15 同步订阅（S2c-1：`ctx.at` 链 + 只读 `Tick` + `local` + stale）
 
 - **`ctx.at(where, (tick, next) => …)` → 订阅 id（number）**：每条订阅 = 一条 runtime Entry（各自 handle、
