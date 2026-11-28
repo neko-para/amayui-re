@@ -1,5 +1,11 @@
 # 业务外策略入口的能力整合：v1（合同）· plan-as-callbacks + 操作类
 
+> ★★ **2026-11-28 最终形态（当前合同）**：插件 v1 兼容层**已删除**（`TriggerRunner` / armed 集合 /
+> `onTrigger` / `ctx.trigger|now|state|ui|hook|log`），发行插件全部是 **`.ts`**。
+> 当前 API = **§4.12–§4.16**（`RunCtx`/`Tick`/`RenderCtx`、`at`/`once`/`waitAny`/`task`、全局 `log`、
+> 指令点 `patch` 与多槽 CAS）。本文 §4.2 / §4.4b / §4.5 / §4.6 / §5 / §7 中的 v1 描述**只作历史**，
+> 不再是合同；守卫与读数以 §6 行 44–49 与 `ctest` 现状为准。
+>
 > 2026-11-19 / macOS arm64 · **合同 v1**（= 设计 v5.3.2 + Timeout 合同）。
 > 本文是**已入库的合同**：API 声明 = `apps/emulator-lift/scripts/plugins/plugin.d.ts`；
 > 示例 = `apps/emulator-lift/scripts/plugins/examples/`（9 个 `.ts`，strict `tsc`）；
@@ -375,6 +381,10 @@ guest 状态         InputDevice / WindowManager / GuestMemory / engine_marker /
 
 ### 4.2 TriggerRunner（具名 armed 集合；一读点最多一个）
 
+> ⛔ **已删除（2026-11-28）**：`TriggerRunner` / armed 集合 / `onTrigger` / `AtReadPoint` 整条移除。
+> 当前 Run 模型 = `start(ctx)` + `ctx.task`/`once`/`at` → 泵推进 → settled + 无订阅 ⇒ done（§4.12–§4.16）。
+> 以下为 v1 历史。
+
 ```c++
 enum class TriggerKind : uint8_t { AfterScript, AfterPosition, AfterDelay, AtReadPoint, Frame };
 enum class TriggerMode : uint8_t { Once, Reenter };
@@ -667,6 +677,9 @@ public:
 
 ### 4.5 Context（操作类 API；插件运行时）
 
+> ⛔ **已删除（2026-11-28）**：v1 `Context`（`trigger`/`now`/`state`/`ui`/`hook`/`log` 等）已移除。
+> 当前面 = §4.12–§4.16 的 `RunCtx` / `Tick` / `RenderCtx`。以下为 v1 历史。
+
 ```c++
 struct TriggerReadings {          // 值快照；没有可变宿主/guest 句柄
     std::string script; std::uint32_t pos; bool pos_ok;
@@ -861,6 +874,11 @@ struct Context {
 
 ### 4.6 JS 单插件契约（render / start / onTrigger 可选）
 
+> ★ 2026-11-28（v2 最终形态）：`PluginModule` 只有 **`render?`** 与 **`start(ctx): void`**；
+> **没有** `onTrigger` / `initialState`；`start` 同步返回空，异步只用 `ctx.task`；
+> 发行插件是 **`.ts`**（loader 按扩展名加 `JS_EVAL_FLAG_TYPESCRIPT`）。本节以下 `start/onTrigger`
+> 的描述是 **v1 历史**（兼容层已删）。
+
 **入口**：`--plugin <id|path>` 是**唯一**脚本装载点（D1）。`--overlay` 自 **S2** 起是
 「装载内置 `hud`（保留 id）+ 要求窗口」的**布尔预设**（⛔ 不是第三个装载器）；旧 `--ui`
 已在 **S3 删除**（⇒ 未知参数 exit 2）。**一个**运行时/context；可选 `render` / `start` / `onTrigger`：
@@ -868,12 +886,13 @@ struct Context {
 有 `render` 时需窗口。
 
 ★ **S1（2026-11-25）：`--plugin` 收两种 spec**（机械判据只一条）：
-`id := ^[A-Za-z0-9_-]{1,64}$`，其余一律当**路径**（含 `.` / `/` / `\` / `:`、绝对路径、`.js` 后缀 ⇒
-`x.js` 天然是路径，行为与旧版逐字相同）。id = 文件名 stem，只查**两处非递归根**：
-① `<exeDir>/scripts/plugins/<id>.js`（发行）② 编译期 `LIFT_PLUGIN_DIR/<id>.js`（开发，= 源码
-`apps/emulator-lift/scripts/plugins`）；**⛔ 不查 `lib/`、⛔ 不递归子目录**。两根都命中 ⇒ `exit 2`
-并列出全部候选；都不在 ⇒ `exit 2` 并列出搜过的根与每个候选。命中 ⇒ 打**一行**
-`emulator-lift-aot: --plugin id=<id> ⇒ <绝对路径>`，再用绝对路径交给 `initFromFile`（一次性，⛔ 不周期）。
+`id := ^[A-Za-z0-9_-]{1,64}$`，其余一律当**路径**（含 `.` / `/` / `\` / `:`、绝对路径、`.js`/`.ts` 后缀 ⇒
+`x.ts` 天然是路径）。id = 文件名 stem，只查**两处非递归根**：
+① `<exeDir>/scripts/plugins/<id>.js` → `<id>.ts` → `<id>.mts`（发行；`.js` 优先）② 编译期
+`LIFT_PLUGIN_DIR/<id>.js` → `.ts` → `.mts`（开发，= 源码 `apps/emulator-lift/scripts/plugins`）；
+**⛔ 不查 `lib/`、⛔ 不递归子目录**。两根都命中 ⇒ `exit 2` 并列出全部候选；都不在 ⇒ `exit 2` 并列出
+搜过的根与每个候选。命中 ⇒ 打**一行** `emulator-lift-aot: --plugin id=<id> ⇒ <绝对路径>`，再用绝对路径
+交给 `initFromFile`（一次性，⛔ 不周期）。
 
 ★ **S2（2026-11-25）：`--overlay` = `--plugin hud` 预设**（用户口径，命令逐字不变）：
 1. **触发** = 显式 `--overlay` 且**没有** `--plugin`；此时内部解析保留 id `hud`。

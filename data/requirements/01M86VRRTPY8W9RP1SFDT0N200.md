@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
 - verify: tools/test/plugin-loadsave-page.test.mjs#loadsave-page/first-click-swallowed
-- repro: apps/emulator-lift/scripts/plugins/scenario-fellow-switch.js#loadSave(9
+- repro: apps/emulator-lift/scripts/plugins/scenario-fellow-switch.ts#loadSave(t, 9
 - severity: S2
 - tags: [emulator-lift, input, plugin, defect]
 

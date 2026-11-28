@@ -40,9 +40,9 @@
 
 ## 读数（端到端）
 
-- 入口 = `repo:apps/emulator-lift/scripts/plugins/scenario-save10-field.js`（`--plugin-param slot=10`；跑前 `scripts/clean-appdata.sh <appdata>`）。
+- 入口 = `repo:apps/emulator-lift/scripts/plugins/scenario-save10-field.ts`（`--plugin-param slot=10`；跑前 `scripts/clean-appdata.sh <appdata>`）。
 - **3/3 都 `finish(0)`**，每次都有：`[warn] [video] movie: 音频头不是 MPEG-1 Layer II ⇒ 只播视频` · `[video] movie: opened: 120x120 @ 30.000 fps, duration 0.933 s` · `[dshow] tex movie #1 w=120 h=120 nonzero=17 sampled=225`（像素真的进了纹理）· `scenario-save10: 点击之后 8000 ms 仍在跑`。
-- ⚠ 这 3 次跑的是**页链改写前**的 `save.js`；页链落地后**用最终 `save.js` 又跑一次**：`calls=10 run=finished exit=0 reason=scenario-save10: survived`（页读数 `load-save: page 1 (target 1, slot 10)` —— 槽 10 就在当前页 ⇒ 不翻页）。两版在 `slot=10` 这条分支上逐字相同，⛔ 别把"3 次"说成"3 次都用最终版"。
+- ⚠ 这 3 次跑的是**页链改写前**的 `save.ts`；页链落地后**用最终 `save.ts` 又跑一次**：`calls=10 run=finished exit=0 reason=scenario-save10: survived`（页读数 `load-save: page 1 (target 1, slot 10)` —— 槽 10 就在当前页 ⇒ 不翻页）。两版在 `slot=10` 这条分支上逐字相同，⛔ 别把"3 次"说成"3 次都用最终版"。
 - 门禁（2026-11-22 / win32）：`ctest` 137/137 · `pnpm test` 614/614 · `pnpm verify` 500 pass / 2 skip。
 
 ## 未做 / 边界
