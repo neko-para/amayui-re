@@ -44,7 +44,7 @@
 
 ## 已裁决（父级 2026-11-27）
 
-- **v1 API 保留为 deprecated 兼容层**，v2 是新增面；scenario/lib 迁移另开子单，本轮只迁 examples。
+- **v1 API 已删除**（2026-11-28 用户裁决：直接以最终形态体验，不留兼容层）：`TriggerRunner`/`Trigger`/`Context`/`onTrigger`/`ctx.trigger|now|state|ui|hook|log` 全部移除；scenario/lib 已迁 v2，发行插件全部为 `.ts`。**不做 MSVC(cl)**，统一 clang-cl。
 - **S0 语义**：`patch` 恢复 = CAS（当前值仍是我写的值才写回，否则计数 `restore_conflicts` 不覆盖）；hook 归 **Run 序号**（owner），所有收口路径 `instrHookReleaseOwner`；render 期 7 个 hook trampoline 一律 TypeError；`--no-s7` 把注入站点数写进 `lift_pin.h`，0 ⇒ `at()` 返回 `undefined` + 一行 error。
 - 不做：逻辑 timer（固定时间触发不知道 guest 位置）、嵌套 Run、enum/参数属性/JSX/装饰器（v1 由 `erasableSyntaxOnly` 排除）。
 
@@ -61,10 +61,9 @@
 - **S1**（`d4668eb` + `d819864`）：quickts E1 进 quickjs-ng（`.js` 字节码 16/16、examples 9/9 零 module request）+ `.ts` 端到端 + `erasableSyntaxOnly` 门禁。
 - **S2a–S2c**（`d72afb2` … `6807ada`）：指令点 sink + `onTick` + 每入口 drain；`once`/`task`/timeout/存活；`ctx.at` 五形态 + 链 + `Tick` 只读/写面 + 多槽 Pending + stale；每片独立复审（accept-with-findings，findings 均已修）。
 - **S3**（`bf3d90a`）：插件全局 `log`（Run/tick/render/timeout；classic HUD 不装）。
-- **S4**（`6c41696`）：9 个 examples 迁 v2、`plugin.d.ts` v1 面 deprecated、README 更新。
+- **S4**（`6c41696`）：9 个 examples 迁 v2；**P1 + P2 + T1**：scenario/lib/真实入口全部迁 v2 并改为 `.ts`，v1 运行时与 d.ts 兼容面已删除（2026-11-28）。
 - 门禁：`pnpm test` 181 / `typecheck` 0 / `verify` 448 pass+2 skip / `requirements` 6/6；dev 全量 `ctest` 144/144。
 
 ## 未做（明确，已另立单 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`）
 
-- scenario/lib 迁移、C5 dispatch / Run 实体、perf A/B（hook ≤1.5% 等）、FIELD 人工体验、MSVC（cl）。
-- 本单收口的是**插件内 API**（VM 指令点 + TypeScript + RunCtx/Tick/at/once/task）；上述四项各有自己的判据，⛔ 不在本单里虚报。
+- 仅剩：perf A/B（hook ≤1.5% 等）、FIELD 人工体验（用户侧 `--user-run`）；两者各有自己的判据，⛔ 不在本单里虚报。

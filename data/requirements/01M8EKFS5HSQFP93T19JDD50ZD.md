@@ -76,4 +76,4 @@
 ## 进展（2026-11-28）
 
 - **已实现**（dev `d72afb2` → `6807ada`）：S2a sink/onTick/每入口 drain；S2b `once`/`task`/timeout/存活；S2c-1 `ctx.at` 链 + `Tick` 只读；S2c-2 `where` 五形态 + `Tick` 写面 + 多槽 `Pending`；S3 全局 `log`。守卫与变异逐片实测（red→green），复审 accept-with-findings，findings 已修。
-- **收口口径**：本单 = **插件内 API**。Run 实体 / `dispatch busy`（C5）与 scenario/lib 迁移按裁决另立 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`；不在本单里虚报。
+- **收口口径**：本单 = **插件内 API**。**v1 兼容层已删除**（2026-11-28）：`trigger`/`hook`/`now`/`state`/`ui`/`log` 与 `onTrigger` 不再存在；发行插件全部是 `.ts`；`ctx.waitAny`/`ctx.delay` 为迁移补的两条原语。dispatch/C5 与 FIELD 体验另立 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`。

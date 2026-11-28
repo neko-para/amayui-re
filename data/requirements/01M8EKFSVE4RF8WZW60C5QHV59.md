@@ -71,4 +71,4 @@
 
 - **S1 已实现**（dev `d4668eb` + `d819864`）：`quickts_e1.h`（1,125 行，上游 `66e2847`，MIT，E1 only）+ `quickjs.c` 18 个插入区 + `JS_EVAL_FLAG_TYPESCRIPT`；`.js` flags off/on 字节码 16/16 恒等 + 内联 GLOBAL 13/13；examples 9/9 编译且零 module request；`.ts`/`.mts` 装载；`plugin_search` 候选；`erasableSyntaxOnly` 常设门禁；`__text` +8,243 B。
 - **S4 已实现**（dev `6c41696`）：9 个 examples 迁 v2、`plugin.d.ts` 的 v1 面 deprecated、`scripts/plugins/README.md` 更新。
-- **未做（已另立单 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`）**：enum/JSX（E2，按需）、extensionless import、HUD `.ts`、product-exe `.ts` e2e、MSVC（cl）、perf A/B。
+- **未做（已另立单 `REQ-01M8FP9GQBMA7K6JBTQ4YZZ6JB`）**：enum/JSX（E2，按需）、extensionless import、HUD `.ts`、perf A/B。发行插件已全部 `.ts`（12 个 plugin/lib 文件），examples 与 plugins 各有一条 tsconfig 门禁。
