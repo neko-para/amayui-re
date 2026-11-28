@@ -9,7 +9,7 @@
 | | 落点 | 读写 |
 |---|---|---|
 | **锚表（真源）** | `tools/script-positions.json` | 人工编辑的文本；`gen` **不回写**它 |
-| **生成物** | `apps/emulator-lift/scripts/plugins/lib/script-positions.js` | 唯一写入口 = `gen --write`；⛔ 别手改（`check` 会红） |
+| **生成物** | `apps/emulator-lift/scripts/plugins/lib/script-positions.ts` | 唯一写入口 = `gen --write`；⛔ 别手改（`check` 会红） |
 | 输入（只读） | `data/translations/patch.json` + 基线安装树（清单 `roots.gameInstall`） | 补丁后视图由 `lib/patch.mjs` 的 `buildView('src', …)` 现算 |
 
 **一条锚 = 基线里的一段指令序列 + 基线行序**，它绑一个消费方 `import` 的常量名。生成物里的数值是

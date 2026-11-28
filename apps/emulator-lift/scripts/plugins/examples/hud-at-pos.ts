@@ -56,20 +56,20 @@ function start(ctx: RunCtx): void {
         hud.visible = true;
         hud.title = ""; // 占位：标题
         hud.lines = []; // 占位：正文行
-        tick.log("debug", "hud: enter @" + String(tick.now.pos));
+        log.info("debug", "hud: enter @" + String(tick.now.pos));
         next(); // 继续同点的后续 at handler（没有就只是示范链语义）
     });
 
     leaveId = ctx.at({ script: LEAVE_SCRIPT, lo: LEAVE_LO, hi: LEAVE_HI }, (tick, next) => {
         hud.visible = false;
-        tick.log("debug", "hud: leave @" + String(tick.now.pos));
+        log.info("debug", "hud: leave @" + String(tick.now.pos));
         next();
     });
 
     if (enterId === undefined || leaveId === undefined) {
         ctx.fail("hud", "ctx.at 未装（no_injection）");
     }
-    ctx.log("info", "hud: subscriptions installed");
+    log.info("info", "hud: subscriptions installed");
 }
 
 function render(rctx: RenderCtx): void {

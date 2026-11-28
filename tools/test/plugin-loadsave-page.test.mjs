@@ -8,7 +8,7 @@
  *     ⇒ **翻页那条链（`load:pg:*`）在两道门里一次也没跑过**。
  *   · 于是 `PAGE_STALL_LIMIT` 从 60 起就没有任何守卫：60 个读点 ≈ 164 ms，而一次箭头点击要跨
  *     **两个完整 guest 回调**（闸门②′）才抬起 ⇒ 真机上页号要 76–77 个读点才变（读数出处：
- *     `apps/emulator-lift/scripts/plugins/lib/save.js` 文件头 §2026-11-25）。
+ *     `apps/emulator-lift/scripts/plugins/lib/save.ts` 文件头 §2026-11-25）。
  *   ⇒ 本用例用一个**假的 ctx + 假的 guest** 把那条链跑起来，判三件事（都是"变了就是 bug、而且变了
  *     是静默的"）：
  *       ① 正常路径（第一下点击被消费）⇒ **只允许一次**箭头点击（多一次 = 页会被多翻一格 → 点到空槽）；
@@ -26,13 +26,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { loadSave } from '../../apps/emulator-lift/scripts/plugins/lib/save.js';
+import { loadSave } from '../../apps/emulator-lift/scripts/plugins/lib/save.ts';
 
 /** 模型参数：一次箭头点击从"提交"到"页号变"要跨过的读点数（读数出处见文件头）。 */
 const CLICK_LATENCY_READS = 76;
-/** 翻页链要读的页号 global（与 `guest-globals.js` 的 `SAVE_PAGE_GLOBAL_ID` 同一个数；本用例只做假读数）。 */
+/** 翻页链要读的页号 global（与 `guest-globals.ts` 的 `SAVE_PAGE_GLOBAL_ID` 同一个数；本用例只做假读数）。 */
 const SAVE_PAGE_GLOBAL_ID = 0x138e;
-/** `SAVE.BIN` 的回调体（`load:page-ready` 的门区间；真值来自 `script-positions.js`）。 */
+/** `SAVE.BIN` 的回调体（`load:page-ready` 的门区间；真值来自 `script-positions.ts`）。 */
 const SAVE_BODY = [0x1104, 0x11c4];
 const SCRIPT_SAVE = 'SAVE.BIN';
 /** 目标槽 = 9（页 0 第 9 行）⇒ 页 1 进屏时必须翻到页 0。 */
@@ -92,9 +92,16 @@ function makeWorld(model) {
     /** @type {{name:string, reason:string}|null} */
     let failed = null;
     const appdata = makeAppData(model.appdata);
+    const logger = {
+        info: (message) => { logs.push(`info:${String(message)}`); },
+        warn: (message) => { logs.push(`warn:${String(message)}`); },
+        error: (message) => { logs.push(`error:${String(message)}`); },
+        debug: (message) => { logs.push(`debug:${String(message)}`); },
+    };
 
     const ctx = {
         params: {},
+        appdata,
         now: { script: SCRIPT_SAVE, pos: SAVE_BODY[0], point: 'peekMsg', readIndex: 0 },
         read: {
             global: {
@@ -160,6 +167,7 @@ function makeWorld(model) {
         }
         ctx.now.readIndex = read;
         ctx.now.pos = SAVE_BODY[0];
+        settleWaiters();
     }
 
     /** 这个 trigger 在本读点成不成立（`any` 的 atReadPoint 恒成立；本用例不用 afterDelay）。 */
@@ -178,10 +186,57 @@ function makeWorld(model) {
         }
     }
 
+    // ---- v2 异步面（本用例只实现 loadSave 用到的）----
+    const waiters = [];
+    function tickValue() {
+        return {
+            id: 1,
+            now: { script: SCRIPT_SAVE, pos: ctx.now.pos },
+            local: { int: () => undefined, ptr: () => undefined, ptrDword: () => undefined },
+            edit: { global: { set: () => ({ accepted: true, queued: false, applied: true }) } },
+            input: ctx.input,
+            patch: () => ({ accepted: false, queued: false, applied: false, code: 'once_tick' }),
+        };
+    }
+    function matches(where) {
+        if (where === null || typeof where !== 'object') return false;
+        if (where.script !== undefined && where.script !== SCRIPT_SAVE) return false;
+        if (where.pos !== undefined) return where.pos === ctx.now.pos;
+        if (where.lo !== undefined) return where.lo <= ctx.now.pos && ctx.now.pos < where.hi;
+        if (where.opcode !== undefined) return where.opcode === 114;
+        return true;
+    }
+    function settleWaiters() {
+        for (let i = 0; i < waiters.length; ) {
+            const w = waiters[i];
+            if (w.kind === 'once') {
+                if (!matches(w.where)) { i += 1; continue; }
+                waiters.splice(i, 1);
+                w.resolve(tickValue());
+                continue;
+            }
+            const index = w.arms.findIndex((where) => matches(where));
+            if (index < 0) { i += 1; continue; }
+            waiters.splice(i, 1);
+            w.resolve({ index, tick: tickValue() });
+        }
+    }
+    ctx.once = (where) => new Promise((resolve, reject) => { waiters.push({ kind: 'once', where, resolve, reject }); });
+    ctx.waitAny = (arms) => new Promise((resolve, reject) => { waiters.push({ kind: 'any', arms, resolve, reject }); });
+    ctx.task = (fn) => { Promise.resolve(fn(ctx)).catch(() => {}); };
+    ctx.delay = () => Promise.resolve();
+    ctx.at = () => 0;
+    ctx.off = () => false;
+    ctx.profile = { begin() {}, end() {} };
+    ctx.config = { available: false, domain() { throw new Error('no_appdata'); } };
+    ctx.fail = (name, reason) => { failed = { name, reason }; };
+    ctx.finish = (code, reason) => { finished = { code, reason: reason === undefined ? '' : reason }; };
+
     return {
         ctx,
         clicks,
         logs,
+        logger,
         appdata,
         get page() {
             return page;
@@ -210,41 +265,42 @@ function makeWorld(model) {
  *            failed: any, rowClicked: boolean, rowClicks: number, clicks: any[], logs: string[],
  *            statCalls: string[] }}
  */
-function drivePageChain(model = {}) {
+async function drivePageChain(model = {}) {
     const world = makeWorld({
         startPage: model.startPage === undefined ? 1 : model.startPage,
         latency: model.latency === undefined ? CLICK_LATENCY_READS : model.latency,
         swallowFirstArrowClick: model.swallowFirstArrowClick === true,
         appdata: model.appdata,
     });
-    const chain = loadSave(SLOT, {
+    const titleTick = { input: world.ctx.input };
+    // ★ v2 的库走**全局 `log`**（`ctx.log` 已删除）；Node 里没有宿主注入 ⇒ 本用例给一个捕获器。
+    globalThis.log = world.logger;
+    let settled = false;
+    const chain = loadSave(world.ctx, SLOT, {
         expect: ['FIELD.BIN'],
         ...(model.precheckOff === true ? { precheck: false } : {}),
-    });
-    /** @type {any[]} */
-    let armed = normalize(chain.start(world.ctx));
-    let reachedPage = false;
+    }, titleTick);
+    chain.then(() => { settled = true; }, () => { settled = true; });
+    const flush = async () => {
+        for (let i = 0; i < 32; i += 1) await Promise.resolve();
+    };
     let rowClicked = false;
     while (
         world.read < MAX_READS &&
         world.finished === null &&
         world.failed === null &&
-        !reachedPage &&
+        !settled &&
         !rowClicked
     ) {
         world.advance();
-        const trigger = armed.find((t) => world.due(t));
-        if (trigger === undefined) continue;
-        const ev = { kind: 'trigger', name: trigger.name, point: 'peekMsg', script: SCRIPT_SAVE, pos: world.ctx.now.pos };
-        armed = normalize(chain.onTrigger(world.ctx, ev));
-        if (armed.some((t) => t.name === 'load:page-ready')) reachedPage = true;
-        // 已经在目标页（不需要翻页）时链直接走 `load:row` → `load:sbunki`（页链的出口）
-        if (armed.some((t) => t.name === 'load:sbunki')) rowClicked = true;
+        await flush();
+        rowClicked = world.clicks.some((c) => c.x === 300);
     }
+    await flush();
     const arrowClicks = world.clicks.filter((c) => c.x === 45 || c.x === 1235).length;
     const rowClicks = world.clicks.filter((c) => c.x === 300).length;
     return {
-        reachedPage,
+        reachedPage: rowClicked,
         rowClicked,
         arrowClicks,
         rowClicks,
@@ -264,8 +320,8 @@ function normalize(value) {
     return Array.isArray(value) ? value : [value];
 }
 
-test('loadsave-page/normal：第一下点击被消费 ⇒ 到达目标页，且**只点一次**箭头（多点一次会把页多翻一格）', () => {
-    const r = drivePageChain();
+test('loadsave-page/normal：第一下点击被消费 ⇒ 到达目标页，且**只点一次**箭头（多点一次会把页多翻一格）', async () => {
+    const r = await drivePageChain();
     assert.equal(r.failed, null, `链自己 fail 了：${JSON.stringify(r.failed)}`);
     assert.equal(r.finished, null, `链提前收口（finish）：${JSON.stringify(r.finished)}`);
     assert.equal(r.reachedPage, true, `没到目标页（page=${r.page}, reads=${r.reads}）`);
@@ -278,8 +334,8 @@ test('loadsave-page/normal：第一下点击被消费 ⇒ 到达目标页，且*
     );
 });
 
-test('loadsave-page/first-click-swallowed：第一下被吞 ⇒ 重试必须真的能救回来（重试自己的落地延迟也算在预算里）', () => {
-    const r = drivePageChain({ swallowFirstArrowClick: true });
+test('loadsave-page/first-click-swallowed：第一下被吞 ⇒ 重试必须真的能救回来（重试自己的落地延迟也算在预算里）', async () => {
+    const r = await drivePageChain({ swallowFirstArrowClick: true });
     assert.equal(r.failed, null, `链自己 fail 了：${JSON.stringify(r.failed)}`);
     assert.equal(
         r.reachedPage,
@@ -292,8 +348,8 @@ test('loadsave-page/first-click-swallowed：第一下被吞 ⇒ 重试必须真�
     assert.equal(r.arrowClicks, 2, `应该恰好"第一次 + 重试一次"两次箭头点击（实际 ${r.arrowClicks}）`);
 });
 
-test('loadsave-page/already-on-target-page：进屏就在目标页 ⇒ 一次箭头都不点（别把"不需要翻页"也翻一格）', () => {
-    const r = drivePageChain({ startPage: TARGET_PAGE });
+test('loadsave-page/already-on-target-page：进屏就在目标页 ⇒ 一次箭头都不点（别把"不需要翻页"也翻一格）', async () => {
+    const r = await drivePageChain({ startPage: TARGET_PAGE });
     assert.equal(r.failed, null, `链自己 fail 了：${JSON.stringify(r.failed)}`);
     assert.equal(r.rowClicked, true, `没走到"点行"那一步（reads=${r.reads}）`);
     assert.equal(r.arrowClicks, 0, `已经在目标页却点了 ${r.arrowClicks} 次箭头`);
@@ -310,8 +366,8 @@ test('loadsave-page/already-on-target-page：进屏就在目标页 ⇒ 一次箭
 //   · no-appdata：`available=false` ⇒ 照常读档 + 一行 warn（⛔ 不误杀没有 --appdata 的运行）。
 // ---------------------------------------------------------------------------------------
 
-test('loadsave-page/save-missing：缺 SAVE<NN>.DAT ⇒ 在第一个 click 之前 finish(5)，一个 click 都不发', () => {
-    const r = drivePageChain({ appdata: { dirs: [SAVE_DIR] } });
+test('loadsave-page/save-missing：缺 SAVE<NN>.DAT ⇒ 在第一个 click 之前 finish(5)，一个 click 都不发', async () => {
+    const r = await drivePageChain({ appdata: { dirs: [SAVE_DIR] } });
     assert.equal(r.failed, null, `不应该 ctx.fail：${JSON.stringify(r.failed)}`);
     assert.deepEqual(r.clicks, [], `缺文件时一个 click 都不许发（实际 ${JSON.stringify(r.clicks)}）`);
     assert.notEqual(r.finished, null, '缺文件必须自己收口（finish），⛔ 不许继续等 SAVE 门');
@@ -331,8 +387,8 @@ test('loadsave-page/save-missing：缺 SAVE<NN>.DAT ⇒ 在第一个 click 之�
     );
 });
 
-test('loadsave-page/save-present：有 SAVE<NN>.DAT ⇒ 照常点行（前置检查不许顺手改链）', () => {
-    const r = drivePageChain({
+test('loadsave-page/save-present：有 SAVE<NN>.DAT ⇒ 照常点行（前置检查不许顺手改链）', async () => {
+    const r = await drivePageChain({
         startPage: TARGET_PAGE,
         appdata: { dirs: [SAVE_DIR], files: { [`${SAVE_DIR}/SAVE09.DAT`]: 4096 } },
     });
@@ -343,8 +399,8 @@ test('loadsave-page/save-present：有 SAVE<NN>.DAT ⇒ 照常点行（前置检
     assert.equal(r.rowClicks, 1, `应该恰好点一次行（实际 ${r.rowClicks}）`);
 });
 
-test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳过检查 + warn，照常读档', () => {
-    const noAppdata = drivePageChain({ startPage: TARGET_PAGE });
+test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳过检查 + warn，照常读档', async () => {
+    const noAppdata = await drivePageChain({ startPage: TARGET_PAGE });
     assert.equal(noAppdata.rowClicked, true, '没有 ctx.appdata 时链必须照常走（⛔ 不误杀）');
     assert.equal(noAppdata.finished, null, `没有 ctx.appdata 却收口了：${JSON.stringify(noAppdata.finished)}`);
     assert.ok(
@@ -352,7 +408,7 @@ test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳
         `跳过时必须打一行 warn：${JSON.stringify(noAppdata.logs)}`,
     );
 
-    const unavailable = drivePageChain({ startPage: TARGET_PAGE, appdata: { available: false } });
+    const unavailable = await drivePageChain({ startPage: TARGET_PAGE, appdata: { available: false } });
     assert.equal(unavailable.rowClicked, true, 'available=false 时链必须照常走（⛔ 不误杀）');
     assert.deepEqual(unavailable.statCalls, [], 'available=false 时不该去 stat 任何路径');
     assert.ok(
@@ -361,8 +417,8 @@ test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳
     );
 });
 
-test('loadsave-page/save-dir-missing：存档目录不存在（全新 / 空 appdata）⇒ 按缺文件 finish(5)，0 click', () => {
-    const r = drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [] } });
+test('loadsave-page/save-dir-missing：存档目录不存在（全新 / 空 appdata）⇒ 按缺文件 finish(5)，0 click', async () => {
+    const r = await drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [] } });
     assert.equal(r.failed, null, `不应该 ctx.fail：${JSON.stringify(r.failed)}`);
     assert.deepEqual(r.clicks, [], `目录不存在时一个 click 都不许发（实际 ${JSON.stringify(r.clicks)}）`);
     assert.notEqual(r.finished, null, '目录不存在必须自己收口（finish），⛔ 不许继续等 SAVE 门');
@@ -382,8 +438,8 @@ test('loadsave-page/save-dir-missing：存档目录不存在（全新 / 空 appd
     );
 });
 
-test('loadsave-page/save-precheck-off：precheck:false ⇒ 显式跳过检查（一行 info），照常点行', () => {
-    const r = drivePageChain({
+test('loadsave-page/save-precheck-off：precheck:false ⇒ 显式跳过检查（一行 info），照常点行', async () => {
+    const r = await drivePageChain({
         startPage: TARGET_PAGE,
         precheckOff: true,
         appdata: { dirs: [] }, // 目录不存在 —— 若检查生效会 finish(5)
@@ -398,8 +454,8 @@ test('loadsave-page/save-precheck-off：precheck:false ⇒ 显式跳过检查（
     );
 });
 
-test('loadsave-page/save-dir-escape：存档目录 stat 报 escape ⇒ 跳过 + warn（无法证明缺文件）', () => {
-    const r = drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [], statError: 'escape' } });
+test('loadsave-page/save-dir-escape：存档目录 stat 报 escape ⇒ 跳过 + warn（无法证明缺文件）', async () => {
+    const r = await drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [], statError: 'escape' } });
     assert.equal(r.finished, null, `escape 不该收口：${JSON.stringify(r.finished)}`);
     assert.equal(r.failed, null, `escape 不该 ctx.fail：${JSON.stringify(r.failed)}`);
     assert.equal(r.rowClicked, true, '跳过之后链必须照常走');

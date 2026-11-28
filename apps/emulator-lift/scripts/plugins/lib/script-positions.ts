@@ -1,4 +1,4 @@
-// scripts/plugins/lib/script-positions.js —— **生成物**（由 tools/script-positions.mjs 生成，⛔ 别手改）
+// scripts/plugins/lib/script-positions.ts —— **生成物**（由 tools/script-positions.mjs 生成，⛔ 别手改）
 //
 // 真源 = `tools/script-positions.json`（**锚表**：基线指令窗口 + 基线行序 ⇒ 补丁后 `pos`）。
 // 怎么查：`pnpm tools script-positions explain <NAME>`（锚 → 命中的补丁后指令 → `pos`）。
@@ -11,8 +11,8 @@
 //      （`pos = 0x3C + Σ(4+argc*8)`；推导与实测见 `docs/03-emulator/input-plan.md` §2.6 / §2.8）。
 //   2. 命名：`<SCRIPT>_<用途>_LO` / `_HI`（**半开区间** `[LO,HI)`）或 `<SCRIPT>_<用途>_POS`（单点）。
 //      `<SCRIPT>` = 宿主 marker 的**裸名**（`TITLE` / `SBUNKI` / …）—— 这是位置表的命名，**不是** trigger 的
-//      `script` 参数：C1 的门是精确 `==`，那边必须写带 `.BIN` 的宿主拼写（见 `save.js` 头）。
-//   3. ⛔ **别处不许再裸写这些字面量**。`scripts/plugins/lib/*.js`（除本文件与 `guest-globals.js`）里出现
+//      `script` 参数：C1 的门是精确 `==`，那边必须写带 `.BIN` 的宿主拼写（见 `save.ts` 头）。
+//   3. ⛔ **别处不许再裸写这些字面量**。`scripts/plugins/lib/*.ts`（除本文件与 `guest-globals.ts`）里出现
 //      `0x…` 字面量 ⇒ `tools/test/script-map.test.mjs` 红（它**剥注释**后扫，所以头注释里印区间是允许的）。
 //      新增一条位置的正确做法：把锚加进 `tools/script-positions.json`，再 `gen --write`（消费方 `import` 名字）。
 //
@@ -161,7 +161,7 @@ export const FIELD_MAIN_LOOP_HI = 0x5860;
 //   `FIELD` #2722 / #9688、`RESETMAPAN` #1）都从这里进 ⇒ `field-point-visible` 只挂**它的入口**就够
 //   （补 `50ff9f` 的 bit0）。`SETOBJ` 只在 `RENDERMAP` 里跑（#117）⇒ 那一趟进 DRAWOBJ 时派生位
 //   已是重算值；入口施加 ⇒ 4 条路都成立。
-//   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；`mode:"reenter"` ⇒ 每进一次 DRAWOBJ 一次。
+//   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；v2 用 `ctx.at({ script, pos: DRAWOBJ_ENTRY_LO })` ⇒ 每进一次 DRAWOBJ 一次。
 // ===========================================================================
 
 // **点位精灵绘制脚本的入口**（`DRAWOBJ.BIN` #0 `detach-texture 3aca 32` @`0x003C`）。
@@ -175,8 +175,8 @@ export const DRAWOBJ_ENTRY_HI = 0x06bc;
 
 // **静态门的第一条读**（`eq (local-int c) (local-ptr 2) 1` @`0x03A0`）：它读的 dword =
 // `eb5c1[map*50 + slot]`（视图里 `lookup-array-2d … 32 …` 的 `32` 是**十六进制** = 50）。
-// `ctx.hook.at("DRAWOBJ.BIN", DRAWOBJ_GATE_EQ)` + `handle.patch({ ptrLocal: 2 }, 1)` 在这一条
-// **临时**把 `local-ptr 2` 指向的 dword 改成 1、执行完恢复 ⇒ 静态门通过、净变化 0。
+// `ctx.at({ script: "DRAWOBJ.BIN", pos: DRAWOBJ_GATE_EQ }, …)` 里每拍 `tick.patch({ ptrLocal: 2 }, 1)` 在这一条
+// **临时**把 `local-ptr 2` 指向的 dword 改成 1（handler 之后、指令执行之前写；下一拍按 CAS 恢复）⇒ 静态门通过、净变化 0。
 // 门的另外三腿：`511080[type]==3`、`flags&6==2`、`25c00[map*100 + row]` 的 bit `col`（实测为 1）。
 export const DRAWOBJ_GATE_EQ = 0x03a0;
 

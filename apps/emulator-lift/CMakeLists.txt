@@ -129,21 +129,16 @@ add_library(emulator-lift-runtime STATIC
     #     与（C1b）executor 共用它 ⇒ 放进本 target（同 `control_input.cpp` 的理由；纯 CTest 只链它）。
     #     ⛔ 同样不在执行循环里被调用。
     src/runtime/pointer_core.cpp
-    #   ★ **插件运行时 C1b 的核心**（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
-    #     `trigger_runner.cpp`（armed 集合 / 一读点最多一个事件 / timeout / owner / budget）、
-    #     `trigger_factory.cpp`（造 trigger 值 + **新**运行期状态）、`budget.cpp`（回调墙钟预算的
-    #     唯一读数来源）。归属本 target 的理由与 `control_input.cpp` / `pointer_core.cpp` 相同：
-    #     纯 CTest `trigger-runner` **只链本 target**（⛔ 放进 AOT target 会让它链接失败）。
+    #   ★ **插件运行时**的核心（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
+    #     `budget.cpp`（回调 CPU 预算的唯一读数来源）。归属本 target 的理由与
+    #     `control_input.cpp` / `pointer_core.cpp` 相同：纯 CTest 只链本 target。
     #     ⛔ 它们同样不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ① 与
     #     `tools/test/core-shape.test.mjs`）。
-    src/runtime/trigger_runner.cpp
-    src/runtime/trigger_factory.cpp
     src/runtime/budget.cpp
     #   ★ **插件运行时 C1c 的核心**（`docs/03-emulator/plugin-runtime.md` §4.3 / §4.4a / §5 C1）：
-    #     `intent_queue.cpp`（staged→ready 两级 / 回执 / owner）、`intent_executor.cpp`（七步 pump：
-    #     写预算 → beginReadPoint → poll → releaseDue → pressDue → drainQueue → 收口）、
-    #     `edit_sink.cpp`（Edit 的**立即**写；⛔ 不排进 Input）。归属本 target 的理由同上一段：
-    #     纯 CTest `trigger-runner` 只链本 target（⛔ 放进 AOT target 会让它链接失败）。
+    #     `intent_queue.cpp`（staged→ready 两级 / 回执 / owner）、`intent_executor.cpp`（六步 pump：
+    #     写预算 → beginReadPoint → releaseDue → pressDue → drainQueue → 收口）、
+    #     `edit_sink.cpp`（Edit 的**立即**写；⛔ 不排进 Input）。
     src/runtime/intent_queue.cpp
     src/runtime/intent_executor.cpp
     src/runtime/edit_sink.cpp
@@ -1333,7 +1328,7 @@ set_tests_properties(gdi-font-fallback-assets PROPERTIES
 #   ⇒ 那 6 条都是"带 `--native-overrides` 的解释器压力/效率读数"，AOT 结构上没有 override。
 #   ⚠ **空窗期**：端到端压力档在 AOT 侧还没建（新档见 `REQ-01M7HQJEEENYDJ91FB5DAC4K23`）⇒
 #     这一段里端到端速度只能人手跑（`emulator-lift-aot --control-root` 的暂停 / 采样读数，
-#     或 JS 插件场景 `scripts/plugins/scenario-*.js`），⛔ 不许把"没有读数"说成"没有退化"。
+#     或 JS 插件场景 `scripts/plugins/scenario-*.ts`），⛔ 不许把"没有读数"说成"没有退化"。
 # =====================================================================================
 if(DEFINED ENV{LIFT_STRESS})
     # ---- LIFT_STRESS：boot trace（A4）的**读数 + 阈值**面（2026-11-14 从默认档移入）----
@@ -1376,7 +1371,7 @@ if(DEFINED ENV{LIFT_STRESS})
     #   lift-aot-quit-exit` 只编守卫 exe、产品 exe 停在变异前 ⇒ 变异自检假绿。
     add_dependencies(lift-aot-quit-exit emulator-lift-aot)
     # ★ 2026-11-27（用户裁决：`--input-plan` 整体退役）：本用例的**驱动器**从 `.plan` 换成
-    #   JS 插件 `scripts/plugins/quit-at-title.js`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click`）。
+    #   JS 插件 `scripts/plugins/quit-at-title.ts`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click`）。
     #   第 5 个参数 = 插件入口的**绝对路径**（QJS 的 import 根 = 入口文件目录 ⇒ 入口必须与
     #   `lib/` 同一个根：`scripts/plugins/`；夹具不能放 `tests/plugin_fixtures/` 再向上 import，
     #   实测被 `moduleNormalize` 拒成"越出 UI 根目录"）。
@@ -1386,7 +1381,7 @@ if(DEFINED ENV{LIFT_STRESS})
         COMMAND lift-aot-quit-exit
                 "$<TARGET_FILE:emulator-lift-aot>" "${_LIFT_STRESS_RAW_GAME_DIR}"
                 "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/quit-at-title.js")
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/quit-at-title.ts")
     set_tests_properties(aot-quit-exit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 420)
 
     # ---- 2026-11-27：`aot-stress-plan-exit5` / `aot-stress-boot-title` **已按用户裁决删除** ----
@@ -1398,7 +1393,7 @@ if(DEFINED ENV{LIFT_STRESS})
 
     # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
     # ★ 判据（详见 `tests/aot_stress_fellow_switch.cpp` 文件头）：真库驱动
-    #   `scripts/plugins/scenario-fellow-switch.js`（S1 起入口在**根**，库在 `lib/`）⇒ **exit 0** +
+    #   `scripts/plugins/scenario-fellow-switch.ts`（S1 起入口在**根**，库在 `lib/`）⇒ **exit 0** +
     #   readout `run=finished exit=0` + stdout 里 `=== profile window:` **恰好 6 条**（6 个切换
     #   窗口标签逐字齐全）。⛔ 不断言 ms（读数进文档）。
     # ★ 为什么判 readout 而不只判退出码：`--plugin` 路的失败**不**改宿主退出码
@@ -1419,7 +1414,7 @@ if(DEFINED ENV{LIFT_STRESS})
         COMMAND lift-aot-stress-fellow-switch
                 "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../saves"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/scenario-fellow-switch.js")
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/scenario-fellow-switch.ts")
     # ★ 2026-11-24 曾登记 `DISABLED TRUE`（两张既有缺口挡路）；2026-11-25 两张单都收口 ⇒ **已删除**。
     #   ⛔ 今后再红就当一个真回归修，⛔ 不要用 `DISABLED` 藏起来（`ctest -N` 里 Disabled 看得见，
     #   但"没跑"与"跑绿了"在输出里长得一样 —— 那正是 AGENTS §12.4 反对的形状）。
@@ -1516,21 +1511,9 @@ add_test(NAME input-anchor COMMAND lift-input-anchor)
 #   与产品入口 `--input-plan` / `--input-plan-trace` 同批删除。
 #   ⚠ 台账里仍有 4 条 `done` 单的 `verify:` 指着旧 CTest 名 —— 那几行**预期红**（父级改锚）。
 
-# ---- pure：插件运行时的 **TriggerRunner**（C1b；`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）----
-# ★ 判据（红了意味着什么）：
-#   ① `after-position-once`：`[lo,hi)` 的**两端**（`pos==lo` 触发 / `pos==hi` 不）、Once 只一次、
-#      无效读数**不改变状态**、done 之后不再 poll；
-#   ② `after-script-once`：只比脚本名（**无区间**）、`script_ok=false` 不算匹配、Reenter 的 false→true、
-#      重新 arm **不清**边沿；
-#   ③ `named-set`：多具名 / 一读点**最多一个**事件（注册顺序、**不级联**）/ 返回集合 = **完整替换** /
-#      `[]` = done / 重复 name ⇒ fail 并点名 / `maxFires` **续计** + 耗尽再放回 ⇒ fail + 新对象新预算 /
-#      **fire 优先于 timeout**（同拍只一个事件、timeout 不计 fires、per-arm 重置 deadline）/ 超预算 ⇒ fail；
-#   ④ `rearm`：Once 放回 = fail / Reenter 需新的有效外→内（不会立刻再触发）/ `AfterDelay` 计时从头 /
-#      `AtReadPoint` 从**下一个**匹配读点重新计 / `releaseOwner` 只抹 armed（owner 由 runner 盖章）。
-# ★ 顶层无条件注册 ⇒ **pure** 档（夹具零 guest：`TriggerReadings` 是值输入，两把钟都注入）。
-add_executable(lift-trigger-runner tests/trigger_runner.cpp)
-target_link_libraries(lift-trigger-runner PRIVATE emulator-lift-runtime)
-add_test(NAME trigger-runner COMMAND lift-trigger-runner)
+# ---- 2026-11-28：`tests/trigger_runner.cpp` 随 v1 兼容层删除（TriggerRunner / armed 集合）----
+#   `ctx.at` / `once` / `waitAny` 的行为由 `plugin-runtime` 覆盖；`IntentExecutor` 的一读点一条
+#   由 `input-inject-visible` 与 `plugin-runtime` 的 Tick.input 用例覆盖。
 
 # ---- pure：**注入真的能被引擎看见**（2026-11-19 裁决；`tests/input_inject_visible.cpp`）----
 # ★ 判据（红了意味着什么）：
@@ -3092,8 +3075,7 @@ target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
 # ★ 落点（全部**新增**文件；`src/plugin/**` 是适配层，⛔ 不 include `quickjs.h`、⛔ 不调
 #   `input::` / `writeGlobal`）：
 #   · `src/plugin/guest_read.{h,cpp}`   —— `EngineRead::globalGet` 的生产实现（`readGlobal`）
-#   · `src/plugin/readings.{h,cpp}`     —— 生产 `ReadingsSource`（marker 身份 + 位置 + 鼠标）
-#   · `src/plugin/plugin_host.{h,cpp}`  —— `TriggerHandler` + `ReadPointObserver` + `PluginCallHost`
+#   · `src/plugin/plugin_host.{h,cpp}`  —— `ReadPointObserver` + `PluginCallHost`
 #   · `src/runtime/read_point.h`        —— 读点观察者（核心面；已进 `core-shape` 白名单）
 # ★ 为什么用 `target_sources` 追加：与上面 A / E / H 同一条并发编辑口径（顶部大列表是"别改"区，
 #   两条车道最容易撞的公共面；本单只在文件末尾追加自己的块）。
@@ -3106,7 +3088,6 @@ target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE
     src/plugin/guest_read.cpp
-    src/plugin/readings.cpp
     src/plugin/plugin_host.cpp
     src/plugin/plugin_appdata.cpp
     # ★ 2026-11-25：`ctx.config`（`<--appdata>/plugin-config.json`）的宿主实现。**唯一** include
@@ -3118,7 +3099,7 @@ target_sources(emulator-lift-runtime PRIVATE
     src/plugin/plugin_search.cpp)
 
 # ★ S1：`--plugin <id>` 的**开发根**（编译期注入源码树，与 `LIFT_UI_SCRIPT_DIR` 同形）。
-#   id 只查 `<exeDir>/scripts/plugins/<id>.js`（发行）与 `<本目录>/<id>.js`（开发）两处，
+#   id 只查 `<exeDir>/scripts/plugins/<id>.js|.ts|.mts`（发行）与 `<本目录>/<id>.js|.ts|.mts`（开发）两处，
 #   ⛔ 不查 `lib/`（那是被 import 的库目录）、⛔ 不递归子目录。
 target_compile_definitions(emulator-lift-runtime PUBLIC
     LIFT_PLUGIN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins")
@@ -3126,8 +3107,8 @@ target_compile_definitions(emulator-lift-runtime PUBLIC
 if(LIFT_BUILD_TESTS)
     # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
     #   **入口文件目录**（`script_quickjs.cpp` 的 `moduleNormalize`）⇒ `tests/plugin_fixtures/*`
-    #   **不能** import 它。★ S1 起 `save.js` 只是**库**（`loadSave` 等），参考入口拆到
-    #   **根** `scripts/plugins/load-save.js`（id = `load-save`）；场景入口也都在根（id = 文件名 stem）。
+    #   **不能** import 它。★ S1 起 `save.ts` 只是**库**（`loadSave` 等），参考入口拆到
+    #   **根** `scripts/plugins/load-save.ts`（id = `load-save`）；场景入口也都在根（id = 文件名 stem）。
     #   ⛔ 不复制文件、不另开 lib 子目录。
     # ★ `LIFT_SAVES_DIR`（只给 e2e）：`saves/` 是**只读**复现素材 ⇒ 测试把需要的存档**复制**进
     #   `.tmp/` 下的私有 `--appdata`（照 `apps/emulator-lift/scripts/clean-appdata.sh`），⛔ 不就地写。
@@ -3183,7 +3164,7 @@ if(LIFT_BUILD_TESTS)
     # ---- `plugin-field-switch`：`field-point-visible.js` 是**开关**（⛔ 不自驱读档 / ⛔ 不点鼠标）----
     # ★ 判据（详 `tests/plugin_field_switch.cpp` 文件头）：
     #   ① 静态（剥注释后扫**代码**，零资产）：模块里没有输入写面（`ctx.input`）/ 没有读档链
-    #      （`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）/ 不自己收口
+    #      （`loadSave` / `bootToTitle` / `save.ts` / `boot-to-title.ts` / `chains.js`）/ 不自己收口
     #      （`ctx.finish` / `ctx.quit`）；同一条用例还断言它仍写着该写的链（`forceFieldPointsVisible`
     #      + `afterPosition` + `reenter` + `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO`/`HI` / `fp:draw`），
     #      且**没有** `FIELD_MAIN_LOOP` / `afterDelay` / `poll` ⇒ "禁令全过"不能靠一个空文件达成。
@@ -3264,9 +3245,10 @@ endif()
 
 # =====================================================================================
 # Q · quickts E1（TypeScript 纯类型擦除）的引擎级判据
-# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 16 个发行 `.js`（module）在 flags 0 与
+# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 剩下的发行 `.js`（`ui/*.js` 3 个，module）在 flags 0 与
 #   `JS_EVAL_FLAG_TYPESCRIPT` 下 `JS_WriteObject(BYTECODE|STRIP_SOURCE)` **逐字节相同**；
 #   ② 一组内联 GLOBAL 脚本同上（含 `a < b` / `b > c`、计算字段、static block、模板串）；
+#   ⑧ 发行插件 `plugins/**` 的 12 个 `.ts` 用 `MODULE|COMPILE_ONLY|TYPESCRIPT`（同形 loader）编过；
 #   ③ examples 9/9 用 `MODULE|COMPILE_ONLY|TYPESCRIPT` 编过 + `JS_ResolveModule` 成功
 #   （证明 `import type` 整条擦掉、零 module request）+ 不带 flag 时 9/9 报错；
 #   ④ 一个 `.ts` module 求值并调导出函数；⑤ class 夹具实跑 R1（index signature vs 计算字段）
@@ -3275,7 +3257,8 @@ endif()
 #   `if(LIFT_BUILD_TESTS)` 当透明）。零资产：只读 `scripts/**` 文本，零窗口 / 字体 / 安装树 / LFS。
 # ★ 直接链 `lift-qjs`（⛔ 不链 `emulator-lift-runtime`）：这是**引擎内部**判据，只 include
 #   `quickjs.h`；宿主 TU（`src/ui/script_quickjs.cpp`）仍是唯一的**产品** QJS 边界。
-# ★ 目录宏：测试自己遍历清单（`scripts/**` 的 16 个 `.js` + `plugins/examples/*.ts` 的 9 个）。
+# ★ 目录宏：测试自己遍历清单（`scripts/ui/*.js` 的 3 个 + `plugins/**` 的 12 个 `.ts` +
+#   `plugins/examples/*.ts` 的 9 个）。
 # ★ 变异：`tools/mutate-check.mjs` 的 `quickts-flag-not-read` 把
 #   `quickjs.c` 的 `s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;` 改成 `s->ts = false;`
 #   ⇒ ③ 的 `TYPESCRIPT 下编译失败` 与本文件 ④⑤ 当场红（`buildTarget` = `lift-quickts`）。

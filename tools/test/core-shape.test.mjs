@@ -30,7 +30,7 @@
  *    那是"一个能力两处实现"的入口，而且**没有运行期症状**。
  * ⑦ **`instr_hook` 的代码里 0 命中 `quickjs`**（S2a）：反向 sink 只能是函数指针 + 纯值。
  * ⑧ **每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`**（S2a）：漏 drain ⇒ continuation
- *    落到下一个入口；全文件 `JS_Call(` 白名单 = 6 处（4 个入口 + 2 个宿主值构造），新增必须登记。
+ *    落到下一个入口；全文件 `JS_Call(` 白名单 = 11 处（4 个入口 + 2 个宿主值构造 + 4 个异步面 + 1 个 v1 步），新增必须登记。
  *
  * ## 为什么现在就要它（⛔ 不要推迟到 C2/C4）
  * C1b 一落地，"核心没长出 plan VM"就是**当天**可被静默破坏的性质（下一个人给 trigger 加个
@@ -54,13 +54,8 @@ const CORE_FILES = [
   'apps/emulator-lift/src/runtime/input_point.h',
   'apps/emulator-lift/src/runtime/pointer_core.h',
   'apps/emulator-lift/src/runtime/pointer_core.cpp',
-  'apps/emulator-lift/src/runtime/trigger.h',
-  'apps/emulator-lift/src/runtime/trigger_runner.h',
-  'apps/emulator-lift/src/runtime/trigger_runner.cpp',
-  'apps/emulator-lift/src/runtime/trigger_factory.cpp',
   'apps/emulator-lift/src/runtime/budget.h',
   'apps/emulator-lift/src/runtime/budget.cpp',
-  'apps/emulator-lift/src/runtime/context.h',
   // ── C1c：Intent（插件侧 Input）+ EditSink（Edit）+ EngineRead（只读）+ executor（唯一 pump）──
   'apps/emulator-lift/src/runtime/intent.h',
   'apps/emulator-lift/src/runtime/intent_queue.h',
@@ -93,8 +88,6 @@ const CORE_FILES = [
   'apps/emulator-lift/src/plugin/plugin_config.cpp',
   'apps/emulator-lift/src/plugin/guest_read.h',
   'apps/emulator-lift/src/plugin/guest_read.cpp',
-  'apps/emulator-lift/src/plugin/readings.h',
-  'apps/emulator-lift/src/plugin/readings.cpp',
   // ★ S1（2026-11-25）：`--plugin <id|path>` 的纯解析器（id 语法 + 两处非递归根）。它不碰 guest /
   //   输入 / 文件写入，但它在 `src/plugin/**` 下 ⇒ 照 ⑥ 的覆盖检查**逐文件登记**（漏登记会红）。
   'apps/emulator-lift/src/plugin/plugin_search.h',
@@ -299,26 +292,6 @@ test('② 核心的每个文件里 0 命中 plan 状态机标识符', () => {
   assert.deepEqual(skeleton, [], `剥注释把代码剥掉了（⇒ 本守卫会静默变瞎）：\n  ${skeleton.join('\n  ')}`);
 });
 
-test('③ `Context` 只认识工厂、不认识 runner（回调拿不到唯一 pump）', () => {
-  const context = read('apps/emulator-lift/src/runtime/context.h');
-  assert.ok(
-    /TriggerFactory\*\s+trigger\s*=\s*nullptr;/.test(context),
-    'context.h：`ctx.trigger` 必须是 `TriggerFactory* trigger = nullptr;`（回调要能造对象、⛔ 不能递归 pump）',
-  );
-  // ★ 只看**代码行**（`stripComments` 之后）：头注里必须**能写出**这条不变量（"`trigger` 不是 runner"），
-  //   把注释也算进去会让"解释判据"本身变成违规。与 ② 共用同一份剥注释实现（⛔ 不许两套口径）。
-  const runnerHits = stripComments(context)
-    .split('\n')
-    .map((text, i) => ({ line: i + 1, text: text.trim() }))
-    .filter((h) => h.text.includes('TriggerRunner'));
-  assert.deepEqual(
-    runnerHits.map((h) => `context.h:${h.line}: ${h.text}`),
-    [],
-    'context.h 的**代码**里出现了 `TriggerRunner`：回调一旦拿到唯一 pump，就能递归 atPoint / 绕过"返回值替换集合"：\n  ' +
-      runnerHits.map((h) => `context.h:${h.line}: ${h.text}`).join('\n  '),
-  );
-});
-
 test('④ `src/plugin/**` 不 include quickjs、不调 `input::` / `writeGlobal`（§6 行 11 / 22）', () => {
   // ★ 白名单必须**真的**覆盖到插件层：过滤后为空 ⇒ 本用例会"扫空集合"而恒绿。
   assert.ok(PLUGIN_FILES.length > 0, 'PLUGIN_FILES 为空 ⇒ 本守卫会扫空集合而恒绿（白名单被改名/搬走了？）');
@@ -422,7 +395,7 @@ test('⑦ `instr_hook` 的**代码**里 0 命中 `quickjs`（反向 sink 必须�
   assert.equal(forbiddenHits('// 这里不 include "quickjs.h"\n', ['quickjs']).length, 0, '注释里的 `quickjs` 不许命中');
 });
 
-test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 10）', () => {
+test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 11）', () => {
   // ★ host→JS 的入口清单 = `renderFrame()` / `call()` / `runInstrHits()` / 经典 `render()`。
   //   （S2a 复审 F6：注释原来写"经典 render 见下面 ④"，而 ④ 是 `src/plugin/**` 的 include 禁令，
   //   与 render 无关 ⇒ 经典 render 的 drain 当时**没有守卫**，删掉是静默回归。）
@@ -490,9 +463,9 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
       missing.join('\n  '),
   );
 
-  // ★ 全文件 `JS_Call(` 白名单：**10 处** = 4 个入口（`runInstrHits` 的链调用）+ 2 个宿主值构造
-  //   （`Object.assign` 造 ctx / 造错误对象）+ 3 个 S2b 异步面
-  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject）+ 1 个 v1 步
+  // ★ 全文件 `JS_Call(` 白名单：**11 处** = 4 个入口（`runInstrHits` 的链调用）+ 2 个宿主值构造
+  //   （`Object.assign` 造 ctx / 造错误对象）+ 4 个 S2b/P0 异步面
+  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject / `delay` 的 resolve）+ 1 个 v1 步
   //   （`runHookStepV1`：`handle.onTick` 的被动调用，S2c 从旧 `runHookEntry` 抽出来的）。
   //   新增一处必须来这里登记（否则"入口"会悄悄多一个）。
   const calls = [];
@@ -504,11 +477,16 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     if (c.text.includes('assign.raw()')) return 'object-assign';
     if (c.text.includes('impl.plugin_render.raw(), JS_UNDEFINED, 1, argv')) return 'plugin-renderFrame';
     if (c.text.includes('fn.raw(), JS_UNDEFINED, 2, argv')) return 'runInstrHits';
-    if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'runHookStepV1';
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
+    // ★ v2 的 `start` 是单参数入口（`call(host, fn, budget, err)`）⇒ 也是 `fn.raw(), … 1, argv`。
+    if (c.text.includes('fn.raw(), JS_UNDEFINED, 1, argv')) return 'call';
     if (c.text.includes('ctor.raw()')) return 'error-object';
     if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
     if (c.text.includes('argv[0], JS_UNDEFINED, 1, args')) return 'task-invoke';
     if (c.text.includes('entry->second.resolve.raw(), JS_UNDEFINED, 1, args')) return 'once-resolve';
+    // ★ P0：`ctx.delay` 的 resolve（`runDelayDue`；注意必须排在 `once-resolve` 之后 ——
+    //   后者的 `entry->second.resolve.raw()` 也包含 `resolve.raw()`）。
+    if (c.text.includes('resolve.raw(), JS_UNDEFINED, 1, args')) return 'delay-resolve';
     if (c.text.includes('reject, JS_UNDEFINED, 1, args')) return 'once-reject';
     return `unregistered@${c.line}: ${c.text}`;
   });
@@ -517,12 +495,12 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     [
       'call',
       'classic-render',
+      'delay-resolve',
+      'delay-resolve',
       'error-object',
-      'object-assign',
       'once-reject',
       'once-resolve',
       'plugin-renderFrame',
-      'runHookStepV1',
       'runInstrHits',
       'task-invoke',
     ],

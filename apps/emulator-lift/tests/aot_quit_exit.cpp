@@ -7,7 +7,7 @@
 //     `LIFT_AOT_ENTRY`，不跑游戏）。本文件是它的**端到端复现件**，不是门禁。
 //
 // ★ 驱动器（2026-11-27 用户裁决：`--input-plan` / `.plan` 整体退役）：JS 插件
-//   `scripts/plugins/quit-at-title.js`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click(1180,640)`）
+//   `scripts/plugins/quit-at-title.ts`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click(1180,640)`）
 //   经 `--plugin <绝对路径>`（CTest 第 5 个参数）装载。⛔ 插件**不许**用 `ctx.quit()` /
 //   `ctx.finish()` 代替 guest 退出 —— 那测的就不是 guest 自己的 Quit 路径了。
 //
@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
 
     if (argc < 6) {
         LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <links/raw> <links/raw/AGE.EXE> "
-                  "<corpus/assets/age/AGE.EXE__dumped.sectfix.EXE> <插件入口 quit-at-title.js>（见 CMakeLists）");
+                  "<corpus/assets/age/AGE.EXE__dumped.sectfix.EXE> <插件入口 quit-at-title.ts>（见 CMakeLists）");
     }
     const fs::path aot_exe = argv[1];
     const fs::path game_dir = argv[2];
@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
     if (!fs::is_directory(game_dir, ec)) LIFT_SKIP("links/raw 不在场（原版安装树）");
     if (!fs::exists(wrong_pe, ec)) LIFT_SKIP("links/raw/AGE.EXE 不在场（反向对照需要一份 sha 不同的 PE）");
     if (!fs::exists(right_pe, ec)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
-    if (!fs::exists(plugin, ec)) LIFT_SKIP("插件入口 scripts/plugins/quit-at-title.js 不在场");
+    if (!fs::exists(plugin, ec)) LIFT_SKIP("插件入口 scripts/plugins/quit-at-title.ts 不在场");
 
     const fs::path root =
         fs::temp_directory_path(ec) / ("lift-aot-quit-exit-" + std::to_string(

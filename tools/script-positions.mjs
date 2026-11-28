@@ -6,7 +6,7 @@
  * 也可独立跑：`node tools/script-positions.mjs gen`
  *
  * 它解决的那件事：`data/translations/patch.json` 的 `insert-after` / `delete` 会**移动**脚本内坐标
- * （每条 ±`4+argc*8` 字节），而插件消费方（`scenario-*.js` / `lib/save.js`）要在**补丁后坐标**上下门。
+ * （每条 ±`4+argc*8` 字节），而插件消费方（`scenario-*.ts` / `lib/save.ts`）要在**补丁后坐标**上下门。
  * 译文只改字符串（字符串进池，指令长度只由 `argc` 定）⇒ 译文变长**不移动**坐标。
  *
  * 分工（⛔ 不要在这里再写一套 patch 逻辑）：
@@ -16,7 +16,7 @@
  *
  * 三个落点：
  *   · `tools/script-positions.json` —— **锚表**（不透明数据；字段语义看 `--describe`，说明书 `tools/script-positions.md`）
- *   · `apps/emulator-lift/scripts/plugins/lib/script-positions.js` —— **生成物**（`gen --write` 唯一写入口）
+ *   · `apps/emulator-lift/scripts/plugins/lib/script-positions.ts` —— **生成物**（`gen --write` 唯一写入口）
  *   · `data/translations/patch.json` —— **只读**输入（改它之后要重跑 `gen`）
  *
  * ★ 锚为什么是"基线指令窗口 + 基线行序"：`insert-after` / `delete` 会改掉之后所有字节偏移，`label_XXXXXXXX`
@@ -52,23 +52,23 @@ export const SCRIPT_HEADER_LEN = 0x3c;
 /** 锚表（真源） */
 export const POSITIONS_JSON = path.join(REPO_ROOT, 'tools', 'script-positions.json');
 /** 生成物（消费方 import 的那份；⛔ 别手改） */
-export const POSITIONS_JS = path.join(
+export const POSITIONS_TS = path.join(
     REPO_ROOT,
     'apps',
     'emulator-lift',
     'scripts',
     'plugins',
     'lib',
-    'script-positions.js',
+    'script-positions.ts',
 );
 
 /** 工具层自我声明：我动哪片数据、有哪些操作（`tools/cli.mjs` 的域地图从它派生） */
 export const DOMAIN = {
     id: 'script-positions',
-    title: '脚本内位置（pos）的锚表 → 生成物（`lib/script-positions.js`）',
+    title: '脚本内位置（pos）的锚表 → 生成物（`lib/script-positions.ts`）',
     data: [
         '`tools/script-positions.json`（**锚表 = 唯一真源**：基线指令窗口 + 基线行序 + 基线下 `pos`）',
-        '`apps/emulator-lift/scripts/plugins/lib/script-positions.js`（**生成物**；⛔ 别手改，`gen --write` 重写）',
+        '`apps/emulator-lift/scripts/plugins/lib/script-positions.ts`（**生成物**；⛔ 别手改，`gen --write` 重写）',
         '输入（只读）：`data/translations/patch.json` + 基线安装树（清单 `roots.gameInstall`）' +
             ' ⇒ 补丁后视图由 `lib/patch.mjs` 的 `buildView(\'src\')` 现算（与 `pnpm tools patch view --kind src` 同一条路）',
     ],
@@ -88,7 +88,7 @@ export const OPERATIONS = [
         argv: ['--gen'],
         mutates: true,
         summary:
-            '按锚表 + 补丁后视图重算每个常量 ⇒ 整份重写生成物 js（缺省 dry-run，`--write` 才落盘；' +
+            '按锚表 + 补丁后视图重算每个常量 ⇒ 整份重写生成物 ts（缺省 dry-run，`--write` 才落盘；' +
             '任一锚命中 ≠ 1 次 ⇒ 拒绝写并点名）`[--write] [--patch <文件>] [--js <文件>] [--model <文件>]`',
     },
     {
@@ -96,7 +96,7 @@ export const OPERATIONS = [
         argv: ['--check'],
         mutates: false,
         summary:
-            '① 每个锚在补丁后视图里**恰好命中 1 次** ② `gen` 的结果与磁盘 js **逐字**比较（不写盘）；' +
+            '① 每个锚在补丁后视图里**恰好命中 1 次** ② `gen` 的结果与磁盘 ts **逐字**比较（不写盘）；' +
             '不一致 exit 1 并点名常量（红 = 忘了 `gen` / patch 动了坐标 / 锚歧义）`[--patch <文件>] [--js <文件>] [--model <文件>]`',
     },
     {
@@ -111,13 +111,13 @@ export const OPERATIONS = [
 const HELP = `tools/script-positions.mjs —— 脚本内位置的锚表 → 生成物
 
   node tools/script-positions.mjs describe                     自描述：字段 / 不变量 / 操作（schema 真源）
-  node tools/script-positions.mjs gen [--write]                按锚表重算并重写生成物 js（缺省 dry-run）
-  node tools/script-positions.mjs check                        gen 的结果 vs 磁盘 js + 锚唯一性（不写盘）
+  node tools/script-positions.mjs gen [--write]                按锚表重算并重写生成物 ts（缺省 dry-run）
+  node tools/script-positions.mjs check                        gen 的结果 vs 磁盘 ts + 锚唯一性（不写盘）
   node tools/script-positions.mjs explain <NAME>               人审一条：锚 → 命中行 → pos
 
 公共选项（诊断用；缺省就是仓里的真源）
   --patch <文件>    换一份 patch（例如 .tmp 里的临时视图）—— 只读，不落 data/
-  --js    <文件>    换一份生成物（例如把 gen 的结果写到 .tmp 再 check）
+  --js    <文件>    换一份生成物（.ts；例如把 gen 的结果写到 .tmp 再 check）
   --model <文件>    换一份锚表（诊断用；缺省 tools/script-positions.json）
 
 ★ 坐标只有在 insert-after / delete 时移动（±4+argc*8）；译文只改字符串，不移动坐标。
@@ -429,7 +429,7 @@ export function computePositions(model, snapshot) {
  * ★ 生成物里数值的写法（`0x` + 小写、至少 4 位）由本工具的 `hexOf()` 唯一决定。
  */
 const HEADER = [
-    '// scripts/plugins/lib/script-positions.js —— **生成物**（由 tools/script-positions.mjs 生成，⛔ 别手改）',
+    '// scripts/plugins/lib/script-positions.ts —— **生成物**（由 tools/script-positions.mjs 生成，⛔ 别手改）',
     '//',
     '// 真源 = `tools/script-positions.json`（**锚表**：基线指令窗口 + 基线行序 ⇒ 补丁后 `pos`）。',
     '// 怎么查：`pnpm tools script-positions explain <NAME>`（锚 → 命中的补丁后指令 → `pos`）。',
@@ -442,8 +442,8 @@ const HEADER = [
     '//      （`pos = 0x3C + Σ(4+argc*8)`；推导与实测见 `docs/03-emulator/input-plan.md` §2.6 / §2.8）。',
     '//   2. 命名：`<SCRIPT>_<用途>_LO` / `_HI`（**半开区间** `[LO,HI)`）或 `<SCRIPT>_<用途>_POS`（单点）。',
     '//      `<SCRIPT>` = 宿主 marker 的**裸名**（`TITLE` / `SBUNKI` / …）—— 这是位置表的命名，**不是** trigger 的',
-    '//      `script` 参数：C1 的门是精确 `==`，那边必须写带 `.BIN` 的宿主拼写（见 `save.js` 头）。',
-    '//   3. ⛔ **别处不许再裸写这些字面量**。`scripts/plugins/lib/*.js`（除本文件与 `guest-globals.js`）里出现',
+    '//      `script` 参数：C1 的门是精确 `==`，那边必须写带 `.BIN` 的宿主拼写（见 `save.ts` 头）。',
+    '//   3. ⛔ **别处不许再裸写这些字面量**。`scripts/plugins/lib/*.ts`（除本文件与 `guest-globals.ts`）里出现',
     '//      `0x…` 字面量 ⇒ `tools/test/script-map.test.mjs` 红（它**剥注释**后扫，所以头注释里印区间是允许的）。',
     '//      新增一条位置的正确做法：把锚加进 `tools/script-positions.json`，再 `gen --write`（消费方 `import` 名字）。',
     '//',
@@ -470,7 +470,7 @@ export const hexOf = (n, width = 4) => `0x${n.toString(16).padStart(width, '0')}
  * @param {object} model 锚表
  * @param {Map<string, number>} values name → pos
  */
-export function renderJs(model, values) {
+export function renderTs(model, values) {
     const byName = new Map(model.positions.map((p) => [p.name, p]));
     const lines = [...HEADER, ''];
     for (const block of model.layout) {
@@ -509,7 +509,7 @@ function writeOut(stream, text) {
 /** 生成物的落点：`--js` 覆盖 > 锚表里的 `js` > 常量缺省 */
 function targetPath(model, args) {
     if (args.jsPath) return args.jsPath;
-    return model.js ? path.resolve(REPO_ROOT, model.js) : POSITIONS_JS;
+    return model.js ? path.resolve(REPO_ROOT, model.js) : POSITIONS_TS;
 }
 
 /** gen：算 → 渲染 →（`--write`）写盘 */
@@ -523,7 +523,7 @@ function actionGen(args) {
         writeOut(process.stderr, `gen 拒绝写：${err.message}`);
         return 1;
     }
-    const text = renderJs(model, values);
+    const text = renderTs(model, values);
     const target = targetPath(model, args);
     const prev = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
     const changed = prev !== text;
@@ -542,7 +542,7 @@ function actionGen(args) {
     return 0;
 }
 
-/** check：锚唯一性 + `gen` 结果 vs 磁盘 js（逐字）；不写盘 */
+/** check：锚唯一性 + `gen` 结果 vs 磁盘 ts（逐字）；不写盘 */
 function actionCheck(args) {
     const model = loadModel(args.modelPath);
     const snapshot = loadSnapshot({ patchPath: args.patchPath, headerLen: model.scriptHeaderLen });
@@ -568,8 +568,8 @@ function actionCheck(args) {
         }
     }
 
-    // ② 生成结果 vs 磁盘 js（逐字）
-    const text = renderJs(model, computed.values);
+    // ② 生成结果 vs 磁盘 ts（逐字）
+    const text = renderTs(model, computed.values);
     const target = targetPath(model, args);
     const actual = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
     if (actual === null) {
@@ -682,12 +682,12 @@ export function describe() {
             '`gen` 再按**补丁后视图**现算每个常量。`pos` 是补丁后坐标（插件运行时读的是汉化 install 的 BIN）。',
         notHere:
             '译文不在这里（`data/translations/patch.json`）；补丁后视图也不在这里（由基线 BIN + patch 现算）。' +
-            '生成物 `apps/emulator-lift/scripts/plugins/lib/script-positions.js` 只是渲染结果 —— 改它会被 `check` 判红。',
+            '生成物 `apps/emulator-lift/scripts/plugins/lib/script-positions.ts` 只是渲染结果 —— 改它会被 `check` 判红。',
         topLevel: {
             schemaVersion: 1,
             _doc: '由本工具拥有（指向这份自描述的指针；⛔ 不手改）',
             scriptHeaderLen: '`pos` 的坐标系原点 = 0x3C（`kScriptHeaderLen`）；与 `label_%08x` 同一坐标系',
-            js: '生成物的仓库相对路径（渲染目标；`--js` 可覆盖，诊断用）',
+            js: '生成物（`.ts`）的仓库相对路径（渲染目标；`--js` 可覆盖，诊断用）',
             layout: '**生成物的顺序与段落**（`{kind:"section"|"position"}`）；`section.banner` 是逐字搬进生成物的整行注释',
             positions: '锚表本体（见字段表）；名字必须在 layout 里各出现一次',
         },
@@ -725,7 +725,7 @@ export function describe() {
             },
             {
                 id: 5,
-                text: '生成物是 `renderJs()` 的**逐字**结果（含文件头）；数值写法 = `0x` + 小写十六进制（宽度缺省 4，`width` 可覆盖历史写法）',
+                text: '生成物是 `renderTs()` 的**逐字**结果（含文件头）；数值写法 = `0x` + 小写十六进制（宽度缺省 4，`width` 可覆盖历史写法）',
                 enforcedBy: '`check` 的 ③ + `tools/test/script-map.test.mjs`（导出名唯一 / 裸 `0x` 只许在这两张表里）',
             },
             {
@@ -743,7 +743,7 @@ export function describe() {
         ],
         operations: OPERATIONS,
         writePath:
-            '**唯一写入口 = `gen --write`**，且它只写生成物 js（缺省 dry-run）。锚表 `tools/script-positions.json` 是' +
+            '**唯一写入口 = `gen --write`**，且它只写生成物 ts（缺省 dry-run）。锚表 `tools/script-positions.json` 是' +
             '人工编辑的文本（本工具**不回写**它 —— `pos` 是基线参考值，patch 插入 / 删除只会让生成物的值平移）；' +
             '`data/translations/patch.json` **只读**（改完 patch 之后跑 gen 重算）。',
         howToCheck:

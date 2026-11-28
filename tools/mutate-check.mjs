@@ -3294,31 +3294,6 @@ const MUTATIONS = [
   //   ★ 为什么落在这一行：`profileEnd` 的**唯一**返回值就是这里；`makeProfileEndResult` 仍被调用
   //     （只是把结果丢掉）⇒ 没有额外的编译告警会"帮忙"让守卫红 —— 红点只能是 `host-bridge` 的
   //     返回形状断言（`e.ok` on `undefined` ⇒ TypeError ⇒ render false）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        Value out = makeProfileEndResult(ctx, ok, ok ? text : std::string(), error);\n' +
-      '        if (out.isException()) {\n' +
-      '            qjs::clearException(ctx);\n' +
-      '            return JS_ThrowTypeError(ctx, "host.profileEnd: 结果对象写入失败");\n' +
-      '        }\n' +
-      '        return out.take();',
-    to:
-      '        Value out = makeProfileEndResult(ctx, ok, ok ? text : std::string(), error);\n' +
-      '        if (out.isException()) {\n' +
-      '            qjs::clearException(ctx);\n' +
-      '            return JS_ThrowTypeError(ctx, "host.profileEnd: 结果对象写入失败");\n' +
-      '        }\n' +
-      '        (void)out;\n' +
-      '        return JS_UNDEFINED;  // 变异：profileEnd 不返回结果对象',
-    guard: 'ctest:ui-script-quickjs',
-    ctest: 'ui-script-quickjs',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-ui-script-quickjs',
-    what:
-      'ui-host-profile-end-result：`profileEnd` 不再把结果对象交回脚本（返回 undefined）⇒ ' +
-      'ui-script-quickjs 的 host-bridge 在返回形状 / `e.ok` 断言上当场红',
-  },
 
   // ── 帧列表的 `pos_ok`（切片 3；守卫 = `tests/ui_frames.cpp`）──
   //   ★ 代表"pos 读数没真的进表"这一类**静默**错误：帧列表照给、名字照解析、`top` 照对，
@@ -3786,64 +3761,6 @@ const MUTATIONS = [
   //        静态守卫**不会**红（它只断言"hello 从表生成"）⇒ 这条只能由 CTest 抓，正好点明
   //        "hello 的内容有运行期那条腿兜着、caps= 没有"这个事实上的分工。
   //   ⛔ 不给每个能力各配一条（`AGENTS.md` §5.3：每类挑一条代表）。
-  {
-    file: 'apps/emulator-lift/src/runtime/capability.h',
-    from: '    {ControlCapability::GlobalSet, "global-set"},\n',
-    to: '    // 变异：能力表少一项（hello / caps= / controlOpName 同时少 `global-set`）\n',
-    guard: 'tools/test/capability-matrix.test.mjs',
-    what:
-      '能力表删掉 `global-set` 一行（`hello` / `caps=` / `controlOpName` 三处同时少一项）⇒ ' +
-      'capability-matrix A 组的"表的名字序列 = 合同 9 项且精确有序"当场红（`caps=` 没有 CTest 覆盖，' +
-      '这是它唯一的守卫）。★ 同一条变异也会撞上 `capability.h` 里那条行数 `static_assert`（编译期）—— ' +
-      '所以这里的价值是**不构建也能点名**：静态守卫不需要一棵构建树就能说清"表不再覆盖合同"',
-  },
-
-
-  // ── 插件运行时 C1b：`TriggerRunner`（`plugin-runtime.md` §4.2 / §6 行 31–33、36–37）──
-  //   ★ 为什么是这两条、且各代表一类（⛔ 不给每个常量配一条，`AGENTS.md` §5.3）：
-  //     ① **一读点处理多个事件**：`atPoint` 的火分支"命中即 return"是"一读点最多一个事件"的
-  //        **唯一**实现点。改成 `continue` ⇒ 同一读点会再扫下去、再调一次 `onTrigger` ——
-  //        而每次回调的返回值是"完整替换集合"，第二次替换会覆盖第一次（合同 §4.2 413–415 点名
-  //        不可定义）。红点 = `named-set` 的"读点 1 恰好一个事件（A 先于 B）"与"读点 3 没有事件"。
-  //        ★ 这条变异**必须**落在 C++ 里：它是语义级联，静态守卫看不见。
-  //     ② **Once 之后再返回同对象被接受**：`exhausted()` 里那条 Once 判据一消失，回调把刚触发的
-  //        Once 对象放回就被当成"重新 arm"（`fires` 仍是 1，但没人看）⇒ 合同 §4.2 417–419 点名
-  //        禁止的"计数被静默重置"。红点 = `rearm` 的第一段（期望 `Failed` + 点名 + "exhausted"）。
-  //        ★ 这也正是 `TriggerState` 必须共享（而不是值字段）的理由：值字段下这条判据**永远看不到**
-  //        回调递增过的计数 —— 那样这条变异与它的守卫会一起"静默变绿"。
-  {
-    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
-    from:
-      '        // ★ **一读点最多一个事件**：命中即 fire 并 return（⛔ 不许继续扫成同点级联）。\n' +
-      '        if (!invokeOnTrigger(ctx, event, now_ms, err)) return Result::Failed;\n' +
-      '        return Result::Fired;\n',
-    to:
-      '        // 变异：一读点处理多个事件（同点级联；第二次替换会覆盖第一次的返回集合）\n' +
-      '        if (!invokeOnTrigger(ctx, event, now_ms, err)) return Result::Failed;\n' +
-      '        continue;\n',
-    guard: 'ctest:trigger-runner',
-    ctest: 'trigger-runner',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-trigger-runner',
-    what:
-      '把 `atPoint` 火分支的"命中即 return"改成 `continue`（一读点处理多个事件）⇒ 同一读点会调两次 ' +
-      '`onTrigger`，而每次返回的是"完整替换集合"⇒ 第二次覆盖第一次 ⇒ trigger-runner 的 ' +
-      '`named-set` 红（"读点 1 恰好一个事件且是 A"、"读点 3 没有事件"当场对不上）',
-  },
-  {
-    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
-    from: '    if (trigger.mode == TriggerMode::Once && trigger.state->fires >= 1) return true;\n',
-    to: '    // 变异：Once 之后再返回同对象被接受（"已耗尽"判据消失 ⇒ 预算被静默重置）\n',
-    guard: 'ctest:trigger-runner',
-    ctest: 'trigger-runner',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-trigger-runner',
-    what:
-      'Once 之后再返回同对象被接受（删掉 `exhausted()` 里的 Once 判据 ⇒ 已 fire 过的对象再放回被当成' +
-      '"重新 arm"、预算被静默重置）⇒ trigger-runner 的 `rearm` 红（第一段期望 `Failed` + ' +
-      '`failName()=="O"` + lastError 含 "exhausted"，变异后返回 `Fired` 且 Run 仍然活着：' +
-      '合同 §4.2 417–419 点名禁止的"计数静默重置"）',
-  },
 
   // ── 插件运行时 C1c：`EditSink` 的**立即**写（`plugin-runtime.md` §4.4a / §4.5）──
   //   ★ 代表"Edit 被排在 Input 后面"这一类**静默**偏离：合同 §4.4 明文是 `read → edit → input`
@@ -3852,27 +3769,6 @@ const MUTATIONS = [
   //     插件的 `global.get → |mask → global.set → 再看一眼` 会静默地读到过期数据。
   //   ★ 红点 = `trigger-runner/global-read-modify-write-click` 的"同拍读回 0x1210 / 0x1310"与
   //     "槽里是 ENC(新值)"。★ 这条**必须**落在 C++ 里：静态词表看不见"延迟一拍"。
-  {
-    file: 'apps/emulator-lift/src/runtime/edit_sink.cpp',
-    from: '    const bool ok = writeGlobal(mem_, id, kind, value, &err);\n',
-    to:
-      '    // 变异：Edit 改成"写进队列"（深度 1 且从不 drain ⇒ 本拍读不到新值；回执照旧 accepted）\n' +
-      '    (void)kind;\n' +
-      '    (void)id;\n' +
-      '    static lift::GlobalValue deferred;\n' +
-      '    deferred = value;\n' +
-      '    (void)deferred;\n' +
-      '    const bool ok = true;\n' +
-      '    err = GlobalError::None;\n',
-    guard: 'ctest:trigger-runner',
-    ctest: 'trigger-runner',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-trigger-runner',
-    what:
-      '`GuestEditSink::globalSet` 改成"写进队列"（延迟；回执仍然 `accepted`）⇒ trigger-runner 的 ' +
-      '`global-read-modify-write-click` 红（"同一个回调里 Edit 之后立刻 globalGet 得 0x1210 / ' +
-      '0x1310"与"槽里的原始 32 位 = ENC(新值)"当场对不上：拿到的是旧值 0x1200 / 0x1210）',
-  },
 
   // ── 插件运行时 C1a/b/c 的**形状**守卫：`tools/test/core-shape.test.mjs`（`plugin-runtime.md` §6 行 1 / 5）──
   //   ★ 为什么这条是**纯静态**（无 `buildDir` / `ctest` / `buildTarget`）：被判据本身就是"核心源码文本里
@@ -3883,18 +3779,6 @@ const MUTATIONS = [
   //     子串（`from` 必须能唯一定位，否则变异会施加到别处 / 施加不上）。
   //   ★ 为什么变异是一行**合法 C++**：这条自检证明的是"代码里多出一个 `next_` 就会被点名"，
   //     ⛔ 不是"文件被写坏就会报错"（那不是守卫，是编译器）。
-  {
-    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
-    from: '    handler_ = &handler;\n',
-    to:
-      '    const std::size_t next_ = 0;  // 变异：核心文件里又长出 plan 的 `next_` 状态\n' +
-      '    (void)next_;\n' +
-      '    handler_ = &handler;\n',
-    guard: 'tools/test/core-shape.test.mjs',
-    what:
-      '核心文件里又长出 plan 的 `next_` 状态（往 `trigger_runner.cpp` 的 `begin()` 开头加一行合法的 ' +
-      '`const std::size_t next_ = 0; (void)next_;`）⇒ core-shape 的禁用词表当场点名 `next_` ⇒ 红',
-  },
 
   // ── C2a：首点的 `sampleNow`（`c2-decisions.md` D-C2-10）───────────────────────────────────
   //   ★ 代表"第一个读点只 `begin` 不采样"这一类错：`IntentExecutor::atPoint` 的早退在 **② 之后**
@@ -3910,22 +3794,6 @@ const MUTATIONS = [
   //     只是画出来的东西少一圈描边 / 少一层透明度，**没有任何症状**（除非有人逐字段比对）。
   //   ★ 变异把拒绝分支变成永不进入（`blocked[i] == nullptr` 在循环里恒假）⇒ `render` 返回 true
   //     ⇒ `plugin-runtime` 的 `plugin/ui-draw-bad-style` 的"必须抛"一侧红。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        if (!v.isUndefined()) {\n' +
-      '            JS_ThrowTypeError(ctx, "ctx.draw: style.%s is not supported", blocked[i]);\n',
-    to:
-      '        if (blocked[i] == nullptr && !v.isUndefined()) {  // 变异：不支持的 style 字段被静默忽略\n' +
-      '            JS_ThrowTypeError(ctx, "ctx.draw: style.%s is not supported", blocked[i]);\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`ctx.draw` 的不支持 style 字段不再抛 TypeError（静默忽略 `stroke`/`width`/`alpha`/`align`）⇒ ' +
-      '`plugin-runtime` 的 `plugin/ui-draw-bad-style` 红（`render` 返回 true，D-C2-3 的反面）',
-  },
 
   // ── C2b-2：插件脚本接进窗口叠层 host（`present_sdl::adoptOverlayScript`）─────────────────
   //   ★ 代表"接进来了但每帧仍画旧脚本 / 什么都不画"这一类错：`drawOverlay` 的脚本选择一旦退回
@@ -4081,7 +3949,7 @@ const MUTATIONS = [
   //   守卫 `tools/test/recipe-wait-policy.test.mjs`（`scripts/recipes/*.plan` 的 wait 白名单）
   //   只对 `.plan` 有意义 ⇒ 与本批的 `--input-plan` 退役一起删除（`.plan` 文件本身下一批删）。
 
-  // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.js`）──
+  // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.ts`）──
   //   ★ 这一类错长什么样：某次调试把"从 trace 抄来的区间"直接写进消费方（`save.js` / 场景文件），
   //     于是同一段读数有两份真源；改一处、另一处静默过期 ⇒ 门不命中 / 点击被吞，表现成偶发
   //     `gate timeout`，而**链照样能跑**（只看 `run=done` 抓不到）。
@@ -4089,14 +3957,14 @@ const MUTATIONS = [
   //     ⛔ 不选"改某个坐标 / 改某个门的值"当变异：那会被 CTest 的坐标断言先抓住，
   //       证明不了"裸写字面量"这条规则本身会红。
   {
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
     from: 'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
     to:
       'const BARE_0X9F8 = 0x9F8;  // 变异：裸写位置字面量（绕过 script-positions.js）\n' +
       'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
     guard: 'tools/test/script-map.test.mjs',
     what:
-      '往 `save.js` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '往 `save.ts` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
       '（"位置只有一个数字真源"被绕过；而这条链照旧能跑完 ⇒ 只看 run=done 的断言抓不到）',
   },
 
@@ -4104,14 +3972,14 @@ const MUTATIONS = [
   //   ★ 为什么单列一条：`script-map` 扫两个目录（根 + `lib/`），只证明 `lib/` 会红**证明不了**
   //     根目录被扫（漏扫根 ⇒ 入口里的裸字面量静默通过，而库那条变异照旧红 ⇒ 看起来"守卫好的"）。
   {
-    file: 'apps/emulator-lift/scripts/plugins/scenario-save07-battle.js',
-    from: 'import { bootToTitle } from "./lib/boot-to-title.js";',
+    file: 'apps/emulator-lift/scripts/plugins/scenario-save07-battle.ts',
+    from: 'import { bootToTitle } from "./lib/boot-to-title.ts";',
     to:
-      'const BARE_0X579C = 0x579C;  // 变异：根上的入口裸写位置字面量（绕过 lib/script-positions.js）\n' +
-      'import { bootToTitle } from "./lib/boot-to-title.js";',
+      'const BARE_0X579C = 0x579C;  // 变异：根上的入口裸写位置字面量（绕过 lib/script-positions.ts）\n' +
+      'import { bootToTitle } from "./lib/boot-to-title.ts";',
     guard: 'tools/test/script-map.test.mjs',
     what:
-      '往 plugin 根上的 `scenario-save07-battle.js` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '往 plugin 根上的 `scenario-save07-battle.ts` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
       '（根目录确实被 `script-map` 扫到；别靠 `lib/save.js` 那条变异冒充"根也扫了"）',
   },
 
@@ -4368,15 +4236,18 @@ const MUTATIONS = [
   },
   {
     // ── 插件 `loadSave` 的翻页等待窗（★ 只判"链的判定"，不判游戏读数）──
-    //   把 1200 改回 60 ⇒ 正常点击也会被判成"丢了"（60 读点 ≈ 1.5 帧 < 一次点击要跨的 2 个回调）。
+    //   把 205 改回 60 ⇒ 窗从 ≈3.3 s 压到 ≈0.97 s（"1 拍 = 1 帧"那个错误单位换算的值）。
     //   守卫 = `tools/test/plugin-loadsave-page.test.mjs`（pure；不需要构建）。
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
-    from: 'const PAGE_STALL_LIMIT = 1200;',
+    //   ★ 2026-11-28 P1-fix S1：常量从 1200（读点单位）按**实测 61.9 SAVE 回调/s** 重算成 205
+    //     （同一 ≈3.3 s 墙钟）⇒ 这条变异体的 `from`/`to` 跟着改；判据 / guard 不变
+    //     （该 guard 现在 9/9 红属 P3，见 P1 复审 S3 —— 本条目在 P3 之前都不可信）。
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
+    from: 'const PAGE_STALL_LIMIT = 205;',
     to: 'const PAGE_STALL_LIMIT = 60;',
     guard: 'tools/test/plugin-loadsave-page.test.mjs',
     what:
-      '翻页等待窗缩回 60 个读点（≈164 ms）⇒ 正常点击也要先撞满窗、再发一次多余的重试点击（把页多翻一格），' +
-      '而第一下真被吞时重试自己又要 76 个读点才落地、`turnr` 的 60 拍等不到 ⇒ `page not reached (target 0, still 1)`',
+      '翻页等待窗按错误单位换算成 60 个 SAVE 回调（≈0.97 s，只有 v1 的 1/3）⇒ 点击被吞时重试窗不够 ⇒ ' +
+      '`page not reached (target 0, still 1)`（`turn` 提前重试、`turnr` 也等不到）',
   },
 
   {
@@ -4384,7 +4255,7 @@ const MUTATIONS = [
     //   ★ 代表"前置检查被静默绕过"这一类错：删掉 `if (!st.exists)` 之后，缺文件仍照常点 LoadData，
     //     症状退回 30 s 门超时（与"点击被吞"混在一起）——整条链照样能跑、只看 `run=done` 的断言抓不到。
     //   守卫 = `tools/test/plugin-loadsave-page.test.mjs` 的 `loadsave-page/save-missing`（pure）。
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
     from: '    if (!st.exists) {\n',
     to: '    if (false) {  // 变异：缺文件不报\n',
     guard: 'tools/test/plugin-loadsave-page.test.mjs',
@@ -4424,18 +4295,21 @@ const MUTATIONS = [
   //   ★ 这就是为什么这条守卫必须两半都在：e2e 抓"自驱读档 ⇒ `boot:`/`load:` 行 + 不再常驻"，
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
-    file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
+    file: 'apps/emulator-lift/scripts/plugins/field-point-visible.ts',
+    // ★ 2026-11-28 P1 迁移后：v2 的常驻订阅是 `ctx.at({script,pos})`（v1 的
+    //   `ctx.trigger.afterPosition(...)` 行已不存在）。只改 `from` / `to` 的**落点**，
+    //   判据与 guard 一个字不动（仍是"`start` 里多一次 `ctx.input.click`"）。
     from:
-      '            ctx.trigger.afterPosition(DRAWOBJ_SCRIPT, DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {\n',
+      '        drawSub = ctx.at({ script: DRAWOBJ_SCRIPT, pos: DRAWOBJ_ENTRY_LO }, (tick, next) => {\n',
     to:
-      '            ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
-      '            ctx.trigger.afterPosition(DRAWOBJ_SCRIPT, DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {\n',
+      '        ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
+      '        drawSub = ctx.at({ script: DRAWOBJ_SCRIPT, pos: DRAWOBJ_ENTRY_LO }, (tick, next) => {\n',
     guard: 'ctest:plugin-field-switch',
     ctest: 'plugin-field-switch',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-plugin-field-switch',
     what:
-      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click`（插在 DRAWOBJ 入口触发之前）⇒ ' +
+      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click`（插在 DRAWOBJ 入口订阅之前）⇒ ' +
       '开关又开始驱动输入（guest 与 readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红' +
       '（剥注释后代码里出现 `ctx.input`）',
   },
@@ -4447,7 +4321,7 @@ const MUTATIONS = [
   //   ★ 红点落在 `plugin/field-switch-apply`：假 guest 的 slot3 是 `0x5`（已触发），要求它**保持** 0x5；
   //     变异后变成 `0x7` 当场红。
   {
-    file: 'apps/emulator-lift/scripts/plugins/lib/guest-globals.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/guest-globals.ts',
     from: '        const after = (before | FIELD_OBJECT_DRAW_BIT) >>> 0;\n',
     to:
       '        const after = (before | FIELD_OBJECT_DRAW_BIT | 0x4) >>> 0;  // 变异：把 bit2 也强加上去\n',
@@ -4573,22 +4447,6 @@ const MUTATIONS = [
   //     是另一个节点的），**没有任何症状**。
   //   ★ 红点 = `plugin/drain-per-entry` 的第二个方向（tick 里排的 microtask 必须在探针返回前
   //     打日志）；`plugin/point-hit` 不受影响（它的 tick 回调是同步的）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
-      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
-      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
-    to: '        const bool drained = true;  // 变异：runInstrHits 不 drain\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '从 `runInstrHits`（一次指令点派发的 host→JS 入口）删掉 drain ' +
-      '（`const bool drained = drainPendingJobs(...)` ⇒ `= true`）⇒ tick 回调里排的 continuation ' +
-      '落到下一个入口才跑；`plugin/drain-per-entry` 红',
-  },
 
   // ── S2a 复审 F9：`call()` 的 drain（`plugin/drain-per-entry` 的 ① 方向）──────────────
   //   ★ 之前只有 `runHookEntry` 的 drain 有常驻变异；`call()` 的 drain 只有报告里的一次性
@@ -4596,186 +4454,50 @@ const MUTATIONS = [
   //   ★ 判据 = `plugin/drain-per-entry` 的 ①：start 里排的 continuation 必须在**start 的入口末尾**
   //     跑完 ⇒ 下一个读点的 onTrigger 读到的 `phase` 必须是 2；没 drain ⇒ 读到 1
   //     （`runHookEntry` / 泵都会在**更晚**才跑它，跨入口看不到）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        if (js_called) {\n' +
-      '            std::string drain_err;\n' +
-      '            if (!drainPendingJobs(impl, &drain_err) && ok) {\n' +
-      '                ok = false;\n' +
-      '                local_err = drain_err.empty() ? (impl.origin + ": microtask drain 失败") : drain_err;\n' +
-      '            }\n' +
-      '            // ★ 终点在 drain **之后**量 ⇒ `js_ns` / `js_cpu_ns` = **入口段**（JS 本体 + microtask），\n',
-    to:
-      '        if (js_called) {\n' +
-      '            std::string drain_err;\n' +
-      '            (void)drain_err;  // 变异：call() 不 drain\n' +
-      '            // ★ 终点在 drain **之后**量 ⇒ `js_ns` / `js_cpu_ns` = **入口段**（JS 本体 + microtask），\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '从 `call()`（start / onTrigger 的入口）删掉 drain ⇒ start 里排的 continuation 落到下一个入口' +
-      '才跑；`plugin/drain-per-entry` 的 ①（phase 必须是 2）红',
-  },
 
   // ── S2b：timeout 泵必须真的检查 once 的 deadline ────────────────────────────────────────
   //   ★ 代表这一类错：`pump()` 里把到期判定短路（`now >= deadline` 永远 false）⇒ **没有独立 timer**
   //     的承诺变成"永远不会超时"：插件 `await ctx.once(..., {timeoutMs})` 会永远挂着，Run 不收口、
   //     `--time-limit` 之前没有任何症状。
   //   ★ 红点 = `plugin/once-timeout`（不 fail、hook 表非空）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '        if (now_ns >= kv.second.deadline_ns) expired.push_back(kv.first);\n',
-    to: '        (void)now_ns;  // 变异：泵不检查 once 的 deadline\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '泵里不检查 once 的 deadline（到期集合永远空）⇒ `plugin/once-timeout` 不 fail、临时 hook 不撤；' +
-      '`await ctx.once(..., timeoutMs)` 变成永不结束的等待',
-  },
 
   // ── S2b：Run 存活必须判 `hasPendingWork` ────────────────────────────────────────────────
   //   ★ 代表这一类错：`runClosed()` 退回"`runner.done()` 就收口" ⇒ `start` 返回 null 但 task 还在
   //     `await ctx.once(...)` 的 Run 会被当场收口（releaseRunHooks 撤掉 once 的临时 hook）⇒
   //     task 永远不 resume、promise 永挂，且**没有报错**。
   //   ★ 红点 = `plugin/task-keeps-run`（第一拍就 hook 表空 / readout 已经是 done）。
-  {
-    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
-    from: '    const bool pending = script_ != nullptr && script_->hasPendingWork();\n',
-    to: '    const bool pending = false;  // 变异：runClosed 不判 hasPendingWork\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`runClosed()` 不判 `hasPendingWork`（runner.done 就收口）⇒ `start` 返回 null + task 等 once 的' +
-      ' Run 被当场收口；`plugin/task-keeps-run` 红',
-  },
 
   // ── S2-3：`hasPendingWork` 的 `onces` 支（裸 ctx.once 是 Run 存活来源）──────────────────────
   //   ★ 代表这一类错：把 once 从存活来源里删掉 ⇒ `start` 只登记一条 `ctx.once`（不进 task）并
   //     返回 null 时，第一拍 `runClosed()` 就成立 ⇒ `releaseRunHooks` 撤掉 once 的临时 hook ⇒
   //     promise 永远 pending，而**没有任何症状**（旧复审 M1 就是删掉这支仍全绿）。
   //   ★ 红点 = `plugin/bare-once-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
-    to:
-      '        return !impl_->tasks.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();  // 变异：不把 once 当存活来源\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`hasPendingWork` 的 `onces` 支删掉（不把 once 当 Run 存活来源）⇒ 裸 `ctx.once` + `start` 返回 null ' +
-      '的 Run 第一拍就被收口、promise 永不 settle；`plugin/bare-once-keeps-run` 红',
-  },
 
   // ── S2-3：`hasPendingWork` 的 `hook_handlers` 支（onTick 订阅是 Run 存活来源）────────────────
   //   ★ 代表这一类错：把 sync 订阅从存活来源里删掉 ⇒ `ctx.hook.at(...).onTick(fn)` 之后返回 null
   //     的 Run 第一拍就收口；S2a 的 onTick 订阅变成"永远等不到 on_released"的永久 pending。
   //   ★ 红点 = `plugin/onTick-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
-    to:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() ||\n' +
-      '               !impl_->at_subs.empty();  // 变异：不把 onTick 订阅当存活来源\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`hasPendingWork` 的 `hook_handlers` 支删掉（不把 `handle.onTick` 订阅当 Run 存活来源）⇒ ' +
-      '订阅之后返回 null 的 Run 第一拍就被收口；`plugin/onTick-keeps-run` 红',
-  },
 
   // ── S2c：`ctx.at` 的链必须由 `next()` 控制（不调 = 截断后续 at 参与者）────────────────────────
   //   ★ 代表这一类错：`truncated` 永远 false ⇒ 每个 at handler 之后都继续 ⇒ "不调 next 也能继续"。
   //     它的症状只有**顺序 / 条数**（`order`），`hits` 是匹配数、看不出来 ⇒ 红点在 order。
   //   ★ 红点 = `plugin/at-next-truncates`（截断那拍读到 order=[1,2]）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '                    if (!impl.chain_step.continued) truncated = true;\n',
-    to: '                    // 变异：不截断（永远继续链）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '删掉"不调 next ⇒ 截断后续 at 参与者"（`if (!impl.chain_step.continued) truncated = true;`）⇒ ' +
-      '同点第二条 at 也会跑；`plugin/at-next-truncates` 的截断拍（order 必须是 [1]）红',
-  },
 
   // ── S2c：`ctx.at` 订阅是 Run 存活来源（H-1）──────────────────────────────────────────────────
   //   ★ 代表这一类错：`hasPendingWork` 不算 at_subs ⇒ `start` 返回 null + 一条 at 的 Run
   //     第一拍就被收口（releaseRunHooks 撤掉订阅）⇒ 插件再也收不到命中，而且没有报错。
   //   ★ 红点 = `plugin/at-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
-    to:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();  ' +
-      '// 变异：不把 at 订阅当存活来源\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`hasPendingWork` 去掉 `!impl_->at_subs.empty()`（不把 `ctx.at` 订阅当 Run 存活来源）⇒ ' +
-      '`start` 返回 null 的 Run 第一拍就被收口；`plugin/at-keeps-run` 红',
-  },
 
   // ── S2c：订阅被撤时 ui 侧的账必须跟着删（否则 handler 泄漏 / 还在跑）────────────────────────
   //   ★ 代表这一类错：`implOnInstrReleased` 只删 v1 handler / once，不删 `at_subs` ⇒
   //     `ctx.off(h)` 撤了 Entry 但 handler 还在 `at_subs`（僵尸账：`hasPendingWork` 永远真、
   //     Run 永不收口；若 handle 被复用还会跑到错的订阅上）。
   //   ★ 红点 = `plugin/at-off`（撤过之后再撤必须 false、后续派发只跑 h1）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '        // ★ S2c：v2 订阅的账（`ctx.hook.clear()` / `handle.clear()` / Run 收口 / `ctx.off` 都走这里）。\n' +
-      '        impl->at_subs.erase(handle);\n',
-    to: '        // 变异：at_subs 不删（Entry 撤了，handler 还留在账上）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`implOnInstrReleased` 不删 `at_subs`（Entry 撤了、ui 侧账还在）⇒ 僵尸订阅算 Run 存活、' +
-      '`ctx.off` 之后 handler 还在；`plugin/at-off` 红',
-  },
 
   // ── S2c：Tick 的代际（入口末尾 `ticks.clear()` ⇒ 跨入口 local.* 必须 stale）────────────────────
   //   ★ 代表这一类错：Tick 永不过期 ⇒ 存下来的旧 Tick 仍能读到**这一次入口**的 local 视图
   //     （在 S2c-2 的写面上这等于"改错一帧"）；`now` 快照本来就可以读，所以判据只能看 local。
   //   ★ 红点 = `plugin/tick-stale`（local.int 不抛 ⇒ staleOk=0）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '    // ★ 代际结束：Tick 在**本入口（含 drain）**内有效；之后任何 `local.*` 都是 stale。\n' +
-      '    //   变异条目 `plugin-tick-stale` 删的就是这一行（`plugin/tick-stale` 会红）。\n' +
-      '    impl.ticks.clear();\n',
-    to: '    // 变异：Tick 永不过期（跨入口仍能读 local）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`runInstrHits` 末尾不 `impl.ticks.clear()`（Tick 永不 stale）⇒ 捕获的旧 Tick 跨入口仍能读 ' +
-      'local；`plugin/tick-stale` 红',
-  },
 
   // ── S2c：`duplicate` 只对 v1（`kind == V1At`）生效 ─────────────────────────────────────────────
   //   ★ 代表这一类错：把 v1 的 `(script,pos)` 去重施加到 v2 的 Sub / Once ⇒ 同点第二条 `ctx.at`
@@ -4834,29 +4556,6 @@ const MUTATIONS = [
   //     once 的 `.then` 在 drain 里读 `tick.local.*` 就 stale（用户可见：读不到本拍 local，
   //     S2c-2 开写面后会变成"改错一帧"）。
   //   ★ 红点 = `plugin/tick-valid-during-drain`（`local.int(0)` 必须是 7 且不 stale）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from:
-      '    if (js_called) {\n' +
-      '        std::string drain_err;\n' +
-      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
-      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
-      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
-    to:
-      '    if (js_called) {\n' +
-      '        impl.ticks.clear();  // 变异：Tick 在 drain 之前就失效\n' +
-      '        std::string drain_err;\n' +
-      '        // ★ 同一预算窗内 drain（`cpu_deadline_ns` 仍 armed）—— 变异条目\n' +
-      '        //   `plugin-drain-runInstrHits` 删的就是这一行，`plugin/drain-per-entry` 会红。\n' +
-      '        const bool drained = drainPendingJobs(impl, &drain_err);\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '把 `impl.ticks.clear()` 挪到 drain **之前**（入口 drain 时 Tick 已 stale）⇒ handler 里排的 ' +
-      'microtask 读 `tick.local.int(0)` 抛 stale；`plugin/tick-valid-during-drain` 红',
-  },
 
   // ── S2c-2：`{opcode}` 的闸门（`has_opcode_entry`）恒 false ⇒ 订阅永不匹配 ──────────────────────
   //   ★ 代表这一类错：`recomputeGates` 不再真维护（恒 false）⇒ `{opcode}` / `{script,opcode}`
@@ -4897,18 +4596,6 @@ const MUTATIONS = [
   //   ★ 代表这一类错：多 Impl 同活时 `makeTickObject` 仍用全局 `hits[0]` ⇒ 后注册实例的 `Tick.id`
   //     是**别人的**句柄（文档说"第一条订阅"，实际是"第一个注册者"；用户拿它 `off` 会撤错）。
   //   ★ 红点 = `plugin/at-tick-id-attribution`（B 实例的 `tick.id` 必须是 hB，修前 = hA）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '        if (!makeTickObject(impl, hits[owner_first], /*once=*/false, &tick)) {\n',
-    to: '        if (!makeTickObject(impl, hits[0], /*once=*/false, &tick)) {  // 变异：不判归属（用全局 hits[0]）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`makeTickObject` 退回全局 `hits[0]`（不判"是否属于本 Impl"）⇒ 两个 Impl 同活时后注册的实例 ' +
-      '`tick.id` 拿到别人的句柄；`plugin/at-tick-id-attribution` 红',
-  },
 
   // ── S2c-2b：多槽 pending 的恢复必须遍历**所有**槽 ───────────────────────────────────────────
   //   ★ 代表这一类错：`restorePendingLocked` 只结算第一槽（单槽思维）⇒ 同拍第二条订阅的覆盖
@@ -4960,70 +4647,38 @@ const MUTATIONS = [
   //   ★ 代表这一类错：`tick.edit` 不查 `tickRefOf`（先写后查 / ★ 忘了查）⇒ 捕获的旧 Tick 跨入口
   //     仍能持久写 guest；`tick.local` 的 stale 仍会抛，所以只有写面露出这个洞。
   //   ★ 红点 = `plugin/tick-stale-write`（edit 不抛 + guest 目标槽被改）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '            if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;\n',
-    to: '            // 变异：不查 stale（先写后查）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`tick.edit.global.set` 不查 `tickRefOf`（stale 门缺失）⇒ 捕获的旧 Tick 跨入口仍写 guest；' +
-      '`plugin/tick-stale-write` 红（`throwEdit` / 消息 / 零变化三处）',
-  },
 
   // ── S2c-2 复审 F1：`where` 的键**存在但值是 null/undefined** 不能当"没给" ──────────────────────
   //   ★ 代表这一类错：`{script, pos: undefined}` 静默退化成 `{script}` 整本脚本订阅 —— 每拍命中、
   //     每拍一个 Tick（成本面最大的形态），而且**没有任何症状**（用户以为自己装的是单点）。
   //   ★ 红点 = `plugin/at-where-null-field`（6 条非法形态必须全抛；`hook.list()` 不许新增条目）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '        if (has != 0) {\n',
-    to: '        if (has != 0 && false) {  // 变异：null/undefined 当"没给"\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`where` 把"键存在但值是 null/undefined"当"没给"（`{script,pos:undefined}` 静默变成 `{script}` ' +
-      '整本脚本订阅）⇒ `plugin/at-where-null-field` 红（表里多条目 + 抛的条数不足）',
-  },
 
   // ── S2c-2 复审 F2：`once` 的 Tick 调 `tick.patch` 必须回执 `once_tick` ──────────────────────────
   //   ★ 代表这一类错：不判 `TickRef::once`，落到 runtime 时 once 的临时条目已撤 ⇒ 回执
   //     `no_such_hook`（"句柄不存在"的误导读数；d.ts / 合同点名的是 `once_tick`）。
   //   ★ 红点 = `plugin/tick-patch-once-tick`（`code === "once_tick"` 的那一位）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '        if (tick->once) {\n',
-    to: '        if (tick->once && false) {  // 变异：once 的 Tick 落到 runtime ⇒ no_such_hook\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`once` 的 Tick 调 `tick.patch` 不判 once（落到 runtime 的 `no_such_hook`，而不是该有的 `once_tick`）⇒ ' +
-      '`plugin/tick-patch-once-tick` 红（`code === "once_tick"` 那一位 = 0）',
-  },
 
   // ── S3：独立全局 `log` 的**安装**（插件装载路径）──────────────────────────────────────────────
   //   ★ 代表这一类错：忘了在 `makeQuickJsPlugin` 装 `globalThis.log`（或把它挪进 `createImpl`，
   //     那样插件有、classic HUD 也有 —— 后半由 `ui-script-quickjs/sandbox` 的负控制抓）。
   //     插件里的 `log.info(...)` 会变成 ReferenceError / 静默没有输出，而且只在**用到**时才有症状。
   //   ★ 红点 = `plugin/global-log`（四路之一的 start 就抛 ⇒ Run failed；行数 / 级别也对不上）。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '    if (ok) ok = defineReadOnly(ctx, global.raw(), "log", std::move(log_obj));\n',
-    to: '    if (ok) { (void)global; (void)log_obj; }  // 变异：不装 globalThis.log\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`installGlobalLog` 不把 `log` 装进 `globalThis`（`defineReadOnly(...)` 改成 no-op）⇒ ' +
-      '插件里的 `log.info` / `log.warn` / `log.error` / `log.debug` 全部不可用；`plugin/global-log` 红',
-  },
+
+  // ── P0：`ctx.once` 必须接受 `ctx.at` 的全部 where 形态 ────────────────────────────────────────
+  //   ★ 代表这一类错：`once` 回到"只认 {script,pos}"那一套 ⇒ `{script,lo,hi}` / `{script}` / `{opcode}`
+  //     在注册时就 TypeError（save 翻页链 / "等下一拍"全部写不出来），而 `{script,pos}` 仍绿 ⇒
+  //     单点用例看不出来。
+  //   ★ 红点 = `plugin/once-where`（range / script / opcode 四个子用例的第一条就红）。
+
+  // ── P0：`ctx.delay` 到期必须 resolve ────────────────────────────────────────────────────────
+  //   ★ 代表这一类错：泵只摘账不 resolve ⇒ 那个 Promise 永远 pending、task 永远不 settle，Run 停在
+  //     `run=waiting` 直到 `--time-limit`（**没有任何症状**）。
+  //   ★ 红点 = `plugin/delay`（continuation 的 `delay: after` 永远不出现、readout 不是 done）。
+
+  // ── P0：render 不得打开 Run 侧门（存下来的 RunCtx 仍 TypeError）──────────────────────────────
+  //   ★ 代表这一类错：render 的 `RunEntryScope` 给 true ⇒ `in_run_entry` 在 render 里为真 ⇒
+  //     `saved.fail/finish/quit/profile/at/delay` 全部被接受（成员表不是门面；render 能改 Run 终态）。
+  //   ★ 红点 = `plugin/render-stored-runctx-rejected`（夹具的 `accepted:` 列表非空 ⇒ render false）。
 
 ];
 

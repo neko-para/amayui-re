@@ -1,0 +1,21 @@
+{
+  // ★ 发行插件（`scripts/plugins/*.ts` + `lib/*.ts`）的类型档 = `pnpm typecheck` 的**倒数第二档**。
+  //   为什么单列：宿主 QJS 直接装载 `.ts`（quickts E1 只做纯类型擦除）⇒ 这一档同时钉住
+  //   ① `strict` 下类型对齐 `plugin.d.ts`；② `erasableSyntaxOnly`（enum / 构造参数属性 / 含值
+  //   namespace / `import =` 这类"要生成代码"的写法在**类型检查期**就红，而不是等运行期）。
+  //   `allowImportingTsExtensions`：多文件 `.ts` 的 import specifier **必须带 `.ts`**
+  //   （宿主 loader 不补扩展名，见 `README.md` 的「import 扩展名策略」）⇒ 类型档与运行期同形。
+  //   ⛔ 不放 `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes`：那是 `examples/` 的样例档
+  //   （更严是为了教"只看 d.ts 怎么写插件"）；发行插件这里只跟 base 的 `strict`。
+  //   ★ `extends` = `../tsconfig.json`（= `scripts/tsconfig.json`）。⚠ 任务书写的 `../../` 是
+  //   `examples/` 的深度（`scripts/plugins/examples/` → `../../` = `scripts/`）；本文件在
+  //   `scripts/plugins/` ⇒ `../../` 落到 `apps/emulator-lift/tsconfig.json`（不存在）。
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "erasableSyntaxOnly": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "moduleResolution": "Bundler"
+  },
+  "include": ["./*.ts", "./lib/*.ts", "./plugin.d.ts"]
+}

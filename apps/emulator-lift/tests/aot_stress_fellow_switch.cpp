@@ -1,6 +1,6 @@
 // emulator-lift · **路径 2（打开 FELLOW，6 次立绘切换）**的端到端读数面（`LIFT_STRESS` 档）
 //
-// 判据（红了意味着什么）：真库驱动 `scripts/plugins/scenario-fellow-switch.js`（S1 起入口在插件**根**，
+// 判据（红了意味着什么）：真库驱动 `scripts/plugins/scenario-fellow-switch.ts`（S1 起入口在插件**根**，
 // 库在 `lib/`；`--present headless --skip-logo --audio off --time-limit 240 --profile`）交给
 // `emulator-lift-aot --plugin` ⇒ 宿主进程必须
 //   ① **exit 0**；
@@ -16,8 +16,8 @@
 //   ⛔ 不让核心 exit 5"（`ctx.finish(5)` 只写 readout）⇒ **只看退出码会把失败读成绿**。
 //   注：本档没有 `--input-plan`，所以没有 `pending=` 这行；`run=finished exit=0` 是它的等价面。
 //
-// ★ 能红的改法（⛔ 不动 `scripts/plugins/lib/**` 的共用件）：把 `script-positions.js` 的
-//   `FELLOW_READ_INPUT_LO/HI` 换成 FELLOW 的**轮询体**区间（`script-positions.js` 已记的负对照：
+// ★ 能红的改法（⛔ 不动 `scripts/plugins/lib/**` 的共用件）：把 `script-positions.ts` 的
+//   `FELLOW_READ_INPUT_LO/HI` 换成 FELLOW 的**轮询体**区间（`script-positions.ts` 已记的负对照：
 //   门命中但点击被吞）⇒ 切换门超时 ⇒ `ctx.finish(5)` ⇒ readout `exit=5` ⇒ ②③ 红。
 //   实测记录：本用例第一次跑（2026-11-24）在**载入前缀**就红了 —— `loadSave(9)` 的翻页门
 //   `load-save: page not reached (target 0, still 1)`（见报告 `## 未做`：路径 3 的翻页是既有缺口）。
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
     using namespace lift_test;
 
     if (argc < 6) {
-        LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <执行源> <安装树> <saves/> <scenario-fellow-switch.js>"
+        LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <执行源> <安装树> <saves/> <scenario-fellow-switch.ts>"
                   "（见 CMakeLists）");
     }
     const fs::path aot_exe = argv[1];
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     if (!fs::exists(aot_exe, ec)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe, ec)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir, ec)) LIFT_SKIP("安装树（--game-dir）不在场");
-    if (!fs::exists(plugin_js, ec)) LIFT_SKIP("驱动 scripts/plugins/scenario-fellow-switch.js 不在场");
+    if (!fs::exists(plugin_js, ec)) LIFT_SKIP("驱动 scripts/plugins/scenario-fellow-switch.ts 不在场");
     if (!fs::exists(saves_dir / "SAVE09.DAT", ec)) LIFT_SKIP("saves/SAVE09.DAT 不在场（本驱动要槽 9）");
     if (!fs::exists(saves_dir / "SAVE.DAT", ec)) LIFT_SKIP("saves/SAVE.DAT 不在场（读档页号的真源）");
 

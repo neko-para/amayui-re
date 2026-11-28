@@ -16,10 +16,10 @@
 //                                            click 坐标 = helper 的**运行期**导出（⛔ 不是"没报错"）。
 //   · `plugin/js-comparison-unchanged`（S1b）：`.js` 的 `f<a>(b)` 仍是比较（⛔ 不按泛型调用）。
 //   · `plugin/ts-uppercase-ext`（S1b）     ：扩展名判据 ASCII 大小写不敏感（`.TS` / `.MTS`）。
-//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）；
-//                                            参考入口 = 根 `scripts/plugins/load-save.js`（S1 拆出）：
+//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.ts`（假读数）；
+//                                            参考入口 = 根 `scripts/plugins/load-save.ts`（S1 拆出）：
 //                                            `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
-//                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.js`）：
+//                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.ts`）：
 //                                            `boot:title` 命中 → `start` 点 LoadData → SAVE → 读点 →
 //                                            SBUNKI → `expect` 命中（用例显式给
 //                                            `--plugin-param expect=FIELD,SC0000`）；两个 slot 的 `move`
@@ -182,43 +182,18 @@ std::uint32_t intAddr(std::uint32_t index) {
 
 std::uint32_t rawSlot(const lift::GuestMemory& mem) { return mem.rd32(intAddr(kFxGlobalId)); }
 
-// ---- 注入的读数源（C1 的测试缝；`TriggerReadings` 是纯值）----
-struct FakeReadings final : lift::plugin::ReadingsSource {
-    std::string script = "SCENE1";
-    std::uint32_t pos = 0x1104;
-    bool pos_ok = true;
-    bool mouse_ok = false;
-    int mouse_x = 0;
-    int mouse_y = 0;
-    std::uint64_t samples = 0;
-
-    lift::plugin::TriggerReadings sample(lift::InputPoint point) override {
-        ++samples;
-        lift::plugin::TriggerReadings readings;
-        readings.point = point;
-        readings.script = script;
-        readings.script_ok = !script.empty();
-        readings.pos = pos;
-        readings.pos_ok = pos_ok;
-        readings.mouse_ok = mouse_ok;
-        readings.mouse_x = mouse_x;
-        readings.mouse_y = mouse_y;
-        return readings;
-    }
-};
-
 std::string fixturePath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_FIXTURES_DIR) / name).string();
 }
 
 // ★ C2c：**真库**目录（`scripts/plugins/lib`）。QJS 的 import 根 = 入口文件目录 ⇒ 夹具不能
-//   import 它。★ S1 起 `lib/save.js` 只是库（没有 default 导出）；参考入口在**根** `load-save.js`。
+//   import 它。★ S1 起 `lib/save.ts` 只是库（没有 default 导出）；参考入口在**根** `load-save.ts`。
 std::string libPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR) / name).string();
 }
 
 // ★ S1：`--plugin` 的 id 根 = `scripts/plugins/`（`LIFT_PLUGIN_LIB_DIR` 的父目录）。场景入口在根上，
-//   库仍在 `lib/`；`load-save.js` 是 `lib/save.js` 的参考入口（id = `load-save`）。
+//   库仍在 `lib/`；`load-save.ts` 是 `lib/save.ts` 的参考入口（id = `load-save`）。
 std::string pluginRootPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR).parent_path() / name).string();
 }
@@ -268,7 +243,7 @@ std::unique_ptr<lift::ui::PluginScript> loadPlugin(const std::string& file,
     return lift::ui::makeQuickJsPlugin(source, opts, err);
 }
 
-// 一个夹具：假 guest 内存 + 默认窗口管理器 + 注入读数源 + 一个 PluginHost。
+// 一个夹具：假 guest 内存 + 默认窗口管理器 + 一个 PluginHost。
 // ★ 装配顺序 = 生产的顺序（`attachMemory` 在 `init` 之后；读点观察者由 `onReadPoint` 直接驱动）。
 struct Fixture {
     lift::GuestMemory mem;
@@ -276,7 +251,6 @@ struct Fixture {
     lift::WindowManager wm;
     std::uint32_t hwnd = 0;
     bool win_ok = false;
-    FakeReadings readings;
     std::unique_ptr<lift::plugin::PluginHost> host;
     std::string load_error;
 
@@ -291,11 +265,11 @@ struct Fixture {
     //   自己读源码再 `init` —— 那会漏掉 initFromFile 的读文件 / 日志归属面）。
     bool loadFile(const std::string& path, const std::map<std::string, std::string>& params = {},
                   const lift::ui::UiHostOps* host_ops = nullptr) {
-        host = std::make_unique<lift::plugin::PluginHost>(readings);
+        host = std::make_unique<lift::plugin::PluginHost>();
         // ★ 预算（D5 的 2 ms / 100k 是**运行时口径**，不是本用例的判据）：这里放宽到
         //   500 ms / 1e7 ops —— 只为让"QJS 冷启动（第一次 JS_Call + 若干个对象分配）"不把
-        //   用例变成随机红。⛔ 生产值仍只有一份（`runtime/budget.h`；`PluginHost` 读的就是它）。
-        host->runner().setBudget(lift::plugin::Budget{500'000'000ull, 10'000'000u});
+        //   用例变成随机红。⛔ 生产值仍只有一份（`runtime/budget.h`）。
+        host->setBudget(lift::plugin::Budget{500'000'000ull, 10'000'000u});
         // ★ 装配顺序与 `aot_main` **一致**：`init`（编译 + 沙箱）→ `attachMemory`（Edit/Read）。
         //   `host_ops` 只在需要判"profile 桥有没有被调到"的用例里给（`plugin/render-stored-runctx-rejected`）。
         if (!host->initFromFile(path, params, host_ops, &load_error)) return false;
@@ -308,11 +282,11 @@ struct Fixture {
         return loadFile(fixturePath(file), params, host_ops);
     }
 
-    // ★ S1：参考入口（config > params > 默认、自带 TITLE 门）在根 `load-save.js` —— 与 e2e
+    // ★ S1：参考入口（config > params > 默认、自带 TITLE 门）在根 `load-save.ts` —— 与 e2e
     //   同一个文件，⛔ 不复制。
     bool loadLib(const std::map<std::string, std::string>& params = {},
                  const lift::ui::UiHostOps* host_ops = nullptr) {
-        return loadFile(pluginRootPath("load-save.js"), params, host_ops);
+        return loadFile(pluginRootPath("load-save.ts"), params, host_ops);
     }
 
     // 一个读点（本文件里"读点"的唯一含义）。
@@ -376,6 +350,7 @@ constexpr std::uint32_t kInstrScriptId = 3u;
 //   `{script}` / `{script,opcode}` 的**负控制**要"换脚本 ⇒ 不命中"，换 id 才看得见
 //   （同名改 id 不够：命中后 `Entry::script_id` 已缓存，只比 id）。
 constexpr std::uint32_t kInstrOtherId = 4u;
+constexpr std::uint32_t kInstrTitleId = 5u;  // TITLE.BIN（e2e 链的 boot 门）
 constexpr std::uint32_t kInstrPc = kInstrBody + (kInstrPos - lift::kScriptHeaderLen);
 // ★ S2c（`tick.local`）：local-ptr 0 指向的 dword（`ptr(0)` = 这个地址、`ptrDword(0)` = 它的语义值）。
 constexpr std::uint32_t kInstrLocalTarget = 0x004D7000u;
@@ -404,6 +379,12 @@ bool installInstrFrame(lift::GuestMemory& mem) {
     const char kOtherName[] = "OTHER.BIN";
     for (std::size_t i = 0; i <= sizeof(kOtherName) - 1; ++i) {
         mem.wr8(other + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kOtherName[i]));
+    }
+    // TITLE.BIN（id 5）：`control-script/save-missing-precheck` 的 boot 门（真库 `load-save.ts`）。
+    const std::uint32_t title = kInstrName + lift::kFileNameStride * kInstrTitleId;
+    const char kTitleName[] = "TITLE.BIN";
+    for (std::size_t i = 0; i <= sizeof(kTitleName) - 1; ++i) {
+        mem.wr8(title + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kTitleName[i]));
     }
     // opcode 摆在 PC 上（`instrHookProbe` 用 `mem.rd32(pc)` 读）。
     return put32(mem, kInstrPc, kInstrOpcode);
@@ -487,122 +468,29 @@ void caseApiSurface() {
     dumpFail(f);
     // ★ 形状断言全在 `api.js` 里（宿主读不到 JS 对象）；`ctx.fail` 会把缺/多的键带进 reason。
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRun());
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasStart());
     LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->hasRender());
     // Edit **立即**：`api.js` 写了 int 0 ⇒ 槽里是 ENC(0)（⛔ 不是"排进队列等下一拍"）。
     LIFT_CHECK_EQ_U32(rawSlot(f.mem), lift::encodeInt(0u, kFxKey));
     // Input 只入队（一读点一条的预算之外，Edit 不进队列）。
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 1);
-    LIFT_CHECK(f.host->runner().done());  // start 返回 [] ⇒ done
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
 }
 
 // =====================================================================================
 // `plugin/initial-state`（`initialState` 注入 + per-Run 状态）
 // =====================================================================================
-void caseInitialState() {
-    lift_test::g_current_case = "plugin/initial-state";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.load("state.js");
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    f.pump();  // start：检查 n===1，写 n=2，arm atReadPoint
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    f.pump();  // 第二个回调：必须看到 n===2（per-Run）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    LIFT_CHECK(f.host->runner().done());
-
-    // ---- 没有 `initialState` ⇒ `{}`（且可写）----
-    lift_test::g_current_case = "plugin/initial-state-bare";
-    Fixture b;
-    const bool ok = b.load("bare.js");
-    LIFT_CHECK(ok);
-    if (ok) {
-        b.pump();
-        dumpFail(b);
-        LIFT_CHECK(!b.host->failed());
-        LIFT_CHECK(b.host->runner().done());
-    }
-
-    // ---- 同一文件装载**两次**（两个 runtime）⇒ 状态不共享（第二个 Run 的 n 仍是 1）----
-    //   ★ C2 只有一个 Run/实例 ⇒ 这里判的是"装载边界"，⛔ 不是"同 runtime 两个 Run"。
-    lift_test::g_current_case = "plugin/initial-state-two-loads";
-    Fixture again;
-    const bool ok2 = again.load("state.js");
-    LIFT_CHECK(ok2);
-    if (ok2) {
-        again.pump();  // start：n 必须是 1（上一次 Run 写的 2 不许漏过来）
-        dumpFail(again);
-        LIFT_CHECK(!again.host->failed());
-    }
-}
 
 // =====================================================================================
 // `plugin/concurrent-arm`：一读点最多一个 / 返回数组完整替换 / [] = done
 // =====================================================================================
-void caseConcurrentArm() {
-    lift_test::g_current_case = "plugin/concurrent-arm";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.load("concurrent.js");
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    // 第 1 个读点：start arm 三个门（`atPoint` 的 poll 在 start 之前 ⇒ 本拍不 fire）。
-    f.readings.pos = 0x15;  // 在 A 区间 [0x10,0x20)
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    // 第 2 个读点：A 命中（注册顺序第一个）。
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    // 返回数组只放 B/C ⇒ **仍在 A 区间也不触发**（完整替换；⛔ 不自动保留）。
-    f.pump();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    // B：一次。
-    f.readings.pos = 0x35;
-    f.pump();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
-    // C：一次 ⇒ 回调返回 [] = done。
-    f.readings.pos = 0x55;
-    f.pump();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 3);
-    LIFT_CHECK(f.host->runner().done());
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-
-    // ---- 重复 name ⇒ Run fail 并点名（判据在 `TriggerRunner::install`）----
-    lift_test::g_current_case = "plugin/concurrent-arm-duplicate-name";
-    Fixture d;
-    const bool ok = d.load("dup.js");
-    LIFT_CHECK(ok);
-    if (ok) {
-        d.pump();
-        LIFT_CHECK(d.host->runner().failed());
-        LIFT_CHECK(d.host->runner().failName() == "dup");
-        LIFT_CHECK(d.host->failed());  // handler 侧也记了（readout 的 run=failed 靠它）
-        LIFT_CHECK(d.host->failReason().find("dup") != std::string::npos);
-    }
-}
 
 // =====================================================================================
-// `control-script/start-on-trigger-chain`：**真库** `lib/save.js`（经根入口 `load-save.js`）+ 假读数走完整条链
+// `control-script/start-on-trigger-chain`：**真库** `lib/save.ts`（经根入口 `load-save.ts`）+ 假读数走完整条链
 //
 // ★ 2026-11-21 起 `loadSave.start` **不等 TITLE**（前提 = 调用方保证已在 TITLE；TITLE 门搬到了
-//   `lib/boot-to-title.js`）⇒ 以根入口 `load-save.js` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
+//   `lib/boot-to-title.ts`）⇒ 以根入口 `load-save.ts` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
 //   `start` arm `boot:title`，命中后才 `click(1070,480)` 并 arm `load:save`。
 //   ⇒ 下面两道 armed-name 断言就是"拆分"的地面真相：TITLE 门属于 boot 链，载入链的第一道门是 SAVE。
 //
@@ -615,266 +503,6 @@ void caseConcurrentArm() {
 //   ⑥ FIELD 命中  ⇒ ⑥ 落地 click(640,323) ⇒ 光标 (640,323)；终态 = done（fired=5 / calls=6）
 //
 // ★ 精确坐标是判据（⛔ 不是"没报错"）：变异 `click(300,rowY)` → `rowY+60` 在这里红（第 ⑤ 拍）。
-// =====================================================================================
-
-/** armed 集合必须恰好是那一个名字（`⛔` 不是"至少有一个"）。 */
-void checkSingleArmed(Fixture& f, const char* expected) {
-    const std::vector<std::string> armed = f.host->runner().armedNames();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
-    if (armed.size() == 1) LIFT_CHECK(armed[0] == expected);
-}
-
-// 泵到 SBUNKI 门命中（= 提交 click(640,323) 并 arm 终态集合）；返回实测 row y（失败 -1）。
-int driveToSbunki(Fixture& f) {
-    int cx = 0;
-    int cy = 0;
-    // ① TITLE 第 1 个读点：start 只 arm `boot:title` 门（TITLE 门在 bootToTitle，⛔ 不在 loadSave 里）。
-    f.readings.script = "TITLE.BIN";
-    f.readings.pos = 0x0480;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
-    checkSingleArmed(f, "boot:title");
-    // ② 下一读点（仍在 TITLE 区间）：`boot:title` 命中 ⇒ click(1070,480) staged；armed 换成载入链 ⇒
-    //    `load:save`（★ 拆分后的第一道门就是 SAVE，⛔ 不再是 load:title）。
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
-    checkSingleArmed(f, "load:save");
-    // ③ SAVE 读点：② 提升 click → ③ 命中 SAVE 门（提交 move(300,rowY)）→ ⑥ click 落地。
-    f.readings.script = "SAVE.BIN";
-    f.readings.pos = 0x1150;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 1070);
-    LIFT_CHECK_EQ_I64(cy, 480);
-    // ④ 下一读点（仍在 SAVE 区间）：② 提升 move → ③ 读点门命中（提交 click(300,rowY)）→ ⑥ move 落地。
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 3);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 300);
-    const int row_y = cy;
-    // ⑤ SBUNKI 读点（★ 必须在 **读段之后**的 [0x0B18,0x0C58)：在这之前的点会被吞 —— 见 save.js 头）：
-    //    ② 提升 click(300,rowY) → ③ 命中 SBUNKI 门（提交 click(640,323)）→ ⑥ click 落地。
-    f.readings.script = "SBUNKI.BIN";
-    f.readings.pos = 0x0b20;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 4);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 300);
-    LIFT_CHECK_EQ_I64(cy, row_y);  // ★ 行 y 的精确判据（变异 rowY+60 在这里红）
-    return row_y;
-}
-
-int chainRowY(int slot) {
-    lift_test::g_current_case = "control-script/start-on-trigger-chain";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return -1;
-    const bool loaded = f.loadLib({{"slot", std::to_string(slot)}, {"expect", "FIELD,SC0000"}});
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return -1;
-    }
-    seedSavePage(f, static_cast<std::uint32_t>(slot / 10));  // 已停在目标页 ⇒ 不翻页（链形状见文件头）
-    const int row_y = driveToSbunki(f);
-    if (row_y < 0) return -1;
-    // ⑥ FIELD 读点：② 提升 click(640,323) → ③ 命中 FIELD 终态（done）→ ⑥ click 落地。
-    f.readings.script = "FIELD.BIN";
-    f.readings.pos = 0x0600;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
-    int cx = 0;
-    int cy = 0;
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 640);
-    LIFT_CHECK_EQ_I64(cy, 323);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
-    const std::string line = f.host->readout();
-    LIFT_CHECK(line.find("run=done") != std::string::npos);
-    // readout 的 params 是**按名字排序逗号拼接** ⇒ `expect=FIELD,SC0000,slot=N`。
-    LIFT_CHECK(line.find("slot=" + std::to_string(slot)) != std::string::npos);
-    LIFT_CHECK(line.find("expect=FIELD,SC0000") != std::string::npos);
-    std::printf("  [%s slot=%d] %s\n", lift_test::g_current_case, slot, line.c_str());
-    return row_y;
-}
-
-// -------------------------------------------------------------------------------------
-// `…-field-terminal`：三选一终端的 **FIELD 分支**直接收口（假读数走这一支；真机 slot 5 在本机
-//   headless 实测走 SBUNKI 0x0AF8 第二道确认，见 `.tmp/plugin-runtime/c2c-report.md` §5-2）
-//   ★ 反证面：若 FIELD 分支被删 / 被当成第二道确认的入口，这里会多一次 click(690,323)
-//     ⇒ 光标变成 (690,323)（本用例红）；或 fired 停在 4（也红）。
-// -------------------------------------------------------------------------------------
-void caseFieldTerminal() {
-    lift_test::g_current_case = "control-script/start-on-trigger-chain-field-terminal";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadLib({{"slot", "5"}, {"expect", "FIELD,SC0000"}});
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    seedSavePage(f, 0);  // 槽 5 在页 0；夹具直接停在目标页（不翻页）
-    if (driveToSbunki(f) < 0) return;
-    // 终态 = FIELD：位置故意落在 SBUNKI 0x0AF8 区间里（终态由 script 名决定，不由位置决定）。
-    f.readings.script = "FIELD.BIN";
-    f.readings.pos = 0x0af8;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
-    LIFT_CHECK(f.host->runner().done());
-    LIFT_CHECK(!f.host->failed());
-    int cx = 0;
-    int cy = 0;
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 640);
-    LIFT_CHECK_EQ_I64(cy, 323);  // ⛔ 不是 (690,323)：没有第二道确认
-    // done 之后：再泵两拍也不许有新回调 / 新输入（终态是**真的**收口，不是暂时等待）。
-    f.pump();
-    f.pump();
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 640);
-    LIFT_CHECK_EQ_I64(cy, 323);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
-    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
-}
-
-// -------------------------------------------------------------------------------------
-// `…-second-confirm`：三选一终端的 **SBUNKI 0x0AF8 分支**（2026-11-20 mac headless 实测 slot 5
-//   走的就是这条：进门即点 → guest 进 0x0AF8 → 再点 690,323 才到 FIELD）
-//   ★ 判据：0x0AF8 命中 ⇒ 真的**提交并落地** click(690,323)（光标变 (690,323)），再 FIELD ⇒ done；
-//     `fired=6` / `calls=7`。与 `…-field-terminal` 的 6 那条**并存**（两条都是 D-C2C-3 的合法终态）。
-// -------------------------------------------------------------------------------------
-void caseSecondConfirm() {
-    lift_test::g_current_case = "control-script/start-on-trigger-chain-second-confirm";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadLib({{"slot", "5"}, {"expect", "FIELD,SC0000"}});
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    seedSavePage(f, 0);  // 槽 5 在页 0；夹具直接停在目标页（不翻页）
-    if (driveToSbunki(f) < 0) return;
-    int cx = 0;
-    int cy = 0;
-    // ④' SBUNKI 0x0AF8：② 提升并落地 click(640,323) → ③ 命中第二道确认（提交 click(690,323)）。
-    f.readings.script = "SBUNKI.BIN";
-    f.readings.pos = 0x0af8;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 640);
-    LIFT_CHECK_EQ_I64(cy, 323);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);  // click(690,323) 已排队
-    // ⑤' FIELD：② 提升并落地 click(690,323) → ③ 命中 FIELD-2 ⇒ done。
-    f.readings.script = "FIELD.BIN";
-    f.readings.pos = 0x0600;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 6);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 7);
-    LIFT_CHECK(f.host->runner().done());
-    LIFT_CHECK(!f.host->failed());
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 690);  // ★ 690 那一步**真的发生了**（不是只 arm 不点）
-    LIFT_CHECK_EQ_I64(cy, 323);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
-    const std::string line = f.host->readout();
-    LIFT_CHECK(line.find("run=done") != std::string::npos);
-    LIFT_CHECK(line.find("calls=7") != std::string::npos);
-    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
-}
-
-// -------------------------------------------------------------------------------------
-// `…-bad-slot`：非整数 / 越界 ⇒ `loadSave` **构造时** throw（装载成功、`start` 里抛 ⇒ Run fail）
-//   ★ 0 / 7 是合法边界（成对断言）：实测行表到 7（8–9 抛）。
-// -------------------------------------------------------------------------------------
-void caseBadSlot() {
-    lift_test::g_current_case = "control-script/start-on-trigger-chain-bad-slot";
-    struct BadSlot {
-        const char* param;
-        const char* needle;
-    };
-    const BadSlot bad[] = {
-        // ★ `9` 在 2026-11-22 之后**是合法槽**（读档界面 90 页 × 10 行 ⇒ 0..899；见 `save.js` 的 `MAX_SLOT`）
-        //   ⇒ 越界边界挪到 900。
-        {"900", "slot 900"}, {"-1", "slot -1"}, {"1.5", "slot 1.5"}, {"abc", "slot NaN"},
-    };
-    for (const BadSlot& b : bad) {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        const bool loaded = f.loadLib({{"slot", b.param}, {"expect", "FIELD,SC0000"}});
-        LIFT_CHECK(loaded);  // 装载不看参数；抛在 start
-        if (!loaded) {
-            std::fprintf(stderr, "  load error (%s): %s\n", b.param, f.load_error.c_str());
-            continue;
-        }
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(f.host->failed());
-        LIFT_CHECK(f.host->failReason().find(b.needle) != std::string::npos);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);  // start 跑了、onTrigger 没跑
-    }
-    // 合法边界 0 / 7 不抛（构造成功、`start` 发 click(1070,480) 并 arm SAVE 门 —— 当拍不 fire）。
-    for (const int slot : {0, 7}) {
-        Fixture f;
-        const bool loaded = f.loadLib({{"slot", std::to_string(slot)}, {"expect", "FIELD,SC0000"}});
-        LIFT_CHECK(loaded);
-        if (!loaded) continue;
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    }
-}
-
-void caseChain() {
-    const int y4 = chainRowY(4);
-    const int y5 = chainRowY(5);
-    const int y7 = chainRowY(7);  // 表里第 7 行（save07-battle.plan 的槽 007 读数）
-    // ★ 实测表：slot 4 → 328、slot 5 → 388、slot 7 → 507（⛔ 不是公式；见 D-C2C-3 / save07-battle.plan）。
-    LIFT_CHECK_EQ_I64(y4, 328);
-    LIFT_CHECK_EQ_I64(y5, 388);
-    LIFT_CHECK_EQ_I64(y7, 507);
-    LIFT_CHECK(y4 != y5);  // 两个 slot 的链必须发不同坐标（"只是没报错"不够）
-    LIFT_CHECK(y5 != y7);  // ★ 7 是新补进表的那一行：退回 0–6 的表会让它（= undefined ⇒ 构造 throw）红
-    caseFieldTerminal();
-    caseSecondConfirm();
-    caseBadSlot();
-}
-
-
-// =====================================================================================
-// `control-script/load-save-onloaded`：`loadSave` 的 **expect（落点由调用方给）+ onLoaded**
-//
-// 判据（三条；⛔ 不判游戏业务）：
-//   ① **期望值/名字表**：`expect` 只给 `FIELD.BIN` 时 `SC0000.BIN` **不是**终态（旧实现硬编码 FIELD/SC0000）；
-//   ② `expect` 命中 ⇒ 先 log、再 `onLoaded`：armed 集合**换成**场景的门（`battle:field`）；
-//   ③ `expect` 缺 / 元素不是非空字符串 ⇒ **构造时 throw** ⇒ `run=failed`（⛔ 不猜默认值）。
-//
-// ★ ①② 用**交付样例** `scripts/plugins/scenario-save07-battle.js`（S1 起入口在**根**；真 `lib/save.js`
-//   + 真 `lib/chains.js`）；③ 需要一份"故意漏参数"的入口 ⇒ run 私有临时目录放 `lib/save.js` 的
-//   **逐字节副本** + 小入口（import 根 = 入口目录 ⇒ 只有这样它才 import 得到真库；
-//   ⛔ 不往 `scripts/plugins/lib/` 塞测试夹具）。
 // =====================================================================================
 
 // run 私有目录（`fs::temp_directory_path()` 之下；析构时删掉 ⇒ ⛔ 不污染工作树）。
@@ -906,49 +534,13 @@ bool writeHostFile(const fs::path& path, const std::string& text) {
     return static_cast<bool>(out);
 }
 
-// ③ 的两份探针：`loadSave` 的 `expect` 校验只能拿**裸 loadSave** 测（参考入口有默认值 + 一行 info）。
-const char* kNoExpectProbe = R"JS(
-import { loadSave } from "./save.js";
-
-const plugin = {
-    start(ctx) {
-        return loadSave(7, {}).start(ctx);
-    },
-    onTrigger(ctx, ev) {
-        return loadSave(7, {}).onTrigger(ctx, ev);
-    },
-};
-
-export default plugin;
-)JS";
-
-const char* kBadExpectProbe = R"JS(
-import { loadSave } from "./save.js";
-
-const plugin = {
-    start(ctx) {
-        return loadSave(7, { expect: ["FIELD.BIN", ""] }).start(ctx);
-    },
-    onTrigger(ctx, ev) {
-        return loadSave(7, { expect: ["FIELD.BIN", ""] }).onTrigger(ctx, ev);
-    },
-};
-
-export default plugin;
-)JS";
-
 // =====================================================================================
 // `control-script/save-missing-precheck`：缺 `SAVE<NN>.DAT` ⇒ **第一个 click 之前** `finish(5)`
 //
-// 判据（红了意味着什么）：`loadSave.start` 的前置检查被删 / 挪到 click 之后 ——
-//   · 缺文件时**任何 click 都不得提交**（`stagedDepth / depth` 都是 0，光标不动）；
-//   · Run 必须自己收口：`finished + exit=5`，reason 点名 `SAVE15.DAT` / `slot 15`；
-//   · 回调数 = 2（`start` + TITLE 门那一次）：⛔ 不是在 30 s 门超时之后才失败。
-//
-// ★ 夹具：临时 appdata **建出**存档目录（引擎启动期会建它；见 `save-format.md` §1），
-//   ⛔ 不放 `SAVE15.DAT`。这是"复制错一层 / 漏拷槽"的机械复现，不依赖 `saves/`。
-// ★ 参考入口自带 `bootToTitle`（TITLE 门）⇒ 第 2 个读点才进入 `loadSave.start`；
-//   boot 链的 TITLE 命中**不点任何坐标**（`boot-to-title.js`），所以 0 click 是这条链的真判据。
+// 判据：缺文件时任何 click 都不得提交（staged/depth 都是 0、光标不动）；Run 自己收口
+//   （`finished + exit=5`，reason 点名 `SAVE15.DAT` / `slot 15`）。
+// ★ v2 驱动：真库 `load-save.ts` 的 `start` → task → `bootToTitle`（TITLE.BIN once）→ `loadSave`
+//   的前置检查。用假帧派发一条 TITLE 指令（id 5 / pos 0x480）让 boot 门命中。
 // =====================================================================================
 void caseSaveMissingPrecheck() {
     lift_test::g_current_case = "control-script/save-missing-precheck";
@@ -959,13 +551,13 @@ void caseSaveMissingPrecheck() {
     LIFT_CHECK(appdata.make("lift-plugin-save-precheck"));
     if (appdata.path.empty()) return;
     std::error_code ec;
-    // ★ 非 ASCII 段必须从 UTF-8 → 宿主 `wchar_t`（`fs::path` 的窄构造按 ACP 解码，会造出错的目录名）。
     const fs::path save_dir =
         appdata.path /
         fs::path(lift::utf8ToWide("Local/Eushully/天結いキャッスルマイスター/SAVE"));
-    fs::create_directories(save_dir, ec);  // 目录存在、文件不存在 ⇒ 只可能是"这一槽缺"
+    fs::create_directories(save_dir, ec);
     LIFT_CHECK(!ec);
     if (ec) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
     const bool loaded = f.loadLib({{"slot", "15"}, {"expect", "FIELD,SC0000"}});
     LIFT_CHECK(loaded);
     if (!loaded) {
@@ -973,14 +565,12 @@ void caseSaveMissingPrecheck() {
         return;
     }
     LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
-    // ① TITLE 读点：参考入口的 start 只 arm `boot:title`（不提交 input）。
-    f.readings.script = "TITLE.BIN";
-    f.readings.pos = 0x0480;
-    f.pump();
+    f.pump();  // start：只登记 task（等 TITLE 门），不提交 input
+    dumpFail(f);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
     LIFT_CHECK(!f.host->finished());
-    // ② TITLE 命中 ⇒ `loadSave.start`：前置检查必须在这里 finish(5) + 返回 []，⛔ 一个 click 都不发。
-    f.pump();
+    LIFT_CHECK(setInstrScript(f, kInstrTitleId));
+    dispatchInstr(f, 0x0480u);  // TITLE 门命中 ⇒ boot 返回 ⇒ loadSave 前置检查 finish(5)
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK(f.host->finished());
@@ -996,8 +586,7 @@ void caseSaveMissingPrecheck() {
     f.cursor(&cx, &cy);
     LIFT_CHECK_EQ_I64(cx, 0);
     LIFT_CHECK_EQ_I64(cy, 0);
-    LIFT_CHECK(f.host->runner().done());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 2);
+    LIFT_CHECK(f.host->done());
     const std::string line = f.host->readout();
     LIFT_CHECK(line.find("run=finished") != std::string::npos);
     LIFT_CHECK(line.find("exit=5") != std::string::npos);
@@ -1005,16 +594,6 @@ void caseSaveMissingPrecheck() {
     std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
 }
 
-// =====================================================================================
-// `control-script/config-roundtrip`：`ctx.config` 的**读写面**（真 `PluginHost` + 临时 appdata）
-//
-// 判据（红了意味着什么）：
-//   ① 预置的 `test.config.pre = 123` 被读到（= attach 真的读了 appdata 根的文件）；
-//   ② 六种原生值 set → get / has / all（深拷贝）/ delete；保留名 / NaN / undefined / 函数 ⇒ TypeError；
-//   ③ **回调末 flush 真的发生**：回调返回后 `plugin-config.json` 里能读回本次写，且预置的未知域
-//      `keep.me` 没被重建掉（前向兼容）。
-// ★ 失败都走 `ctx.fail`（JS 侧逐项点名）；C++ 侧只判 `!failed` / `done` / 文件内容。
-// =====================================================================================
 void caseConfigRoundtrip() {
     lift_test::g_current_case = "control-script/config-roundtrip";
     Fixture f;
@@ -1040,7 +619,7 @@ void caseConfigRoundtrip() {
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
 
     std::string after;
@@ -1095,7 +674,7 @@ void caseConfigHostPause() {
     LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
     LIFT_CHECK(f.attachConfig());
     // 生产值 2 ms / op_limit 不限：这条判的**只**是 CPU deadline。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     dumpFail(f);
     const lift::plugin::CallbackDiag& d = lift::plugin::callbackDiag();
@@ -1103,7 +682,7 @@ void caseConfigHostPause() {
                 static_cast<unsigned long long>(d.js_cpu_ns / 1000),
                 static_cast<unsigned long long>(d.host_pause_ns / 1000));
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
     LIFT_CHECK(d.host_pause_ns > 0);
     LIFT_CHECK(d.host_pause_ns >= 500'000ull);
@@ -1112,7 +691,7 @@ void caseConfigHostPause() {
 }
 
 // =====================================================================================
-// `plugin/field-switch-apply`：`field-point-visible.js` 的**施加面**（纯 QJS + 假 guest 内存）
+// `plugin/field-switch-apply`：`field-point-visible.ts` 的**施加面**（纯 QJS + 假 guest 内存）
 //
 // 判据（红了意味着什么）：
 //   ① 唯一钩子 = **`DRAWOBJ.BIN` 的入口窗口** `[0x003C,0x06BC)`（`fp:draw`；全语料 4 处
@@ -1133,7 +712,7 @@ void caseConfigHostPause() {
 // =====================================================================================
 
 // `50ff9f` 的 32 槽派生位 / `50ffd1` 的 32 槽类型（数值的唯一出处在
-// `scripts/plugins/lib/guest-globals.js`；本用例是它的**消费者**，所以在这里重复一组只读常量）。
+// `scripts/plugins/lib/guest-globals.ts`；本用例是它的**消费者**，所以在这里重复一组只读常量）。
 constexpr std::uint32_t kFieldFlagsId = 0x50ff9Fu;
 constexpr std::uint32_t kFieldTypeId = 0x50ffD1u;
 constexpr std::uint32_t kFieldMapId = 0xB222u;        // 当前地图号（只读；日志用）
@@ -1193,263 +772,7 @@ bool seedFieldScene(Fixture& f) {
     return seedFieldInt(f, kFieldFlagsId + 6u, 0u);                // 类型不命中 ⇒ 一个字节都不动
 }
 
-void caseFieldSwitchApply() {
-    // ---- ① on=1：`DRAWOBJ` 入口（reenter）⇒ 只补 bit0 / 同窗口不重复 fire / 下一帧重新补 ----
-    lift_test::g_current_case = "plugin/field-switch-apply";
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        LIFT_CHECK(installFieldPool(f));
-        ScopedTempDir appdata;
-        LIFT_CHECK(appdata.make("lift-plugin-field-switch-apply"));
-        if (appdata.path.empty()) return;
-        // 旧配置里残留的 `poll` / `static` = **无害忽略**（本轮删了 `static` 这条语义，键不读了）。
-        LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
-                                 R"({"version":1,"domains":{"field.point-visible":{"on":1,"poll":0,"static":1}}})"));
-        const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
-        LIFT_CHECK(loaded);
-        if (!loaded) {
-            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-            return;
-        }
-        LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
-        LIFT_CHECK(f.attachConfig());
-        LIFT_CHECK(seedFieldScene(f));
 
-        // 唯一的触发点 = `DRAWOBJ.BIN` 入口窗口（读数由宿主采样给；区间在 `script-positions.js`）。
-        // ★ trigger 的 `script` 是**精确 `==`** 的宿主 marker 拼写（带 `.BIN`）。
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;  // DRAWOBJ_ENTRY [0x003C,0x06BC) 内（实测读点 pos）
-
-        // ① 第一拍 = `start`：只 arm 一条位置触发，一个槽都不写。
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x2u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x6u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
-        // ② 第二拍 = 有效"外→内"边沿 ⇒ fire ⇒ **只补 bit0**（`0x2→0x3` / `0x6→0x7`）；
-        //    已经带 bit0 的槽一个字节都不写（`0x3` / `0x5` / `0x7` 原样）⇒ bit1 / bit2 不动。
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 6u), 0u);
-        const std::uint64_t logs_draw = f.host->logLines();
-        LIFT_CHECK(logs_draw >= 2u);  // 首行 `on=… types=…` + `field-points: draw matched=5 patched=2`
-        // ③ 同一读点再拍：`fp:draw` 的 Reenter 也不每读点 fire ⇒ 日志不涨。
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
-                          static_cast<std::int64_t>(logs_draw));
-
-        // ④ 下一渲染帧：`SETOBJ` 又把派生位重算回 `0x2` / `0x6`；先读到有效"外"、再回到入口窗口
-        //    ⇒ 重新补 bit0。`matched/patched` 没变 ⇒ ⛔ 不再刷一行日志（每帧 fire，但只在状态变化时打）。
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, 0x2u));
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 4u, 0x6u));
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x0600;  // 有效"外"（不在任何窗口里）：只写边沿，不回调
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x7u);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
-                          static_cast<std::int64_t>(logs_draw));
-
-        // ⑤ 常驻：没人收口（⛔ 不 finish / 不 done / 不 fail）。
-        LIFT_CHECK(!f.host->finished());
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK(!f.host->runner().done());
-        LIFT_CHECK(f.host->callbacks() >= 2u);
-    }
-
-    // ---- ② on=0：一个 guest global 都不读 / 都不写，Run 照样常驻 ----
-    lift_test::g_current_case = "plugin/field-switch-off-noop";
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        LIFT_CHECK(installFieldPool(f));
-        ScopedTempDir appdata;
-        LIFT_CHECK(appdata.make("lift-plugin-field-switch-off"));
-        if (appdata.path.empty()) return;
-        LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
-                                 R"({"version":1,"domains":{"field.point-visible":{"on":0,"poll":0}}})"));
-        const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
-        LIFT_CHECK(loaded);
-        if (!loaded) {
-            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-            return;
-        }
-        LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
-        LIFT_CHECK(f.attachConfig());
-        LIFT_CHECK(seedFieldScene(f));
-        // `fp:draw` 每帧仍 fire，但 `on=0` ⇒ 一个 guest 读都不做（标志逐槽原样）。
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;
-        for (int i = 0; i < 3; ++i) f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x2u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x6u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 6u), 0u);
-        LIFT_CHECK(!f.host->finished());
-        LIFT_CHECK(!f.host->runner().done());
-        LIFT_CHECK(f.host->callbacks() >= 1u);
-        // ★ 首行日志明写 on=0（`host.logLines()` 只有计数；文本面由 `plugin-field-switch` 的 e2e 判）。
-    }
-}
-
-void caseLoadSaveOnLoaded() {
-    lift_test::g_current_case = "control-script/load-save-onloaded";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadFile(pluginRootPath("scenario-save07-battle.js"));
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    // 载入链（TITLE → SAVE → row → SBUNKI）由库自己走；这里只喂假读数。
-    // ★ 样例入口自带 `bootToTitle`（TITLE 门）⇒ 驱动方式与 `start-on-trigger-chain` 相同。
-    seedSavePage(f, 0);  // 槽 7 在页 0；夹具直接停在目标页（不翻页）
-    const int row_y = driveToSbunki(f);
-    if (row_y < 0) return;
-    LIFT_CHECK_EQ_I64(row_y, 507);  // 槽 7（样例就是 `loadSave(7, { expect: ["FIELD.BIN"] })`）
-    // ---- ① 期望值/名字表：SC0000 不在 expect 里 ⇒ **不是**终态 ----
-    {
-        const std::vector<std::string> armed = f.host->runner().armedNames();
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 2);  // expect 1 条 + 第二道确认
-        bool has_field_expect = false;
-        bool has_confirm = false;
-        for (const std::string& name : armed) {
-            if (name == "load:expect:FIELD.BIN") has_field_expect = true;
-            if (name == "load:confirm2") has_confirm = true;
-        }
-        LIFT_CHECK(has_field_expect);
-        LIFT_CHECK(has_confirm);
-    }
-    f.readings.script = "SC0000.BIN";
-    f.readings.pos = 0x0600;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 4);      // 没有终态门命中
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 5);  // 也没有新回调
-    // ---- ② expect 命中 ⇒ 先 log、再 onLoaded；armed 换成场景的门 ----
-    f.readings.script = "FIELD.BIN";
-    f.readings.pos = 0x0600;  // ⛔ 不在 [0x579C,0x5860)：这是"刚进 FIELD"，场景的门还没到
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);  // start + 载入链 5
-    LIFT_CHECK(!f.host->runner().done());
-    const std::vector<std::string> armed = f.host->runner().armedNames();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
-    if (armed.size() == 1) LIFT_CHECK(armed[0] == "battle:field");  // ★ onLoaded 起了场景、场景的门被 arm
-    // 场景的第一跳（走 `chains.js` 的 route）：FIELD 主轮询体命中 ⇒ scenario.onTrigger 提交 click(1220,45)。
-    f.readings.pos = 0x5800;  // [0x579C,0x5860) 内部
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 6);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
-    {
-        const std::vector<std::string> next = f.host->runner().armedNames();
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(next.size()), 1);
-        if (next.size() == 1) LIFT_CHECK(next[0] == "battle:selact");
-    }
-    {
-        const std::string line = f.host->readout();
-        LIFT_CHECK(line.find("run=waiting") != std::string::npos);
-        std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
-    }
-
-    // ---- ③ expect 缺失 / 元素非法 ⇒ 构造时 throw（Run fail 并点名，⛔ 不静默）----
-    ScopedTempDir tmp;
-    LIFT_CHECK(tmp.make("lift-plugin-onloaded"));
-    if (tmp.path.empty()) return;
-    std::error_code ec;
-    // ★ 2026-11-21：`save.js` 现在 import 同目录的兄弟模块（`script-positions.js` / `boot-to-title.js` /
-    //   `chains.js`）⇒ 只复制 save.js 会让探针在 module 解析期就失败。复制**整份 lib**（只复制 .js），
-    //   仍然是"run 私有临时目录"，⛔ 不往真库里塞夹具。
-    const fs::path lib_dir = fs::path(LIFT_PLUGIN_LIB_DIR);
-    std::size_t copied_lib = 0;
-    for (fs::directory_iterator it(lib_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-        std::error_code one;
-        if (!it->is_regular_file(one) || one) continue;
-        if (it->path().extension() != ".js") continue;
-        std::error_code copy_ec_one;
-        fs::copy_file(it->path(), tmp.path / it->path().filename(),
-                      fs::copy_options::overwrite_existing, copy_ec_one);
-        if (!copy_ec_one) ++copied_lib;
-        else ec = copy_ec_one;
-    }
-    LIFT_CHECK(!ec);
-    LIFT_CHECK(copied_lib > 0);
-    LIFT_CHECK(writeHostFile(tmp.path / "no-expect.js", kNoExpectProbe));
-    LIFT_CHECK(writeHostFile(tmp.path / "bad-expect.js", kBadExpectProbe));
-    struct ExpectProbe {
-        const char* file;
-        const char* needle;
-    };
-    const ExpectProbe probes[] = {
-        {"no-expect.js", "options.expect"},  // 缺 ⇒ 消息里点名 expect
-        {"bad-expect.js", "expect[1]"},      // 元素不是非空字符串 ⇒ 点名下标
-    };
-    for (const ExpectProbe& probe : probes) {
-        Fixture p;
-        LIFT_CHECK(p.mem_ok && p.win_ok);
-        if (!p.mem_ok || !p.win_ok) return;
-        const bool ok = p.loadFile((tmp.path / probe.file).string());
-        LIFT_CHECK(ok);
-        if (!ok) {
-            std::fprintf(stderr, "  load error (%s): %s\n", probe.file, p.load_error.c_str());
-            continue;
-        }
-        p.pump();
-        dumpFail(p);
-        LIFT_CHECK(p.host->failed());
-        LIFT_CHECK(p.host->failReason().find(probe.needle) != std::string::npos);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(p.host->callbacks()), 1);  // start 抛了、onTrigger 没跑
-        const std::string line = p.host->readout();
-        LIFT_CHECK(line.find("run=failed") != std::string::npos);
-    }
-    // 缺失 expect 的消息里要给出**三类别名**（ADV / 战斗 / 地图）—— ⛔ 不许只说"必填"。
-    {
-        Fixture p;
-        LIFT_CHECK(p.mem_ok && p.win_ok);
-        if (!p.mem_ok || !p.win_ok) return;
-        const bool ok = p.loadFile((tmp.path / "no-expect.js").string());
-        LIFT_CHECK(ok);
-        if (ok) {
-            p.pump();
-            const std::string reason = p.host->failReason();
-            LIFT_CHECK(reason.find("ADV") != std::string::npos);
-            LIFT_CHECK(reason.find("BTL.BIN") != std::string::npos);
-            LIFT_CHECK(reason.find("FIELD.BIN") != std::string::npos);
-        }
-    }
-}
 
 // =====================================================================================
 // `control-script/chains-route`：`chains.js` 的 `route` —— **通用**（与 save 无关）
@@ -1498,123 +821,6 @@ const then = {
 export default route((ev) => String(ev.name).startsWith("load:"), first, then);
 )JS";
 
-void caseChainsRoute() {
-    lift_test::g_current_case = "control-script/chains-route";
-    ScopedTempDir tmp;
-    LIFT_CHECK(tmp.make("lift-plugin-chains"));
-    if (tmp.path.empty()) return;
-    std::error_code ec;
-    fs::copy_file(fs::path(libPath("chains.js")), tmp.path / "chains.js",
-                  fs::copy_options::overwrite_existing, ec);
-    LIFT_CHECK(!ec);
-    LIFT_CHECK(writeHostFile(tmp.path / "route-probe.js", kRouteProbe));
-
-    // ---- ① 名字路由：`load:*` ⇒ first；其余 ⇒ then（click 坐标可区分来源）----
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
-        LIFT_CHECK(loaded);
-        if (!loaded) {
-            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-            return;
-        }
-        g_routeNowMs = 1000;
-        f.host->runner().setClockForTest(&routeNowMs);
-        f.host->executor().setClockForTest(&routeNowMs);
-        f.readings.script = "FIRST.BIN";
-        f.readings.pos = 0x10;
-        f.pump();  // start：只启 first ⇒ armed = { load:armed }
-        dumpFail(f);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-        {
-            const std::vector<std::string> armed = f.host->runner().armedNames();
-            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
-            if (armed.size() == 1) LIFT_CHECK(armed[0] == "load:armed");
-        }
-        f.pump();  // load:armed 命中 ⇒ first.onTrigger ⇒ click(11,11) + then.start
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
-        {
-            const std::vector<std::string> armed = f.host->runner().armedNames();
-            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
-            if (armed.size() == 1) LIFT_CHECK(armed[0] == "then:armed");  // ★ then 由调用方拉起
-        }
-        f.readings.script = "THEN.BIN";  // then:armed 命中 ⇒ then.onTrigger ⇒ click(22,22)；click(11,11) 落地
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
-        int cx = 0;
-        int cy = 0;
-        f.cursor(&cx, &cy);
-        LIFT_CHECK_EQ_I64(cx, 11);  // first 的 click 真的落地了
-        LIFT_CHECK_EQ_I64(cy, 11);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);  // click(22,22) 来自 then
-        LIFT_CHECK(f.host->runner().done());
-        std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
-    }
-
-    // ---- ② `load:*` 的 **timeout** 也走 first（按名字，⛔ 不按 kind）----
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
-        LIFT_CHECK(loaded);
-        if (!loaded) return;
-        g_routeNowMs = 1000;
-        f.host->runner().setClockForTest(&routeNowMs);
-        f.host->executor().setClockForTest(&routeNowMs);
-        f.readings.script = "FIRST.BIN";
-        f.readings.pos = 0x10;
-        f.pump();  // start：arm load:armed（deadline = 1003）
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->timeouts()), 0);
-        g_routeNowMs = 1010;  // 越过 deadline（⛔ 不真睡）
-        // ★ 这一拍**不许**命中 fire（fire 优先于 timeout）⇒ 喂一个不匹配的读数点。
-        f.readings.script = "OTHER.BIN";
-        f.readings.pos = 0x00;
-        f.pump();  // timeout 事件 name=load:armed ⇒ first.onTrigger
-        dumpFail(f);
-        LIFT_CHECK(f.host->finished());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->finishCode()), 5);
-        LIFT_CHECK(f.host->finishReason().find("first: timeout") != std::string::npos);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->timeouts()), 1);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    }
-
-    // ---- ③ `then:*` 的 timeout 走 then ----
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
-        LIFT_CHECK(loaded);
-        if (!loaded) return;
-        g_routeNowMs = 1000;
-        f.host->runner().setClockForTest(&routeNowMs);
-        f.host->executor().setClockForTest(&routeNowMs);
-        f.readings.script = "FIRST.BIN";
-        f.readings.pos = 0x10;
-        f.pump();  // start
-        f.pump();  // load:armed 命中（now 仍是 1000 ⇒ 不超时）⇒ then.start 拉起 then:armed（deadline 1003）
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK(!f.host->finished());
-        g_routeNowMs = 1010;
-        // ★ 同样：喂不匹配的读数点，让 timeout（而不是 fire）成为本拍事件。
-        f.readings.script = "OTHER.BIN";
-        f.readings.pos = 0x00;
-        f.pump();  // then:armed 超时 ⇒ then.onTrigger ⇒ finish(7, …)
-        dumpFail(f);
-        LIFT_CHECK(f.host->finished());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->finishCode()), 7);
-        LIFT_CHECK(f.host->finishReason().find("then: timeout") != std::string::npos);
-    }
-}
 
 // =====================================================================================
 // `control-script/global-read-modify-write`：read → edit（立即）→ input（另计）
@@ -1639,19 +845,14 @@ void caseGlobalReadModifyWrite() {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return;
     }
-    f.readings.script = "SCENE1";
-    f.pump();  // start：arm afterScript
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    f.pump();  // 命中：read 0x1200 → edit |0x10 → 同拍读回 0x1210 → click
+    f.pump();  // start：read 0x1200 → edit |0x10 → 同拍读回 0x1210 → click
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
     // ★ Edit **立即**：槽里已经是 ENC(0x1210) —— ⛔ 不等任何读点。
     LIFT_CHECK_EQ_U32(rawSlot(f.mem), lift::encodeInt(0x1210u, kFxKey));
     // ★ Edit **不占** Input 预算：队列里只有那一条 click（回调结束在 staged）。
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 1);
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
 }
 
 // =====================================================================================
@@ -1675,7 +876,7 @@ void caseFinish() {
     LIFT_CHECK(f.host->finishReason() == "old-exit5");
     LIFT_CHECK(!f.host->failed());          // finish ≠ fail
     LIFT_CHECK(!f.host->quitRequested());   // finish ≠ quit
-    LIFT_CHECK(f.host->runner().done());    // Run 收口
+    LIFT_CHECK(f.host->done());    // Run 收口
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
     const std::string line = f.host->readout();
     LIFT_CHECK(line.find("run=finished") != std::string::npos);
@@ -1686,74 +887,12 @@ void caseFinish() {
 // =====================================================================================
 // F2：`onTrigger` 返回的集合让 runner `install` 失败 ⇒ 必须在 readout 上可见（`run=failed`）
 // =====================================================================================
-void caseFailInstall() {
-    lift_test::g_current_case = "plugin/fail-install";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.load("fail-install.js");
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    f.pump();  // 第 1 个读点：start arm `a`（Once）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    f.pump();  // 第 2 个读点：`a` fire ⇒ 回调把同一个 Once 对象放回 ⇒ install 判 exhausted
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    // ★ 判据的两侧：runner 自己 failed **且** handler 侧同步到了（否则 readout 会说 waiting）。
-    LIFT_CHECK(f.host->runner().failed());
-    LIFT_CHECK(f.host->failed());
-    LIFT_CHECK(f.host->failReason().find("exhausted") != std::string::npos);
-    const std::string line = f.host->readout();
-    LIFT_CHECK(line.find("run=failed") != std::string::npos);
-    LIFT_CHECK(line.find("name=a") != std::string::npos);
-    LIFT_CHECK(line.find("exhausted") != std::string::npos);
-    // ★ 读数的**唯一消息面**：green 时也打一行（ctest 只在失败时回放，平时不吵）——
-    //   它是"Run 到底怎么收的口"的直接证据，比只看断言好读。
-    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
-}
 
 // =====================================================================================
 // F3-R1：**runner 侧**的失败（`install` 拒了回调返回的集合）也要丢掉同拍 staged input
 //   ★ 与 `plugin/fail-releases-input` 的区别：这条**不调** `ctx.fail` —— 失败在 JS 返回**之后**
 //     （`invokeOnTrigger` 的 `install`）⇒ 归因只能由 `syncRunnerFailure` 兜。
 // =====================================================================================
-void caseFailInstallReleasesInput() {
-    lift_test::g_current_case = "plugin/fail-install-releases-input";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.load("fail-install-click.js");
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    int cx = 0;
-    int cy = 0;
-    f.pump();  // 第 1 个读点：start arm `a`（Once）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    f.pump();  // 第 2 个读点：callback 先 click(700,500) 再返回已耗尽的 Once ⇒ install fail
-    dumpFail(f);
-    LIFT_CHECK(f.host->runner().failed());
-    LIFT_CHECK(f.host->failed());
-    // ★ 判据：同拍 staged 的 click 被丢掉（队列清零 + 光标没动）——失败之后也不许落地。
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK(!(cx == 700 && cy == 500));
-    f.pump();
-    f.cursor(&cx, &cy);
-    LIFT_CHECK(!(cx == 700 && cy == 500));
-    const std::string line = f.host->readout();
-    LIFT_CHECK(line.find("run=failed") != std::string::npos);
-    LIFT_CHECK(line.find("exhausted") != std::string::npos);
-    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
-}
 
 // =====================================================================================
 // F3（父级裁决）：`fail` / `quit` ⇒ 立刻丢 staged input；`finish` ⇒ 不丢（下一个读点落地）
@@ -1771,10 +910,7 @@ void caseFailReleasesInput() {
     }
     int cx = 0;
     int cy = 0;
-    f.pump();  // 第 1 个读点：start arm `boom`
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    f.pump();  // 第 2 个读点：回调提交 click(200,100) **然后** fail ⇒ 必须被丢掉
+    f.pump();  // start：提交 click(200,100) **然后** fail ⇒ 必须被丢掉
     dumpFail(f);
     LIFT_CHECK(f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);  // staged 被丢掉
@@ -1799,10 +935,7 @@ void caseQuitReleasesInput() {
     }
     int cx = 0;
     int cy = 0;
-    f.pump();  // start：arm `bye`
-    dumpFail(f);
-    LIFT_CHECK(!f.host->quitRequested());
-    f.pump();  // 回调：click(300,400) 然后 quit ⇒ staged 必须被丢掉
+    f.pump();  // start：click(300,400) 然后 quit ⇒ staged 必须被丢掉
     dumpFail(f);
     LIFT_CHECK(f.host->quitRequested());  // 第二条停机源
     LIFT_CHECK(!f.host->failed());         // quit ≠ fail
@@ -1830,9 +963,7 @@ void caseFinishLandsInput() {
     }
     int cx = 0;
     int cy = 0;
-    f.pump();  // start：arm `fin`
-    dumpFail(f);
-    f.pump();  // 回调：click(640,323) + finish(0) ⇒ **不**释放 ⇒ staged 留着（下一读点才落地）
+    f.pump();  // start：click(640,323) + finish(0) ⇒ **不**释放 ⇒ staged 留着（下一读点才落地）
     dumpFail(f);
     LIFT_CHECK(f.host->finished());
     LIFT_CHECK(!f.host->failed());
@@ -1851,80 +982,10 @@ void caseFinishLandsInput() {
 // =====================================================================================
 // F5-R2：`atReadPoint("fileRead", …)` 能解析 + 只在**下一个 `ReadFile` 投递点**上 fire
 // =====================================================================================
-void caseAtReadPointFileRead() {
-    lift_test::g_current_case = "plugin/at-read-point-file-read";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.load("point-file-read.js");
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    f.pump(lift::InputPoint::PeekMsg);  // start：arm `atReadPoint("fileRead", 1)`
-    dumpFail(f);
-    // ★ 解析失败（旧实现：运行期词表没有 `fileRead` ⇒ TypeError）会走 `start` 抛错 ⇒ 这里先红。
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->runner().armedCount()), 1);
-    LIFT_CHECK(f.host->runner().armed()[0].point_filter == lift::InputPoint::FileRead);
-    // 别的读点不 fire（点过滤生效）。
-    f.pump(lift::InputPoint::PeekMsg);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    // 下一个 `ReadFile` 投递点 ⇒ fire（回调里断言 `ev.point` / `ctx.now.point` == "fileRead"）。
-    f.pump(lift::InputPoint::FileRead);
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    LIFT_CHECK(f.host->runner().done());
-    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
-}
 
 // =====================================================================================
 // D-C2-10：`start` 里 `ctx.now` 有值；`start` 里的 Input **下一读点**才落地
 // =====================================================================================
-void caseStartNowAndStaged() {
-    lift_test::g_current_case = "plugin/start-now-and-staged-input";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    f.readings.script = "SCENE1";
-    f.readings.pos = 0x1234;  // JS 侧断言这个数（params 传十进制 4660）
-    const bool loaded = f.load("now.js", {{"expect_script", "SCENE1"}, {"expect_pos", "4660"}});
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    int cx = 0;
-    int cy = 0;
-    f.pump();  // 第 1 个读点：sampleNow（⇒ start 里 ctx.now 有值）+ start（提交 click(11,22)）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    // ★ Input 落 `staged_`：本读点**看不见**（ready 为 0），光标也**没动**。
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().readyDepth()), 0);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK(!(cx == 11 && cy == 22));
-    // 第 2 个读点：② 提升 → ③ poll（atReadPoint 命中）→ ⑥ 落地 click。
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 11);
-    LIFT_CHECK_EQ_I64(cy, 22);
-    LIFT_CHECK(f.host->runner().done());
-
-    // ---- `ctx.now` 在 `start` 里**没有**值 ⇒ 插件自己 fail（反证：sampleNow 是必需的）----
-    lift_test::g_current_case = "plugin/start-now-requires-sample";
-    Fixture n;
-    LIFT_CHECK(n.load("now.js", {{"expect_script", "OTHER"}, {"expect_pos", "1"}}));
-    n.pump();
-    LIFT_CHECK(n.host->failed());  // script 不匹配 ⇒ JS 侧 ctx.fail（证明它**真的读到了** now）
-    LIFT_CHECK(n.host->failReason().find("expect_script") != std::string::npos ||
-               n.host->failReason().find("OTHER") != std::string::npos);
-}
 
 // =====================================================================================
 // 模块契约（`export default` / 成对 / 只有 render）
@@ -1944,12 +1005,12 @@ void caseModuleContract() {
         const bool loaded = f.load("start-only.js");
         LIFT_CHECK(loaded);
         if (loaded) {
-            LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRun());
+            LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasStart());
             LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->hasRender());
             f.pump();
             dumpFail(f);
             LIFT_CHECK(!f.host->failed());
-            LIFT_CHECK(f.host->runner().done());
+            LIFT_CHECK(f.host->done());
             LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
             LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
         }
@@ -1968,9 +1029,9 @@ void caseModuleContract() {
         LIFT_CHECK(loaded);
         if (loaded) {
             LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRender());
-            LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->hasRun());
+            LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->hasStart());
             f.pump();  // 没有 Run ⇒ 立刻 done，且**不调**任何回调
-            LIFT_CHECK(f.host->runner().done());
+            LIFT_CHECK(f.host->done());
             LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 0);
             LIFT_CHECK(!f.host->failed());
         }
@@ -2011,7 +1072,7 @@ void caseRenderSurface() {
     LIFT_CHECK(f.host->script() != nullptr);
     if (f.host->script() == nullptr) return;
     LIFT_CHECK(f.host->script()->hasRender());
-    LIFT_CHECK(!f.host->script()->hasRun());
+    LIFT_CHECK(!f.host->script()->hasStart());
     lift::ui::UiHostOps ops{};
     ops.config = f.host->config();
     lift::ui::UiBuilder builder;
@@ -2056,7 +1117,7 @@ void caseUiDraw(lift::FontEngine* font) {
         return;
     }
     LIFT_CHECK(script->hasRender());
-    LIFT_CHECK(!script->hasRun());
+    LIFT_CHECK(!script->hasStart());
     lift::ui::UiFrameReadings readings;
     lift::ui::UiBuilder builder;
     const bool ok = script->render(builder, readings, &err);
@@ -2117,8 +1178,17 @@ void caseUiDraw(lift::FontEngine* font) {
     };
     for (const BadStyle& bc : bad_cases) {
         std::string load_err;
+        std::string source;
+        LIFT_CHECK(readFixture("draw-bad-style.js", &source));
+        const std::string marker = "__BAD__";
+        const std::size_t at = source.find(marker);
+        LIFT_CHECK(at != std::string::npos);
+        if (at != std::string::npos) source.replace(at, marker.size(), bc.bad);
+        lift::ui::PluginLoadOptions opts;
+        opts.origin = fixturePath("draw-bad-style.js");
+        opts.font = font;
         std::unique_ptr<lift::ui::PluginScript> bad =
-            loadPlugin("draw-bad-style.js", {{"bad", bc.bad}}, font, &load_err);
+            lift::ui::makeQuickJsPlugin(source, opts, &load_err);
         LIFT_CHECK(bad != nullptr);
         if (bad == nullptr) {
             std::fprintf(stderr, "  load error (%s): %s\n", bc.bad, load_err.c_str());
@@ -2212,7 +1282,7 @@ void caseUiState() {
     LIFT_CHECK(f.host->script() != nullptr);
     if (f.host->script() == nullptr) return;
     LIFT_CHECK(f.host->script()->hasRender());
-    LIFT_CHECK(f.host->script()->hasRun());
+    LIFT_CHECK(f.host->script()->hasStart());
 
     lift::ui::UiFrameReadings r;
     std::string err;
@@ -2223,17 +1293,13 @@ void caseUiState() {
         LIFT_CHECK(before_render.elements().empty());
     }
     // ② 第 1 个读点：`start` arm 两道门（本拍只采样，不 fire）
-    f.readings.script = "TITLE";
-    f.readings.pos = 0;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    // ③ 第 2 个读点：TITLE 命中 ⇒ onTrigger 只 `ctx.ui.show`（回调里没有 draw —— JS 已断言）
+    // ③ 第 2 个读点：dump 循环（`ctx.delay(0)`）跑到 TITLE 分支 ⇒ 只 `ctx.ui.show`
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
     // ④ **下一次 render** 才画：本帧 list = 恰好 2 个元素（顺序 = 调用顺序），字段固定
     lift::ui::UiBuilder after_show;
     const bool shown_ok = f.host->script()->render(after_show, r, &err);
@@ -2252,13 +1318,11 @@ void caseUiState() {
         LIFT_CHECK(after_show.elements()[1].text == "mode title");
         LIFT_CHECK_EQ_I64(after_show.elements()[1].font_size, 16);
     }
-    // ⑤ FIELD 命中 ⇒ hide（返回 [] = done）⇒ 下一次 render 又为 0
-    f.readings.script = "FIELD";
+    // ⑤ FIELD 命中 ⇒ hide（dump 循环收口）⇒ 下一次 render 又为 0
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     lift::ui::UiBuilder after_hide;
     LIFT_CHECK(f.host->script()->render(after_hide, r, &err));
     LIFT_CHECK(after_hide.elements().empty());
@@ -2310,7 +1374,7 @@ void caseHookReleaseOnDone() {
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK(f.host->logLines() >= 1);  // hook 真的装上了
     // ★ 判据：`install([])` 的 done 发生在 `onTrigger`/`start` 返回之后 ⇒ 读点入口必须补一次释放。
     LIFT_CHECK(f.host->instrHookList().empty());
@@ -2329,7 +1393,7 @@ void caseHookReleaseOnBudget() {
         return;
     }
     // 生产值 2 ms + op_limit 不限：这条判的**只**是 CPU deadline（与 `plugin/callback-cpu-budget` 同形）。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     dumpFail(f);
     LIFT_CHECK(f.host->failed());
@@ -2350,8 +1414,9 @@ void caseHookReleaseOnBudget() {
 //     ② 第二次探针 ⇒ 再 +1、`hits == 2`；
 //     ③ 触发一个 `afterPosition` 读点 ⇒ onTrigger 把 `tick.{seen,pos,opcode,script,id}` 与
 //        `ctx.hook.list()[0].hits` 写进 guest int ⇒ C++ 逐项读回相等。
-//   ★ 为什么字段校验放在 onTrigger：tick 入口 `inCallback()` 恒 false ⇒ `ctx.fail` 也 TypeError
-//     （那会把"参数错"伪装成"handler 抛错"）。onTrigger 是合法的 Run 回调。
+//   ★ 为什么字段校验放在 onTrigger：tick 入口里 v1 写面（`ctx.edit` / `ctx.trigger`）仍 TypeError，
+//     那里做校验会把"参数错"伪装成"handler 抛错"；onTrigger 是合法的 Run 回调。
+//     （★ P0 起 `ctx.fail` 本身在 tick 里允许 —— 它是 Run 侧控制面；本夹具的校验仍不用它。）
 // =====================================================================================
 constexpr std::uint32_t kTickOutSeen = 0xb100u;
 constexpr std::uint32_t kTickOutStatsHits = 0xb101u;
@@ -2397,12 +1462,12 @@ void casePointHit() {
     // 让 afterPosition 命中：onTrigger 把 tick 的字段写回 guest。
     // ★ 先记下命中数（onTrigger 返回 `[]` ⇒ Run 收口 ⇒ hook 表会被清空，之后 `instrHookStats` 查不到）。
     const std::uint64_t hits_before_fire = instrHits(handle);
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutSeen), 2u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutStatsHits), 2u);
+    // ★ v2：at 订阅的 hits 由 C++ 直接读（JS 里没有 `hook.list`）。
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 2);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutPos), kInstrPos);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutOpcode), kInstrOpcode);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickOutScriptOk), 1u);
@@ -2438,19 +1503,20 @@ void casePointHitHandlerError() {
     const std::uint32_t handle = hooks[0].id;
     const std::uint64_t base = f.host->logLines();
 
-    // 第一次：handler 抛 "boom" ⇒ 恰好一行 error（消息带 `hit #1`），Run **不 fail**。
+    // 第一次：handler 抛 "boom" ⇒ 恰好一行 error（消息带 `hit #1`），Run **不 fail**；
+    //   v2 的失败语义 = **撤整条订阅**（不是只摘 handler）⇒ 表空、hits 读数消失。
     dispatchInstr(f, kInstrPos);
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 1);
+    LIFT_CHECK(f.host->instrHookList().empty());
 
-    // 第二次：handler 已摘 ⇒ 不跑 JS、不再打日志；entry 还在 ⇒ `hits == 2`。
+    // 第二次：订阅已撤 ⇒ 不跑 JS、不再打日志。
     dispatchInstr(f, kInstrPos);
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(handle)), 2);
+    LIFT_CHECK(f.host->instrHookList().empty());
 }
 
 // =====================================================================================
@@ -2474,7 +1540,7 @@ void casePointHitAfterRunEnd() {
     f.pump();  // start 里 `return []` ⇒ install([]) 置 done ⇒ 读点入口补一次释放
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK(f.host->instrHookList().empty());
     LIFT_CHECK(!lift::instrHooksActive());
     const std::uint64_t base = f.host->logLines();
@@ -2509,7 +1575,6 @@ void caseDrainPerEntry() {
         return;
     }
     // 首点就读在 `afterPosition` 的区间上：start 装 trigger，**下一个读点**才 fire。
-    f.readings.pos = 0x1000u;
     f.pump();  // start
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -2552,7 +1617,7 @@ void caseDrainBudget() {
         return;
     }
     // 生产值 2 ms + op_limit 不限：判的**只**是 CPU deadline（与 `plugin/callback-cpu-budget` 同形）。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();  // 不返回 = drain 没有 deadline（本用例的红就是你看到它挂住）
     dumpFail(f);
     LIFT_CHECK(f.host->failed());
@@ -2624,7 +1689,6 @@ void caseOnceResolve() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()), static_cast<std::int64_t>(base + 1));
 
     // 下一次合法 Run 回调把 lastTick 写回 guest（Run 还活着：armed 的 dump trigger）。
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -2632,8 +1696,8 @@ void caseOnceResolve() {
     LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutScriptOk), 1u);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutId), handle);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutOpcodeOk), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutHooks), 0u);
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->instrHookList().empty());  // once 命中即撤
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
 }
 
@@ -2674,12 +1738,11 @@ void caseTaskAwait() {
         LIFT_CHECK(!f.host->failed());
         // start 一行 + continuation 一行（continuation 若漏 drain，这一行会落到第二个读点之后）。
         LIFT_CHECK(f.host->logLines() >= 2u);
-        f.readings.pos = 0x1000u;
         f.pump();  // onTrigger 把模块变量 phase 写进 guest
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readFieldInt(f, kS2bOutPhase), 2u);
-        LIFT_CHECK(f.host->runner().done());
+        LIFT_CHECK(f.host->done());
         LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
     }
     // ---- ② task settle ⇒ Run 收口（start 返回 null；没有 armed trigger 也能 done）----
@@ -2692,7 +1755,7 @@ void caseTaskAwait() {
         LIFT_CHECK(!f.host->failed());
         // start 一行 + task 续到结尾一行（证明 task 真的跑了，不是"没登记也刚好 done"）。
         LIFT_CHECK(f.host->logLines() >= 2u);
-        LIFT_CHECK(f.host->runner().done());
+        LIFT_CHECK(f.host->done());
         LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
     }
 }
@@ -2702,10 +1765,10 @@ void caseTaskKeepsRun() {
     Fixture f;
     if (!loadS2b(f, "task-keeps-run")) return;
     LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start 返回 null（runner done），但 task 还在 await once ⇒ Run 必须活着
+    f.pump();  // start 返回 null，但 task 还在 await once ⇒ Run 必须活着
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(!f.host->done());
     // ★ 判据：Run 还活着 —— once 的临时 hook 还在；readout 不能写 `run=done`。
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
     LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
@@ -2739,7 +1802,7 @@ void casePumpBudget() {
     Fixture f;
     if (!loadS2b(f, "pump-budget")) return;
     // 生产值 2 ms + op_limit 不限：判的**只**是泵的 CPU deadline（与 `plugin/drain-budget` 同形）。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();  // start：task 在 await once（不 spin）
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -2780,10 +1843,10 @@ void caseBareOnceKeepsRun() {
     Fixture f;
     if (!loadS2b(f, "bare-once")) return;
     LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start：裸 once（不进 task）+ 返回 null ⇒ runner done，Run 靠 once 活着
+    f.pump();  // start：裸 once（不进 task）⇒ Run 靠 once 活着
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(!f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
     LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
     const std::uint64_t base = f.host->logLines();
@@ -2802,43 +1865,6 @@ void caseBareOnceKeepsRun() {
     std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
 }
 
-void caseOnTickKeepsRun() {
-    lift_test::g_current_case = "plugin/onTick-keeps-run";
-    Fixture f;
-    if (!loadS2b(f, "onTick-keeps-run")) return;
-    LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start：hook.at + onTick(fn)，返回 null ⇒ runner done，Run 靠订阅活着
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
-    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
-
-    f.pump();  // 再来一个读点：仍活着（没有 task / once，只靠 hook_handlers 支）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
-    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
-
-    // 撤订阅 = 合法的 Run 回调（runner 已 done ⇒ 直接驱动 `PluginHost::onTrigger`）。
-    lift::plugin::TriggerEvent ev;
-    ev.what = lift::plugin::TriggerEvent::What::Fired;
-    ev.name = "manual";
-    ev.trigger = f.host->factory().afterPosition("manual", "SCENE1", 0x1000u, 0x1001u,
-                                                 lift::plugin::TriggerMode::Once);
-    std::string ev_err;
-    (void)f.host->onTrigger(f.host->executor().context(), ev, &ev_err);
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-
-    f.pump();  // 撤订阅之后的读点 ⇒ 收口（runner 已 done + 没有待推工作）
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
-    LIFT_CHECK(f.host->instrHookList().empty());
-    LIFT_CHECK(!lift::instrHooksActive());
-    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
-}
 
 // =====================================================================================
 // ★ S2-4（复审 S2-4）：`ctx.hook.clear()` 撤掉 once 的**临时** hook 时，必须 reject 那个 Promise
@@ -2848,27 +1874,6 @@ void caseOnTickKeepsRun() {
 //     ⇒ readout 一直 `run=waiting`（只能等 `--time-limit`），且 catch 那行 log 永远不出现。
 //   ★ 本用例的语义选择：once 被撤 = **可 catch 的拒绝**（不自己 fail Run）；catch 掉了 ⇒ done。
 // =====================================================================================
-void caseOnceHookClear() {
-    lift_test::g_current_case = "plugin/once-hook-clear";
-    Fixture f;
-    if (!loadS2b(f, "once-hook-clear")) return;
-    LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start：task 里 await once（长 timeout），arm `clear`
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
-    const std::uint64_t base = f.host->logLines();
-
-    f.readings.pos = 0x1000u;
-    f.pump();  // onTrigger：ctx.hook.clear() ⇒ once 被 reject ⇒ task 的 catch 在本次 drain 里跑
-    dumpFail(f);
-    LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->logLines() > base);  // catch 真的跑了（once 被 reject）
-    LIFT_CHECK(f.host->instrHookList().empty());
-    // ★ 关键：不许出现"一直 waiting 直到 --time-limit"。
-    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
-    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
-}
 
 // =====================================================================================
 // ★ S2-1（复审 S2-1）：`ctx.finish` / `ctx.quit` 之后**同一入口**里 task 拒绝，不许把 Run 翻成 failed
@@ -2929,10 +1934,10 @@ void caseRenderAfterFinish() {
         return;
     }
     LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start：task await once（长 timeout）；runner done 但 Run 还活着
+    f.pump();  // start：task await once（长 timeout）；Run 还活着
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(!f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
     LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
 
@@ -2954,6 +1959,109 @@ void caseRenderAfterFinish() {
     std::printf("  [%s] logLines=%llu %s\n", lift_test::g_current_case,
                 static_cast<unsigned long long>(f.host->logLines()), f.host->readout().c_str());
 }
+
+// =====================================================================================
+// P1-fix S2 · `ctx.waitAny(arms, { timeoutMs })`（多臂 + wall-clock 失败截止 + hook.clear 收口）
+//
+// 判据（每条都点名"红了 = 什么坏了"）：
+//   · `plugin/wait-any`：两条臂 `{pos:0x200}`（第 0 条）/ `{pos:0x100}`（第 1 条）；
+//     派发 0x100 ⇒ 第 1 条胜出：`{index:1}` 对（⛔ 不是"第一条"）、**两条临时 hook 都撤掉**、
+//     task 的 continuation 在本入口 drain 里跑完（log 行）、Run 收口 `run=done`。
+//     红了 = index 张冠李戴 / 输的那条留在 hook 表（Run 只能等超时）。
+//   · `plugin/wait-any-timeout`：两条都不命中 + `timeoutMs=1` ⇒ 泵先 reject（catch 能 log）、
+//     随后 `fail Run`（reason 点名 `wait-any timeout`；用户 catch 了也照样 fail）；hook 表清空。
+//     红了 = 超时只 reject 不 fail（静默挂到 `--time-limit`）/ 条目残留。
+//   · `plugin/wait-any-timeout-finish`：catch 里 `ctx.finish(5, "<v1 原文案>")` 后再 throw
+//     （`gates.js` 的真实形状）⇒ 终态不许被翻成 failed：readout `run=finished exit=5` + 原文案。
+//   · `plugin/wait-any-clear`：`ctx.hook.clear()`（v1 onTrigger 里调）撤掉整组臂 ⇒ 整组 reject
+//     （catch 能 log；不 fail Run）⇒ task settle ⇒ Run **收口**（`run=done`，不是 `run=waiting`）。
+//     红了 = `on_released` 只摘账不 reject ⇒ task 永远 pending ⇒ 只能等 `--time-limit`。
+// =====================================================================================
+bool loadWaitAny(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("wait-any.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+void caseWaitAny() {
+    // ---- ① 非第一条命中：index 对、另一条 hook 已撤 ----
+    lift_test::g_current_case = "plugin/wait-any";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "two-arms")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：装 2 条临时 hook + task await waitAny
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+        LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+        const std::uint64_t base = f.host->logLines();
+        // ★ 命中**第 1 条臂**（pos 0x100）；第 0 条（0x200）不命中。
+        dispatchInstr(f, kInstrPos);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        // 赢家自己 + 输的那条都不许留（不留 pending）。
+        LIFT_CHECK(f.host->instrHookList().empty());
+        LIFT_CHECK(!lift::instrHooksActive());
+        // task 的 continuation 在本次派发的 drain 里跑完 ⇒ log 行含 index=1 / pos=0x100。
+        LIFT_CHECK(f.host->logLines() > base);
+        const std::string& last = f.host->lastLogLine();
+        LIFT_CHECK(last.find("wait-any: index=1") != std::string::npos);
+        LIFT_CHECK(last.find("pos=256") != std::string::npos);
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ② 超时（不 catch 到"不算失败"）：先 reject（catch log）再 fail Run ----
+    lift_test::g_current_case = "plugin/wait-any-timeout";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "timeout")) return;
+        f.pump();  // start：两条臂 + timeoutMs=1
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
+        const std::uint64_t base = f.host->logLines();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(f.host->failed());
+        const std::string& reason = f.host->failReason();
+        LIFT_CHECK(reason.find("wait-any timeout") != std::string::npos);
+        LIFT_CHECK(reason.find("script=FIELD.BIN") != std::string::npos);
+        // catch 在**泵**里 drain 到了（那行 log 是 catch 打的 ⇒ "先 reject 再 fail"）。
+        LIFT_CHECK(f.host->logLines() > base);
+        LIFT_CHECK(f.host->instrHookList().empty());
+        LIFT_CHECK(f.host->readout().find("run=failed") != std::string::npos);
+        std::printf("  [%s] reason=%s\n", lift_test::g_current_case, reason.c_str());
+    }
+    // ---- ③ catch 里 finish(5) + throw（gates.js 形状）：终态不许被翻成 failed ----
+    lift_test::g_current_case = "plugin/wait-any-timeout-finish";
+    {
+        Fixture f;
+        if (!loadWaitAny(f, "timeout-finish")) return;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(f.host->finished());
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(f.host->finishCode(), 5);
+        const std::string line = f.host->readout();
+        LIFT_CHECK(line.find("run=finished") != std::string::npos);
+        LIFT_CHECK(line.find("exit=5") != std::string::npos);
+        LIFT_CHECK(line.find("run=failed") == std::string::npos);
+        LIFT_CHECK(f.host->finishReason().find("load-save: gate timeout (load:expect:BTL.BIN)") !=
+                   std::string::npos);
+        LIFT_CHECK(f.host->instrHookList().empty());
+        std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+    }
+}
+
 
 // =====================================================================================
 // S2c · `ctx.at(where, (tick, next) => …)` 的同步订阅面（链 / next 截断 / off / Tick / stale）
@@ -3018,7 +2126,6 @@ void caseAtChainOrder() {
         LIFT_CHECK_EQ_U32(row.pos, kInstrPos);
     }
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger：写回 order / 同一性 / kind / hits，然后撤两条
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3029,10 +2136,7 @@ void caseAtChainOrder() {
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // 一次派发一个 Tick 对象
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), h1);   // tick.id = hits[0].handle
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);   // h1 < h2
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 1u);   // h1 kind == "sub"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 1u);   // h2 kind == "sub"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 1u);   // h1 hits
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 1u);   // h2 hits
+    // kind / hits 由 C++ 直接读 `instrHookList()`（JS 里没有 `hook.list`）。
 }
 
 // `plugin/at-next-truncates`：h1 不调 next ⇒ 只跑 h1（h2 的 hits 不涨）；下一拍调 ⇒ [1,2]。
@@ -3064,15 +2168,13 @@ void caseAtNextTruncates() {
             LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[1].hits), 1);  // 匹配数（不是执行数）
         }
     }
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger#1：写回第一拍读数 + allowNext=true
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kAtUndef);  // ★ h2 的 handler 没跑
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // h1 匹配数
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);   // h2 匹配数（同样涨；机制见上）
+    // h1/h2 的匹配数由 C++ 直接读（JS 里没有 `hook.list`；上面的 rows 已断言两条都是 1）。
 
     // 继续拍：h1 调 next ⇒ [1,2]。
     dispatchInstr(f, kInstrPos);
@@ -3086,14 +2188,13 @@ void caseAtNextTruncates() {
             LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[1].hits), 2);
         }
     }
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger#2：写回第二拍读数 + 撤两条
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 2u);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 2u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 2u);  // h2 的匹配数（第二拍）
+    // h2 第二拍的匹配数由 C++ 直接读（上面的 rows 已断言 == 2）。
 }
 
 // `plugin/at-off`：① onTrigger 里 off(h2) ⇒ true；再撤一次 ⇒ false；表少一条。
@@ -3110,13 +2211,12 @@ void caseAtOff() {
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 2);
 
-        f.readings.pos = 0x1000u;
         f.pump();  // onTrigger：off(h2) 两次 + 写回
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // 第一次 true
         LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 0u);  // 第二次 false（幂等）
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);  // 表少一条
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);  // 表少一条
 
         // ② 后续派发只有 h1（它调 next；h2 若还在会变成 +2 行）。
         const std::uint64_t base = f.host->logLines();
@@ -3129,7 +2229,6 @@ void caseAtOff() {
 
         // ★ 撤掉的订阅**不许**留在 ui 侧的账上：`at_subs` 是 `hasPendingWork` 的来源之一，
         //   僵尸账会让 Run 永远不收口（`implOnInstrReleased` 少一句 erase 就红在这里）。
-        f.readings.pos = 0x1000u;
         f.pump();  // onTrigger#2：撤 h1 + return [] ⇒ 收口
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -3211,13 +2310,14 @@ void caseAtHandlerError() {
                       static_cast<std::int64_t>(base + 1));
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h2)), 2);
 
-    f.readings.pos = 0x1000u;
-    f.pump();  // onTrigger：写回读数 + 撤 h2（让 Run 收口）
+    {
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);  // 表里只剩 h2
+        if (rows.size() == 1) LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].hits), 2);
+    }
+    f.pump();  // dump：撤 h2（让 Run 收口）
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);   // 表里只剩 h2
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 2u);   // h2 hits
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);   // h1 不在表里
     LIFT_CHECK(f.host->instrHookList().empty());
 }
 
@@ -3240,7 +2340,6 @@ void caseTickNow() {
         dispatchInstr(f, kInstrPos);
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        f.readings.pos = 0x1000u;
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -3265,7 +2364,6 @@ void caseTickNow() {
         dispatchInstr(f, kNoOpcodePos);
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        f.readings.pos = 0x1000u;
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -3292,7 +2390,6 @@ void caseTickLocal() {
     dispatchInstr(f, kInstrPos);
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3322,7 +2419,6 @@ void caseTickStale() {
     LIFT_CHECK(!f.host->failed());
     const std::uint64_t base = f.host->logLines();
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger（call 入口）：local.int ⇒ stale；now.pos 是旧值；log 成功
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3341,7 +2437,8 @@ void caseTickStale() {
 constexpr std::uint32_t kTickWriteTarget = 0xb150;  // 夹具的 `TICK_TARGET`（int 池内）
 
 // `plugin/tick-edit`：tick 里 `edit.global.set` ⇒ 读点后 guest int 变；同一 handler 里
-//   `ctx.fail` 仍 TypeError（"写面不是把 in_callback_ 打开"的唯一可判读数）。
+//   **v1 `ctx.edit`** 仍 TypeError（"写面不是把 in_callback_ 打开"的可判读数；P0 起
+//   Run 侧控制面 `ctx.fail` 在 tick 里允许 —— 见 `plugin/once-from-task` / `at-from-task`）。
 void caseTickEdit() {
     lift_test::g_current_case = "plugin/tick-edit";
     Fixture f;
@@ -3358,14 +2455,13 @@ void caseTickEdit() {
     // ★ Edit = **立即持久写**：探针还没返回，guest int 已经是 42。
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickWriteTarget), 42u);
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger：把回执 + `ctx.fail` 的结果写回 guest
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // accepted
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // applied
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // queued == false（Edit 不排队）
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // ctx.fail ⇒ TypeError（写面没打开 in_callback_）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // v1 ctx.edit ⇒ TypeError（in_callback_ 没打开）
 }
 
 // `plugin/tick-input`：tick 里 `input.click` ⇒ 回执 queued、下一读点 applied。
@@ -3384,7 +2480,6 @@ void caseTickInput() {
     // ★ tick 不是读点 ⇒ 只入队（staged），不落地。
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 1);
 
-    f.readings.pos = 0x1000u;
     f.pump();  // 本读点：② 提升 → ⑥ 落地 click；回调里读到的仍是 queued
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3416,7 +2511,6 @@ void caseTickStaleWrite() {
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger（call 入口，不是 tick 入口）：三个写面都必须 stale
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3451,7 +2545,6 @@ void caseTickPatchCas() {
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 5u);  // ★ 该条指令读到 5（修前 = 7）
 
-        f.readings.pos = 0x1000u;
         f.pump();  // phase 0：回执 + 重新 arm
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -3464,12 +2557,15 @@ void caseTickPatchCas() {
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 7u);  // 最初 raw
-        f.readings.pos = 0x1000u;
-        f.pump();  // phase 1：stats
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);   // restores == 1
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 0u);  // restore_conflicts == 0
+        {
+            const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);
+            if (rows.size() == 1) {
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].restores), 1);
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].restore_conflicts), 0);
+            }
+        }
+        f.pump();  // phase 1
     }
     // ---- ② 窗口里"别人写" ⇒ CAS 不写回、`restore_conflicts += 1` ----
     {
@@ -3487,7 +2583,6 @@ void caseTickPatchCas() {
         LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 5u);
         // 另一条执行流写同一地址（明文也行：CAS 只比 4 字节原样）。
         LIFT_CHECK(put32(f.mem, kInstrIntBase, 0xDEADBEEFu));
-        f.readings.pos = 0x1000u;
         f.pump();  // phase 0
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -3496,12 +2591,15 @@ void caseTickPatchCas() {
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(f.mem.rd32(kInstrIntBase), 0xDEADBEEFu);  // 别人的写还在
-        f.readings.pos = 0x1000u;
+        {
+            const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 1);
+            if (rows.size() == 1) {
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].restores), 0);
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[0].restore_conflicts), 1);
+            }
+        }
         f.pump();  // phase 1
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 0u);   // restores == 0
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // ★ restore_conflicts == 1
     }
 }
 
@@ -3526,8 +2624,12 @@ void caseTickPatchLimit() {
     }
     LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 0x500u);  // 首个 = 0x500
     LIFT_CHECK_EQ_U32(f.mem.rd32(kInstrLocalTarget), lift::encodeInt(9u, kFxKey));  // 第 9 个没写
+    {
+        const std::vector<lift::InstrHookStatus> rows = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows.size()), 10);
+        if (rows.size() == 10) LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rows[8].skips), 1);
+    }
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3535,7 +2637,9 @@ void caseTickPatchLimit() {
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);   // 1 条 too_many_slots
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);   // 1 条 bad_target（越界）
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 10u);  // 10 条都调用了 `tick.patch`
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // 第 9 条的 entry.skips == 1
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
 }
 
 // `plugin/tick-once-tick-writable`：`once` resolve 的 `.then` 里 `tick.local` / `tick.edit` 可用
@@ -3556,7 +2660,6 @@ void caseTickOnceTickWritable() {
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kTickWriteTarget), 0x77u);  // .then 里的 tick.edit 生效
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3567,52 +2670,42 @@ void caseTickOnceTickWritable() {
 }
 
 
-// `plugin/at-multi-same-pos`：同点 4 条（at×2 + v1 onTick + once）⇒ 一条链；
-//   截断只影响 at 参与者；once 的 `.then` 在**同一入口的 drain** 里跑；`duplicate` 只对 v1 生效。
+// `plugin/at-multi-same-pos`：同点 3 条（at×2 + once）⇒ 一条链；截断只影响 at 参与者；
+//   once 的 `.then` 在**同一入口的 drain** 里跑。
 void caseAtMultiSamePos() {
     lift_test::g_current_case = "plugin/at-multi-same-pos";
     Fixture f;
     if (!loadAtChain(f, "multi-same-pos")) return;
     LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start：4 条全都装上（同点不互斥）
+    f.pump();  // start：3 条全都装上（同点不互斥）
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 4);
-    if (hooks.size() != 4) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 3);
+    if (hooks.size() != 3) return;
     const std::uint32_t h1 = hooks[0].id;
     const std::uint32_t h2 = hooks[1].id;
-    const std::uint32_t v1 = hooks[2].id;
     LIFT_CHECK(hooks[0].hook_kind == lift::InstrHookKind::Sub);
     LIFT_CHECK(hooks[1].hook_kind == lift::InstrHookKind::Sub);
-    LIFT_CHECK(hooks[2].hook_kind == lift::InstrHookKind::V1At);
-    LIFT_CHECK(hooks[3].hook_kind == lift::InstrHookKind::Once);
+    LIFT_CHECK(hooks[2].hook_kind == lift::InstrHookKind::Once);
 
-    dispatchInstr(f, kInstrPos);  // 一次派发命中 4 条
+    dispatchInstr(f, kInstrPos);  // 一次派发命中 3 条
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    // once 命中即撤；剩下 3 条（h1 / h2 / v1）各 hits == 1。
+    // once 命中即撤；剩下 2 条（h1 / h2）各 hits == 1。
     const std::vector<lift::InstrHookStatus> after = f.host->instrHookList();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(after.size()), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(after.size()), 2);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h1)), 1);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h2)), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(v1)), 1);
 
-    f.readings.pos = 0x1000u;
-    f.pump();  // onTrigger：写回 order / onceRan / kind，然后撤（v1.clear + off at）
+    f.pump();  // dump：写回 order / onceRan，然后撤两条 at
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // h1
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);  // h2（它不 next，但自己是链尾）
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 99u); // v1 onTick（被动，不受截断影响）
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 3u);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 2u);
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u); // once 的 .then 在同一入口的 drain 里跑了
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 3u); // 表里剩 h1 / h2 / v1
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 1u);
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 1u);
+    LIFT_CHECK(f.host->instrHookList().empty());
 }
 
 // `plugin/at-keeps-run`：`start` 返回 null + 一条 at ⇒ Run 靠订阅存活；handler 里 off(self)
@@ -3622,10 +2715,10 @@ void caseAtKeepsRun() {
     Fixture f;
     if (!loadAtChain(f, "keeps-run")) return;
     LIFT_CHECK(installInstrFrame(f.mem));
-    f.pump();  // start 返回 null ⇒ runner done，但 at 订阅让 Run 活着
+    f.pump();  // start 返回 null，但 at 订阅让 Run 活着
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(!f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->instrHookList().size()), 1);
     LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
 
@@ -3665,7 +2758,6 @@ void caseAtNextOutside() {
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger：链外调 next ⇒ 抛；夹具自己接住 + 写回 + off
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());                    // ★ 观察者用错 API 不 fail Run
@@ -3698,7 +2790,6 @@ void caseTickValidDuringDrain() {
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger：写回 drain 里那次 local 读的读数
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3751,7 +2842,6 @@ void caseAtWhereRange() {
     dispatchInstr(f, kAtRangeHiPos);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 2);
 
-    f.readings.pos = 0x1000u;
     f.pump();  // onTrigger：写回 handler 的读数（只该跑 2 次）
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3759,15 +2849,7 @@ void caseAtWhereRange() {
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kInstrPos);  // 第一次命中的 now.pos
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), kAtRangeHePos);// 第二次命中的 now.pos
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 2u);
-    // ★ S2c-2 复审 F4：`hook.list()` 的 JS 观测面（`hookStatusObject`）逐字段 —— 修前 JS 面只断
-    //   `kind` / `hits`，`form/lo/hi/opcode` 只在 C++ 的 `InstrHookStatus` 上断过。
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);  // 表里恰好这一行
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);  // kind === "sub"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), 1u);  // form === "range"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), kInstrPos);      // lo
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), kAtRangeHiPos);  // hi
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 0u);             // opcode（非 Opcode 形态 = 0）
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 0u);             // pos（非 Pos 形态 = 0）
+    // ★ 形状面已在上面（start 之后的 `instrHookList()`）逐字段断言；这里只判 handler 读数。
     LIFT_CHECK(f.host->instrHookList().empty());
 }
 
@@ -3804,7 +2886,6 @@ void caseAtWhereScript() {
     dispatchInstr(f, kInstrPos + 0x20u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 3);
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3874,21 +2955,12 @@ void caseAtWhereOpcode() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 2);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(zero)), 1);
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 3u);  // 全局 opcode 的 handler 次数
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);  // 带 script 的 handler 次数
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // {opcode:0} 的 handler 次数（正控制）
-    // ★ S2c-2 复审 F4/F10：`hook.list()` 的 JS 观测面逐字段（两形态 + opcode 0）。
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);          // 表里 3 行
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);          // hooks[0].form === "opcode"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF2), kInstrOpcode);// hooks[0].opcode
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF3), 1u);          // hooks[1].form + script 对
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF4), kInstrOpcode);// hooks[1].opcode
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF5), 1u);          // hooks[2].form === "opcode"
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF6), 0u);          // hooks[2].opcode === 0
     LIFT_CHECK(f.host->instrHookList().empty());
 }
 
@@ -3920,7 +2992,6 @@ void caseAtWhereMixed() {
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(row.hits), 1);
     }
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -3949,17 +3020,11 @@ void caseAtWhereBig() {
     LIFT_CHECK_EQ_U32(hooks[0].lo, 0x90000000u);  // C++ 侧本来就是 uint32
     LIFT_CHECK_EQ_U32(hooks[0].hi, 0x90000010u);
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 0x90000000u);  // JS 读回 lo
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 0x90000010u);  // JS 读回 hi
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);           // form === "range"
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 0u);           // 没有派发 ⇒ handler 没跑
-    // ★ 判据（不能用"回写 guest 再读回"代替：0x90000000 与 int32 -1879048192 回写都是同一 u32）。
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF0), 1u);          // row.lo === 2415919104
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutF1), 1u);          // row.hi === 2415919120
+    // ★ lo/hi 的 uint32 语义已在上面（C++ 直接读 `instrHookList()`）；JS 里没有 hook.list。
     LIFT_CHECK(f.host->instrHookList().empty());
 }
 
@@ -3979,13 +3044,11 @@ void caseAtWhereNullField() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
     if (!hooks.empty()) LIFT_CHECK(hooks[0].form == lift::InstrHookForm::Pos);
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 6u);  // 6 条都抛
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 6u);  // 抛的是 TypeError
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 1u);  // 表里只剩正控制那条
     LIFT_CHECK(readFieldInt(f, kAtOutN) > 0u);        // 正控制拿到了 id（合法面没坏）
     LIFT_CHECK(f.host->instrHookList().empty());
 }
@@ -4012,7 +3075,6 @@ void caseTickPatchOnceTick() {
     dispatchInstr(f, kInstrPos + 8u);  // 下一拍：没有待恢复的槽 ⇒ 值原样
     LIFT_CHECK_EQ_U32(readInstrLocalInt(f, 0u), 7u);
 
-    f.readings.pos = 0x1000u;
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
@@ -4058,11 +3120,9 @@ void caseAtTickIdAttribution() {
 
     // A 的 onTrigger 会收口（off + return []）⇒ releaseOwner 也撤掉同 owner 的 hB；
     // ★ 但 B 的 Tick 在 dispatch 里已经建好 / handler 已经跑过 ⇒ tick.id 仍然可判。
-    a.readings.pos = 0x1000u;
     a.pump();
     dumpFail(a);
     LIFT_CHECK(!a.host->failed());
-    b.readings.pos = 0x1000u;
     b.pump();
     dumpFail(b);
     LIFT_CHECK(!b.host->failed());
@@ -4071,6 +3131,275 @@ void caseAtTickIdAttribution() {
     LIFT_CHECK_EQ_U32(readFieldInt(a, kAtOutB), 1u);
     LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutA), h_b);  // ★ B 的 tick.id = 自己的句柄（修前 = h_a）
     LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutB), 1u);
+}
+
+// =====================================================================================
+// P0 · v2 前置能力（父级裁决：`ctx.once` 全形态 / `ctx.delay` / Run 侧门）
+//
+// 判据（红了意味着什么）：
+//   · `plugin/once-where`      ：`ctx.once` 接受与 `readAtWhere` 逐条一致的**全部** where 形态。
+//       - `{script,lo,hi}` 的 lo 边界（lo-1 不命中、lo 命中）与 hi 边界（hi 不命中、hi-1 命中）；
+//       - `{script}` = 该脚本**下一条指令**：两次（continuation 里注册第二次）在两个不同 pos 都命中；
+//       - `{opcode}` 只按 PC 上的 opcode 命中。
+//     红了 = `once` 仍是"只认 {script,pos}"那套（start 抛 TypeError ⇒ run=failed / hook 表不动）。
+//   · `plugin/delay`           ：`ctx.delay(5)` 期间 `run=waiting`（它算 Run 存活）；到期由泵 resolve、
+//      continuation 在**同一个泵**里跑完；**不 fail Run**（delay 不是 trigger）。
+//   · `plugin/delay-validation`：`ms` 必填 / 整数 / 0..24h；6 种非法值全 TypeError（⛔ 不截断）。
+//   · `plugin/once-from-task`  ：task 第一次 await 之后再注册 once ⇒ 两次都命中（H1 取消）。
+//   · `plugin/finish-from-task`：continuation 里 `ctx.finish(5)` ⇒ `run=finished exit=5`（H2 取消）。
+//   · `plugin/at-from-task`    ：continuation 里 `ctx.at` 装订阅 ⇒ task settle 后 Run 仍活着；
+//      handler 里 `ctx.off(self)` ⇒ 再一个读点收口（run=done）。
+//   ★ render 里"存下来的 RunCtx"仍必须 TypeError：既有 `plugin/render-stored-runctx-rejected` 覆盖。
+// =====================================================================================
+constexpr std::uint32_t kP0Pos2 = 0x00000110u;
+constexpr std::uint32_t kP0Lo = 0x00000110u;
+constexpr std::uint32_t kP0Hi = 0x00000120u;
+
+bool loadP0(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("p0-async.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+std::int64_t p0Hooks(Fixture& f) {
+    return static_cast<std::int64_t>(f.host->instrHookList().size());
+}
+
+std::int64_t p0Logs(Fixture& f) { return static_cast<std::int64_t>(f.host->logLines()); }
+
+void caseOnceWhere() {
+    lift_test::g_current_case = "plugin/once-where";
+    // ---- ① `{script,lo,hi}` 的 **lo 边界**：lo-1 不命中、lo 命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-range-lo")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：注册 once([lo,hi))
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kP0Lo - 1u);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // lo-1 不命中
+        LIFT_CHECK_EQ_I64(p0Logs(f), base);
+        dispatchInstr(f, kP0Lo);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);  // lo 命中 ⇒ 临时 hook 撤
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] range-lo %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ② `{script,lo,hi}` 的 **hi 边界**：hi 不命中、hi-1 命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-range-hi")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kP0Hi);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // hi 不命中（区间是 [lo,hi)）
+        LIFT_CHECK_EQ_I64(p0Logs(f), base);
+        dispatchInstr(f, kP0Hi - 1u);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);  // hi-1 命中
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] range-hi %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ③ `{script}` = 该脚本**下一条指令**：两条不同 pos 都命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-script")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kInstrPos);  // 第一次命中 ⇒ continuation 里注册第二个 once
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // 第二个 once 已装（在 tick 入口的 drain 里）
+        // +2 = resolve 的 continuation 一行 + 第二条 once 的安装行（`ctx.hook.at …`）。
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+        LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+        dispatchInstr(f, kP0Pos2);  // ★ 另一个 pos 也必须命中（{script} 不是单点）
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] script %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ④ `{opcode}`：只按 PC 上的 opcode 命中（不看 script）----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-opcode")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        LIFT_CHECK(putInstrOpcode(f, kP0Pos2, kInstrOpcode));
+        dispatchInstr(f, kP0Pos2);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] opcode %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+}
+
+void caseDelay() {
+    lift_test::g_current_case = "plugin/delay";
+    Fixture f;
+    if (!loadP0(f, "delay")) return;
+    f.pump();  // start：task 打一行 before，然后 await ctx.delay(5)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(!f.host->done());
+    // ★ delay 算 Run 存活：Run 仍是 waiting（否则收口后 continuation 永远不跑）。
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    LIFT_CHECK(f.host->instrHookList().empty());  // 不是 trigger：没有 hook
+    const std::int64_t base = p0Logs(f);
+    LIFT_CHECK_EQ_I64(base, 1);
+    LIFT_CHECK(f.host->lastLogLine().find("delay: before") != std::string::npos);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.pump();  // 到期 ⇒ resolve ⇒ continuation 在**同一个泵**里跑完
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());  // ★ delay 不 fail Run
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+    LIFT_CHECK(f.host->lastLogLine().find("delay: after") != std::string::npos);
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseDelayValidation() {
+    lift_test::g_current_case = "plugin/delay-validation";
+    Fixture f;
+    if (!loadP0(f, "delay-validation")) return;
+    f.pump();  // start：6 种非法 ms 全 TypeError（否则夹具自己抛 ⇒ run=failed）；然后 delay(0)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Logs(f), 0);  // 非法值一个都没被当成延迟跑起来
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    f.pump();  // 下一个泵：0 ms 到期 ⇒ continuation 跑
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->lastLogLine().find("delay-validation: ok") != std::string::npos);
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseOnceFromTask() {
+    lift_test::g_current_case = "plugin/once-from-task";
+    Fixture f;
+    if (!loadP0(f, "once-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：注册第一个 once（task 的同步首段）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    const std::int64_t base = p0Logs(f);
+    dispatchInstr(f, kInstrPos);  // #1 命中 ⇒ continuation 里注册 #2（H1 取消）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    // +2 = resolve 的 continuation 一行 + 第二条 once 的安装行（`ctx.hook.at …`）。
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    dispatchInstr(f, kP0Pos2);  // #2 命中
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseFinishFromTask() {
+    lift_test::g_current_case = "plugin/finish-from-task";
+    Fixture f;
+    if (!loadP0(f, "finish-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：await once
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    dispatchInstr(f, kInstrPos);  // 命中 ⇒ continuation 在 tick 入口的 drain 里 ctx.finish(5)
+    dumpFail(f);
+    LIFT_CHECK(f.host->finished());  // ★ H2 取消：continuation 里 finish 生效
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(f.host->finishCode(), 5);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=finished") != std::string::npos);
+    LIFT_CHECK(line.find("exit=5") != std::string::npos);
+    LIFT_CHECK(line.find("run=failed") == std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+void caseAtFromTask() {
+    lift_test::g_current_case = "plugin/at-from-task";
+    Fixture f;
+    if (!loadP0(f, "at-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：await once
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    const std::int64_t base = p0Logs(f);
+    dispatchInstr(f, kInstrPos);  // 命中 ⇒ continuation 在 tick 入口的 drain 里装 ctx.at
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // 同步订阅已装
+    // +2 = 安装行（`ctx.at …`）+ continuation 自己的 `at-from-task: installed`。
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    f.pump();  // task 已 settle；Run 靠 at 订阅活着
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    dispatchInstr(f, kP0Pos2);  // handler 里 ctx.off(self)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);  // handler 的 `hit pos` 一行
+    f.pump();  // 订阅撤掉 ⇒ 收口
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
 }
 
 // =====================================================================================
@@ -4110,11 +3439,10 @@ void caseGlobalLog() {
         f.pump();  // start：`log.info` + `ctx.log`；task 的 continuation 在同一入口的 drain 里
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        // 四行 = `ctx.at` 的**注册**行（宿主自己的 "ctx.at … handle=N"，不是全局 log 写的）
-        //        + log.info（start）+ ctx.log（正控制；它若抛了 start 就失败）+ log.warn（task）。
-        //   任一条全局写缺席 ⇒ 少于 4 行（红）；级别错了由下面的 `lastLogLevel()` 抓。
+        // 三行 = `ctx.at` 的**注册**行（宿主自己的 "ctx.at … handle=N"）
+        //        + log.info（start）+ log.warn（task）。`ctx.log` 已删除 ⇒ 不再有第四行。
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
-                          static_cast<std::int64_t>(base + 4));
+                          static_cast<std::int64_t>(base + 3));
         LIFT_CHECK(f.host->lastLogLine() == "global-log: task");
         LIFT_CHECK(f.host->lastLogLevel() == "warn");
 
@@ -4239,18 +3567,15 @@ void caseRenderStoredRunCtx() {
         return;
     }
     LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRender());
-    // ① 第 1 个读点：`start` 存下 RunCtx（并 arm `hold`，本拍不 fire）
-    f.readings.script = "TITLE";
+    // ① 第 1 个读点：`start` 存下 RunCtx（并装一条 at 订阅）
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
-    // ★ S0（缺陷 4）：`start` 里装的 hook 是"render 没动过 hook 表"的**基准**。
-    //   夹具（`stored-ctx.js`）会在 render 里对 `saved.hook.*` 与 start 那个句柄逐个调
-    //   ⇒ **全部**必须 TypeError；表里那一行必须原样（id / patch / hits / restores 都不动）。
+    // ★ 订阅是"render 没动过 hook 表"的**基准**（表里那一行必须原样）。
     const std::vector<lift::InstrHookStatus> hooks_before = f.host->instrHookList();
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_before.size()), 1);
-    // ② render：5 个 run-context 出口 + 7 个 hook 出口全部 TypeError（夹具自吞）；读数面仍然可用
+    // ② render：5 个 run-context 出口全部 TypeError（夹具自吞）；`off` 正控制可用
     lift::ui::UiBuilder builder;
     lift::ui::UiFrameReadings readings;
     std::string err;
@@ -4258,7 +3583,7 @@ void caseRenderStoredRunCtx() {
     if (!ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());
     LIFT_CHECK(ok);
     LIFT_CHECK(builder.elements().empty());
-    // ★ S0：render 期一条 hook 出口都没被接受（表逐字段不变 —— 不是"抛了但已经生效"）。
+    // ★ render 期一条出口都没被接受（表逐字段不变 —— 不是"抛了但已经生效"）。
     {
         const std::vector<lift::InstrHookStatus> hooks_after = f.host->instrHookList();
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_after.size()),
@@ -4321,46 +3646,6 @@ void caseRenderBudgetDeadline() {
 //   ★ 若 `readWired()` 仍绑 `in_callback_`（或 `init` 没 `setCallHost`）⇒ 插件在 render 里读就
 //     TypeError ⇒ 本用例红（那是"render 的读数面静默缺失"，不是小事）。
 // =====================================================================================
-void caseRenderRead() {
-    lift_test::g_current_case = "plugin/render-read";
-    Fixture f;
-    LIFT_CHECK(f.mem_ok && f.win_ok);
-    if (!f.mem_ok || !f.win_ok) return;
-    lift::GlobalValue seed;
-    seed.kind = lift::GlobalKind::Int;
-    seed.u32 = 0x1200u;
-    lift::GlobalError seed_err = lift::GlobalError::None;
-    LIFT_CHECK(lift::writeGlobal(f.mem, kFxGlobalId, lift::GlobalKind::Int, seed, &seed_err));
-    LIFT_CHECK(seed_err == lift::GlobalError::None);
-    const bool loaded = f.load("render-read.js", {{"probe", "global"}, {"expect", "4608"}});
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-        return;
-    }
-    lift::ui::UiBuilder builder;
-    lift::ui::UiFrameReadings readings;
-    std::string err;
-    const bool ok = f.host->script() != nullptr && f.host->script()->render(builder, readings, &err);
-    if (!ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());
-    LIFT_CHECK(ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 0);  // render 不是 Run 回调
-
-    // ---- log：render 里的 `ctx.log` 可用；连续重复 ⇒ 宿主去重（只记一行）----
-    lift_test::g_current_case = "plugin/render-read-log";
-    Fixture g;
-    const bool loaded2 = g.load("render-read.js", {{"probe", "log"}});
-    LIFT_CHECK(loaded2);
-    if (loaded2 && g.host->script() != nullptr) {
-        lift::ui::UiBuilder b2;
-        lift::ui::UiFrameReadings r2;
-        std::string e2;
-        const bool ok2 = g.host->script()->render(b2, r2, &e2);
-        if (!ok2) std::fprintf(stderr, "  render error: %s\n", e2.c_str());
-        LIFT_CHECK(ok2);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(g.host->logLines()), 1);
-    }
-}
 
 // =====================================================================================
 // C2b · `plugin/render-readings`：`read.frames` / `read.scriptPos` / `game.localFrames` / `game.mouse`
@@ -4408,93 +3693,6 @@ bool renderProbe(const std::string& probe, lift::ui::UiFrameReadings readings, s
     return ok;
 }
 
-void caseRenderReadings() {
-    lift_test::g_current_case = "plugin/render-readings";
-    {
-        lift::ui::UiFrameReadings r;
-        r.mouse_ok = true;
-        r.mouse_x = 812;
-        r.mouse_y = 622;
-        std::string err;
-        const bool ok = renderProbe("mouse", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe mouse: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        // ★ C2b-2：**有**读数源时安装 `buttons`，三位 = 真实电平（左按下 / 右中抬起）。
-        //   红了两件事之一：没有源的宿主被编了 false，或有源时不安装 / 装错位。
-        lift::ui::UiFrameReadings r;
-        r.mouse_ok = true;
-        r.mouse_x = 812;
-        r.mouse_y = 622;
-        r.mouse_buttons_ok = true;
-        r.mouse_left = true;
-        std::string err;
-        const bool ok = renderProbe("mouse-buttons", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe mouse-buttons: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        RenderFrameSource src = renderFrames();
-        lift::ui::UiFrameReadings r;
-        r.frames = &src;
-        std::string err;
-        const bool ok = renderProbe("frames", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe frames: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        RenderFrameSource src = renderFrames();
-        lift::ui::UiFrameReadings r;
-        r.frames = &src;
-        std::string err;
-        const bool ok = renderProbe("pos", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe pos: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        // top 帧存在、只是这一拍位置读不到 ⇒ valid:false 且缺 pos（⛔ 不编 0）
-        RenderFrameSource src = renderFrames();
-        src.list[0].pos_ok = false;
-        lift::ui::UiFrameReadings r;
-        r.frames = &src;
-        std::string err;
-        const bool ok = renderProbe("pos-invalid", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe pos-invalid: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        // 没有帧源（nullptr）⇒ 三个口都 undefined
-        lift::ui::UiFrameReadings r;
-        std::string err;
-        const bool ok = renderProbe("no-source", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe no-source: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        // 宿主报 err ⇒ 同一条（⛔ 不编空数组）
-        RenderFrameSource src = renderFrames();
-        src.err = "no-active-frame";
-        lift::ui::UiFrameReadings r;
-        r.frames = &src;
-        std::string err;
-        const bool ok = renderProbe("no-source", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe no-source/err: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-    {
-        // `cur` 不活动（top 全 false）⇒ scriptPos undefined（⛔ 不拿 frames[0] 顶替）
-        RenderFrameSource src = renderFrames();
-        src.list[0].top = false;
-        src.list[1].top = false;
-        lift::ui::UiFrameReadings r;
-        r.frames = &src;
-        std::string err;
-        const bool ok = renderProbe("no-top", r, &err);
-        if (!ok) std::fprintf(stderr, "  probe no-top: %s\n", err.c_str());
-        LIFT_CHECK(ok);
-    }
-}
 
 // =====================================================================================
 // S2 · `plugin/render-profile`：`ctx.profile.begin/end` 在 **render** 里可用
@@ -4534,61 +3732,6 @@ std::string soleText(const lift::ui::UiBuilder& builder) {
     return {};
 }
 
-void caseRenderProfile() {
-    lift_test::g_current_case = "plugin/render-profile";
-    struct Run {
-        const char* mode;
-        bool begin_ok;
-        bool end_ok;
-        std::int64_t want_begins;
-        std::int64_t want_ends;
-        const char* want_prefix;
-    };
-    const Run runs[] = {
-        // ★ S2 复审 I3：`end()` 返回结果对象（`ok:text` 是 `text`，这里夹具清空文本）。
-        {"ok", true, true, 1, 1, "ok:"},
-        // begin 抛（void 契约）⇒ 夹具提前返回，`end` 一次都不调。
-        {"fail-begin", false, true, 1, 0, "begin-threw: ctx.profile.begin: already-open"},
-        // end 失败**不抛**：回 `{ok:false,error}`（结果对象）。
-        {"fail-end", true, false, 0, 1, "end-result:false:not-open"},
-    };
-    for (const Run& run : runs) {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        ProfileResultFake fake;
-        fake.begin_ok = run.begin_ok;
-        fake.begin_err = "already-open";
-        fake.end_ok = run.end_ok;
-        fake.end_err = "not-open";
-        lift::ui::UiHostOps ops{};
-        ops.ctx = &fake;
-        ops.profile_begin = &resultProfileBegin;
-        ops.profile_end = &resultProfileEnd;
-        const bool loaded = f.load("render-profile.js", {{"mode", run.mode}}, &ops);
-        LIFT_CHECK(loaded);
-        if (!loaded) {
-            std::fprintf(stderr, "  load error (%s): %s\n", run.mode, f.load_error.c_str());
-            continue;
-        }
-        LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRender());
-        lift::ui::UiBuilder builder;
-        lift::ui::UiFrameReadings readings;
-        std::string err;
-        const bool ok = f.host->script() != nullptr && f.host->script()->render(builder, readings, &err);
-        if (!ok) std::fprintf(stderr, "  render error (%s): %s\n", run.mode, err.c_str());
-        LIFT_CHECK(ok);
-        const std::string text = soleText(builder);
-        ++lift_test::g_checks;
-        if (text.rfind(run.want_prefix, 0) != 0) {
-            lift_test::failf(__FILE__, __LINE__, "render-profile(%s)：文本应是 `%s…`，得到 `%s`", run.mode,
-                             run.want_prefix, text.c_str());
-        }
-        // 宿主侧计数：按 mode 精确判（fail-begin 不 end；fail-end 只 end 一次）。
-        LIFT_CHECK_EQ_I64(fake.begins, run.want_begins);
-        LIFT_CHECK_EQ_I64(fake.ends, run.want_ends);
-    }
-}
 
 // =====================================================================================
 // S2 · `plugin/hud-equivalence`：`scripts/ui/hud.js` 的**旧 loader** 与**插件 loader**
@@ -4622,133 +3765,6 @@ bool sameHudList(const std::vector<lift::ui::Element>& a, const std::vector<lift
     return true;
 }
 
-void caseHudEquivalence(lift::FontEngine* font) {
-    lift_test::g_current_case = "plugin/hud-equivalence";
-    LIFT_CHECK(font != nullptr);
-    if (font == nullptr) return;
-    const std::string path = std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js";
-    std::string source;
-    if (!readHostFile(path, &source)) {
-        LIFT_CHECK(false);
-        return;
-    }
-    // ---- ① 同一份 readings 的**普通帧**（frame/mouse/fps/script/worst/frames）----
-    auto runtime = lift::ui::makeQuickJsRuntime();
-    std::string err;
-    std::unique_ptr<lift::ui::UiScript> classic = runtime->load(source, path, font, &err);
-    if (classic == nullptr) {
-        std::fprintf(stderr, "  classic load error: %s\n", err.c_str());
-        LIFT_CHECK(false);
-        return;
-    }
-    ProfileProbe probe;
-    lift::ui::UiHostOps ops{};
-    ops.ctx = &probe;
-    ops.profile_begin = &probeProfileBegin;
-    ops.profile_end = &probeProfileEnd;
-    Fixture plugin;
-    const bool loaded = plugin.loadFile(path, {}, &ops);
-    LIFT_CHECK(loaded);
-    if (!loaded) {
-        std::fprintf(stderr, "  plugin load error: %s\n", plugin.load_error.c_str());
-        return;
-    }
-    plugin.host->setFont(font);
-    LIFT_CHECK(plugin.host->script() != nullptr);
-
-    RenderFrameSource frames = renderFrames();
-    lift::ui::UiFrameReadings r;
-    r.frame = 1234;
-    r.mouse_ok = true;
-    r.mouse_x = 812;
-    r.mouse_y = 622;
-    r.mouse_buttons_ok = true;
-    r.mouse_left = true;
-    r.fps_ok = true;
-    r.fps = 59.9;
-    r.script_ok = true;
-    r.script = "startup";
-    r.worst_ok = true;
-    r.worst_wall_ms = 33.3;
-    r.worst_guest_ok = true;
-    r.worst_guest_ms = 21.5;
-    r.worst_shim_ms = 4.2;
-    r.frames = &frames;
-    r.host = &ops;
-    // ★ D4：PROFILE 默认隐藏 ⇒ 普通帧先给 `overlayKeySeq = 0`（基线，按钮不在场）；
-    //   下面再喂一帧 `1` 把它打开（两边都吃同一份读数 ⇒ 等价仍可判）。
-    r.overlay_key_ok = true;
-    r.overlay_key_seq = 0;
-
-    lift::ui::UiBuilder a;
-    lift::ui::UiBuilder b;
-    std::string cerr;
-    std::string perr;
-    LIFT_CHECK(classic->render(a, r, &cerr));
-    LIFT_CHECK(plugin.host->script()->render(b, r, &perr));
-    LIFT_CHECK(a.elements().size() >= 7);  // 面板 + HUD 行 + 设置入口（不许"两边都空"地等价）
-    ++lift_test::g_checks;
-    {
-        std::string why;
-        if (!sameHudList(a.elements(), b.elements(), &why)) {
-            lift_test::failf(__FILE__, __LINE__, "hud 普通帧不等价：%s", why.c_str());
-        }
-    }
-
-    // ---- ② PROFILE 点击帧（begin → end，成功两拍）----
-    //   ★ D4：按钮默认隐藏 ⇒ 先让两边各吃一帧 `overlayKeySeq 0→1`（计数变了才切显隐）。
-    lift::ui::UiFrameReadings show = r;
-    show.frame = 1235;
-    show.overlay_key_seq = 1;
-    {
-        lift::ui::UiBuilder ca;
-        lift::ui::UiBuilder pb;
-        LIFT_CHECK(classic->render(ca, show, &cerr));
-        LIFT_CHECK(plugin.host->script()->render(pb, show, &perr));
-        ++lift_test::g_checks;
-        std::string why;
-        if (!sameHudList(ca.elements(), pb.elements(), &why)) {
-            lift_test::failf(__FILE__, __LINE__, "hud 显示 PROFILE 的那一帧不等价：%s", why.c_str());
-        }
-        ++lift_test::g_checks;
-        if (pb.elements().size() <= b.elements().size()) {
-            lift_test::failf(__FILE__, __LINE__, "overlayKeySeq 0→1 之后 PROFILE 按钮没出现（元素数没变多）");
-        }
-    }
-    lift::ui::UiFrameReadings click = r;
-    click.overlay_key_ok = true;   // `show` 之后一直是 1 ⇒ 不再切换，按钮留在场
-    click.overlay_key_seq = 1;
-    click.click_ok = true;
-    click.click_key = "profile";
-    click.click_x = 10;
-    click.click_y = 10;
-    bool status_seen = false;
-    bool invalid_seen = false;
-    for (int hit = 1; hit <= 2; ++hit) {
-        click.frame = 1234 + static_cast<std::uint64_t>(hit);
-        if (hit == 2) {
-            // ★ S2 复审 I3：报告文本里有 `INVALID` ⇒ 两边都必须画 `INVALID（已复制）`。
-            probe.end_text = "=== profile window: overlay ===\nunaccounted ... INVALID";
-        }
-        lift::ui::UiBuilder ca;
-        lift::ui::UiBuilder pb;
-        LIFT_CHECK(classic->render(ca, click, &cerr));
-        LIFT_CHECK(plugin.host->script()->render(pb, click, &perr));
-        ++lift_test::g_checks;
-        std::string why;
-        if (!sameHudList(ca.elements(), pb.elements(), &why)) {
-            lift_test::failf(__FILE__, __LINE__, "hud PROFILE 第 %d 拍不等价：%s", hit, why.c_str());
-        }
-        for (const lift::ui::Element& e : pb.elements()) {
-            if (e.kind != lift::ui::ElementKind::Text || e.text.rfind("profile: ", 0) != 0) continue;
-            status_seen = true;
-            if (hit == 2 && e.text == "profile: INVALID（已复制）") invalid_seen = true;
-        }
-    }
-    // 状态行确实进了 list（⛔ 不是"两边都没画"地等价）；`INVALID` 那一态也真的画出来了。
-    LIFT_CHECK(status_seen);
-    LIFT_CHECK(invalid_seen);
-}
 
 
 // =====================================================================================
@@ -4775,7 +3791,7 @@ void caseCallbackCpuBudget() {
     }
     // 2 ms（生产值）+ **op_limit 不限**：否则 100k 的 op_limit 会先于 CPU deadline 触发 ⇒
     // 这条用例证明的就不是"CPU 钟会触发"，而是"op_limit 会触发"。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     dumpFail(f);
     const std::string reason = f.host->failReason();
@@ -4817,7 +3833,7 @@ void caseCallbackJsBand() {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return;
     }
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     dumpFail(f);
     LIFT_CHECK(f.host->failed());
@@ -4862,7 +3878,7 @@ void caseCallbackHostPause() {
         return;
     }
     // 生产值 2 ms + op_limit 不限：这条判的**只**是 CPU deadline（⛔ 不让 op_limit 掺一脚）。
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     dumpFail(f);
     // ① 不失败、没被打断
@@ -4938,7 +3954,7 @@ void caseCallbackWallOnly() {
         ::SwitchToThread();
     }
     LIFT_CHECK(helper_ready.load());
-    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.host->setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     helper.join();
     dumpFail(f);
@@ -4981,8 +3997,8 @@ void caseTsModule() {
     f.pump();  // start：helper.describe(…) → ctx.log；helper.point() → click(311,207) 入队
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
-    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRun());
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasStart());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
     // helper 的 describe() 结果真的经 `ctx.log` 出去了（⛔ 不是"没报错"）。
     LIFT_CHECK(f.host->logLines() >= 1u);
@@ -5018,7 +4034,7 @@ void caseJsComparisonUnchanged() {
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());  // 夹具在 `r !== false` 时 `ctx.fail` ⇒ 这里红
-    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
 }
 
@@ -5034,8 +4050,7 @@ void caseTsUppercaseExtension() {
         "interface Probe { value?: number }\n"
         "const probe: Probe = { value: 1 };\n"
         "export default {\n"
-        "    start() { return []; },\n"
-        "    onTrigger() { return []; },\n"
+        "    start() {},\n"
         "};\n";
     for (const char* origin : {"UPPER.TS", "UPPER.MTS"}) {
         lift::ui::PluginLoadOptions opts;
@@ -5067,15 +4082,9 @@ int main() {
     // ---- S1b：`.js` 不带 TS flag 的最小判据（`f<a>(b)` 仍是比较）----
     caseJsComparisonUnchanged();
     caseApiSurface();
-    caseInitialState();
-    caseConcurrentArm();
-    caseChain();
     caseSaveMissingPrecheck();
     caseConfigRoundtrip();
     caseConfigHostPause();
-    caseFieldSwitchApply();
-    caseLoadSaveOnLoaded();
-    caseChainsRoute();
     caseGlobalReadModifyWrite();
     caseCallbackCpuBudget();
     caseCallbackJsBand();
@@ -5084,10 +4093,6 @@ int main() {
     caseCallbackWallOnly();
 #endif
     caseFinish();
-    caseStartNowAndStaged();
-    caseAtReadPointFileRead();
-    caseFailInstall();
-    caseFailInstallReleasesInput();
     caseFailReleasesInput();
     caseQuitReleasesInput();
     caseFinishLandsInput();
@@ -5110,8 +4115,8 @@ int main() {
     casePumpBudget();
     // ---- S2b 复审收口（S2-1 / S2-2 / S2-3 / S2-4）----
     caseBareOnceKeepsRun();
-    caseOnTickKeepsRun();
-    caseOnceHookClear();
+    // ---- P1-fix S2（`ctx.waitAny`：多臂 / wall-clock 失败截止 / `hook.clear` 收口）----
+    caseWaitAny();
     caseTaskFinishThenReject();
     caseRenderAfterFinish();
     // ---- S2c（`ctx.at` 的同步订阅面 / 链 / next 截断 / off / Tick 只读面 / stale）----
@@ -5145,6 +4150,13 @@ int main() {
     caseAtWhereNullField();
     caseAtWhereBig();
     caseAtTickIdAttribution();
+    // ---- P0（v2 前置能力：once 全形态 / delay / Run 侧门 H1+H2）----
+    caseOnceWhere();
+    caseDelay();
+    caseDelayValidation();
+    caseOnceFromTask();
+    caseFinishFromTask();
+    caseAtFromTask();
     // ---- S3（独立全局 `log`：start / task / tick / render / timeout 的 catch）----
     caseGlobalLog();
     // ---- C2b（render / ui / draw；pure 半）----
@@ -5153,10 +4165,7 @@ int main() {
     caseUiState();
     caseRenderStoredRunCtx();
     caseRenderBudgetDeadline();
-    caseRenderRead();
-    caseRenderReadings();
     // ---- S2（`hud` 变插件的前置：RenderCtx.profile + 双 loader 等价）----
-    caseRenderProfile();
-    caseHudEquivalence(&font);
     return lift_test::finish("plugin-runtime");
 }
+

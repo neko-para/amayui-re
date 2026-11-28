@@ -1,31 +1,35 @@
-// scripts/plugins/lib/guest-globals.js —— **guest global** 的常量 + 操作（数字只在这里写一次）
+// scripts/plugins/lib/guest-globals.ts —— **guest global** 的常量 + 操作（数字只在这里写一次）
 //
-// 口径：
-//   · `kind` 只有 `"int"` / `"uint"` / `"float"` 走 `ctx.read.global.get` / `ctx.edit.global.set`
+// 口径（v2，2026-11-28）：
+//   · `kind` 只有 `"int"` / `"uint"` / `"float"` 走 `ctx.read.global.get` / `tick.edit.global.set`
 //     （`"string"` 型的 set 本实现未实现 ⇒ 调用即 TypeError；见 `scripts/plugins/plugin.d.ts`）。
+//   · **读 = `ctx.read`**（RunCtx 上的只读口；`readWired()` 不绑 `in_callback_` ⇒ tick handler /
+//     task continuation 里用存下来的 RunCtx 读**合法**）。⛔ 不要用 `Tick.local` 替代：那读的是
+//     当前帧的 local，与全局池 id 不是同一个地址空间。
+//   · **写 = `tick.edit`**（P0 起 `ctx.edit` / `ctx.input` 在 tick / continuation 里仍是 TypeError
+//     ⇒ 写函数**收 Tick**，调用方传刚 `await` 到的那一拍）。
 //   · 读**失败**在 API 里没有错误通道 ⇒ 宿主抛 TypeError（`script_quickjs.cpp` 的
 //     `jsCtxReadGlobalGet`：⛔ 不返回 0 冒充读数）。所以本文件**不**吞读异常 —— 让它穿到宿主，
 //     归因里带 `file:line`（吞掉就变成"静默地什么都没改"）。
 //   · 写**失败**有回执：`{ accepted, queued, applied, seq, id, code? }`（Edit 立即 ⇒ `accepted == applied`）。
 //     `applied === false` ⇒ **warn（带 code / accepted / before / after）并返回 false**；
-//     ⛔ 本文件不 `ctx.fail`（是否致命由调用方决定），⛔ 不静默。
+//     ⛔ 本文件不 `ctx.fail`（是否致命由调用方决定），⛔ 不静默。日志走**全局 `log`**（v2；`ctx.log` 已弃用）。
 //   · ⛔ 别处不许再裸写这些 id / 位（守卫 `tools/test/script-map.test.mjs` 与 `0x…` 字面量同一条规则）。
 //
 // 怎么查（控制层，同一条读法）：
 //   `node tools/emu-ctl.mjs global-get --kind int --index 0xb1b6 --json`
 
-/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {import("@amayui/lift-plugin").Receipt} Receipt */
+import type { Receipt, RunCtx, Tick } from "@amayui/lift-plugin";
 
 /**
  * 「战斗中的帮助界面」那一位（int global）。
  * 旁证两处：`docs/03-emulator/plugin-runtime.md` §C1（`global.get(0xb1b6)` → `set(0xb1b6, v|0x10)`）、
  * `docs/03-emulator/save05-black-rect.md`（`global-get --index 0xb1b6` 的 "SO033A 覆盖图那位"）。
  */
-export const BATTLE_HELP_GLOBAL_ID = 0xb1b6;
+export const BATTLE_HELP_GLOBAL_ID: number = 0xb1b6;
 
 /** 置位 = **不再展示**"战斗中的帮助界面"（教学气泡）。 */
-export const BATTLE_HELP_HIDE_BIT = 0x10;
+export const BATTLE_HELP_HIDE_BIT: number = 0x10;
 
 /**
  * 读档 / 存档界面（`SAVE.BIN`）的**页号**（int global，0 基，0..89）。
@@ -44,18 +48,18 @@ export const BATTLE_HELP_HIDE_BIT = 0x10;
  *
  * ⚠ 这是**页**，不是槽：槽 = 页 * 10 + 行（行 0..9）。槽 10 在第 1 页第 0 行。
  */
-export const SAVE_PAGE_GLOBAL_ID = 0x138e;
+export const SAVE_PAGE_GLOBAL_ID: number = 0x138e;
 
 /**
  * 读一页的页号（`SAVE.BIN` 的 int global）。
  *
  * 读失败在 API 里没有错误通道 ⇒ 宿主抛 TypeError（见文件头）⇒ 本函数**不吞**。
  *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get`）。
- * @returns {number} 0..89（⛔ 不夹取：越界说明读数不是页号，调用方要响亮拒绝）。
+ * @param ctx RunCtx（需要 `ctx.read.global.get`）。
+ * @returns 0..89（⛔ 不夹取：越界说明读数不是页号，调用方要响亮拒绝）。
  */
-export function readSavePage(ctx) {
-    const page = ctx.read.global.get("int", SAVE_PAGE_GLOBAL_ID);
+export function readSavePage(ctx: RunCtx): number {
+    const page: unknown = ctx.read.global.get("int", SAVE_PAGE_GLOBAL_ID);
     if (typeof page !== "number" || !Number.isFinite(page)) {
         throw new TypeError(`readSavePage: global ${SAVE_PAGE_GLOBAL_ID} 不是数字（${typeof page}）`);
     }
@@ -63,15 +67,14 @@ export function readSavePage(ctx) {
 }
 
 /**
- * 十进制 → `0x…`（**日志用**；⛔ 不是位置常量 —— 位置只在 `./script-positions.js`）。
+ * 十进制 → `0x…`（**日志用**；⛔ 不是位置常量 —— 位置只在 `./script-positions.ts`）。
  *
- * ★ 2026-11-25 起**导出**：`../field-point-visible.js` 曾抄了一份逐字相同的实现（两份日志格式
+ * ★ 2026-11-25 起**导出**：`../field-point-visible.ts` 曾抄了一份逐字相同的实现（两份日志格式
  *   会各自漂）。⛔ 不要把它当"十六进制解析"用（`types` 的 hex 串是 `parseTypes` 的事）。
  *
- * @param {number} value 非负 / 负数都按 32 位无符号打印（`>>> 0`）。
- * @returns {string}
+ * @param value 非负 / 负数都按 32 位无符号打印（`>>> 0`）。
  */
-export function hex(value) {
+export function hex(value: number): string {
     return "0x" + (value >>> 0).toString(16);
 }
 
@@ -80,31 +83,31 @@ export function hex(value) {
  *
  * ★ 调用时机由调用方决定：**载入完成之后、在 FIELD 上做**（载入会还原脚本 / global 状态，
  *   在 TITLE 上置位会被随后的载入覆盖）。
+ * ★ v2：读走 `ctx.read`，写走**这一拍的 Tick**（`tick.edit`）—— `ctx.edit` 在 task continuation 里
+ *   是 TypeError（`inCallback` 门），只有 Tick 的写面被放开。
  *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get` / `ctx.edit.global.set` / `ctx.log`）。
- * @returns {boolean} 写成功（`applied !== false`）⇒ true；否则 warn 后 false。
+ * @param ctx RunCtx（用 `ctx.read.global.get`）。
+ * @param tick 刚 `await ctx.once(...)` 到的 Tick（用 `tick.edit.global.set`）。
+ * @returns 写成功（`applied !== false`）⇒ true；否则 warn 后 false。
  */
-export function hideBattleHelp(ctx) {
+export function hideBattleHelp(ctx: RunCtx, tick: Tick): boolean {
     const before = ctx.read.global.get("int", BATTLE_HELP_GLOBAL_ID);
     const after = (before | BATTLE_HELP_HIDE_BIT) >>> 0;
-    /** @type {Receipt | null | undefined} */
-    const receipt = ctx.edit.global.set("int", BATTLE_HELP_GLOBAL_ID, after);
+    const receipt: Receipt | null | undefined = tick.edit.global.set("int", BATTLE_HELP_GLOBAL_ID, after);
     const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
     if (!applied) {
         const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
             ? String(receipt.code)
             : "unknown";
         const accepted = receipt !== null && typeof receipt === "object" ? String(receipt.accepted) : "unknown";
-        ctx.log(
-            "warn",
+        log.warn(
             `guest-globals: hideBattleHelp 未生效（战斗帮助可能照旧出现）— ` +
                 `global=${BATTLE_HELP_GLOBAL_ID} bit=${BATTLE_HELP_HIDE_BIT} ` +
                 `before=${hex(before)} after=${hex(after)} accepted=${accepted} applied=${String(applied)} code=${code}`,
         );
         return false;
     }
-    ctx.log(
-        "info",
+    log.info(
         `guest-globals: hideBattleHelp ⇒ global=${BATTLE_HELP_GLOBAL_ID} ` +
             `before=${hex(before)} after=${hex(after)}（bit ${BATTLE_HELP_HIDE_BIT} 置位）`,
     );
@@ -140,99 +143,82 @@ export function hideBattleHelp(ctx) {
 //   ⇒ 已触发 = 动效、未触发 = 静态 —— 与引擎自己的读数逐位一致（`0x5` 保持 `0x5`、`0x3` 保持 `0x3`）。
 
 /** 地图点位**逐槽渲染标志**（int global，32 槽 × 1 dword；VM 每渲染帧重建）。 */
-export const FIELD_OBJECT_FLAGS_GLOBAL_ID = 0x50ff9f;
+export const FIELD_OBJECT_FLAGS_GLOBAL_ID: number = 0x50ff9f;
 
 /** 地图点位**逐槽类型**（int global，32 槽；`SETOBJ` #3 把它拷进 `14d7a0`，`DRAWOBJ` #9 用它选图）。 */
-export const FIELD_OBJECT_TYPE_GLOBAL_ID = 0x50ffd1;
+export const FIELD_OBJECT_TYPE_GLOBAL_ID: number = 0x50ffd1;
 
 /** `50ff9f[slot]` 位：**置位 ⇒ 该槽参与绘制**（`DRAWOBJ.BIN` #7 `and … 1` → `jcc` 的 cond 为 0 才跳 ⇒ bit0=0 才跳过）。 */
-export const FIELD_OBJECT_DRAW_BIT = 0x1;
+export const FIELD_OBJECT_DRAW_BIT: number = 0x1;
 
 /** 点位类型：**採集点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x119` = `MO031B.AGF`）。 */
-export const FIELD_POINT_TYPE_GATHER = 0x1f;
+export const FIELD_POINT_TYPE_GATHER: number = 0x1f;
 
 /** 点位类型：**発掘点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x11A` = `MO032B.AGF`）。 */
-export const FIELD_POINT_TYPE_DIG = 0x20;
+export const FIELD_POINT_TYPE_DIG: number = 0x20;
 
 /** 点位槽号范围（`DRAWOBJ.BIN` instr#1/#4：`local 2 = 1 … < 32`）⇒ 1..31（0 号不用）。 */
-export const FIELD_OBJECT_SLOT_FIRST = 1;
-export const FIELD_OBJECT_SLOT_LAST = 31;
+export const FIELD_OBJECT_SLOT_FIRST: number = 1;
+export const FIELD_OBJECT_SLOT_LAST: number = 31;
 
 /**
  * 当前**地图号**（int global）：`STINIT` / `FIELD` / `SETOBJ` 的门都是 `eq … (global-int b222) <mapNo>`，
  * 逐地图的表一律 `lookup-array-2d (base) (global-int b222) …`（例 `SETOBJ.BIN` instr#16/#68 的 `3e2a0`、
  * `DRAWOBJ.BIN` instr#18 的 `4a5f0`）。只用于读数/日志，⛔ 不写。
  */
-export const FIELD_CURRENT_MAP_GLOBAL_ID = 0xb222;
+export const FIELD_CURRENT_MAP_GLOBAL_ID: number = 0xb222;
 
 /**
  * 运行期**地图实例下标**（int global）：逐地图表运行时按它索引（`62d72[61c72][…]` / `71cb4[61c72]` /
  * `62ab6[61c72]`）。只用于读数/日志，⛔ 不写。
  */
-export const FIELD_MAP_INSTANCE_GLOBAL_ID = 0x61c72;
+export const FIELD_MAP_INSTANCE_GLOBAL_ID: number = 0x61c72;
 
 /**
  * 逐槽**行号 / 列号**（int global；`DRAWOBJ` #21/#23 把它们读进 `local 4/5`，
  * 再拿 `25c00[图像素行][行]` 的第 `列` 位做"这一格有地块要素"的门）。
  */
-export const FIELD_POINT_ROW_GLOBAL_ID = 0x14d76e;
-export const FIELD_POINT_COL_GLOBAL_ID = 0x14d73c;
+export const FIELD_POINT_ROW_GLOBAL_ID: number = 0x14d76e;
+export const FIELD_POINT_COL_GLOBAL_ID: number = 0x14d73c;
 
 /**
  * 每图一块的**格位图**（int global；行宽字面量 = 视图里的 `64` = **0x64 = 100** dword）。
  * ★ 视图里的立即数一律是**十六进制** —— 按十进制读会整块错位（2026-11-26 的教训）。
  */
-export const FIELD_CELL_BITS_GLOBAL_ID = 0x25c00;
+export const FIELD_CELL_BITS_GLOBAL_ID: number = 0x25c00;
 
 /** `510439[type]` = 该类型**动效**纹理槽（`0x68`/`0x69`；静态是 `0xFA+type`）。 */
-export const FIELD_DYN_TEXTURE_SLOT_GLOBAL_ID = 0x510439;
+export const FIELD_DYN_TEXTURE_SLOT_GLOBAL_ID: number = 0x510439;
 
 /** `511080[type]` = 该类型的**类别**（静态门第一腿要 `== 3`）。 */
-export const FIELD_TYPE_CLASS_GLOBAL_ID = 0x511080;
+export const FIELD_TYPE_CLASS_GLOBAL_ID: number = 0x511080;
 
 /**
  * 读一格 int global。读失败在 API 里没有错误通道 ⇒ 宿主抛 TypeError（⛔ 本文件不吞）。
  *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get`）。
- * @param {number} id raw 池下标。
- * @returns {number}
+ * @param ctx RunCtx（需要 `ctx.read.global.get`）。
+ * @param id raw 池下标。
  */
-export function readIntGlobal(ctx, id) {
-    const value = ctx.read.global.get("int", id);
+export function readIntGlobal(ctx: RunCtx, id: number): number {
+    const value: unknown = ctx.read.global.get("int", id);
     if (typeof value !== "number" || !Number.isFinite(value)) {
         throw new TypeError(`readIntGlobal: global ${hex(id)} 不是数字（${typeof value}）`);
     }
     return value | 0;
 }
 
-/**
- * 读一格 int global，并**响亮失败**（`null` 之外的形状一律 throw）—— 给"读数即证据"的调用方用。
- *
- * @param {RunCtx} ctx RunCtx。
- * @param {number} id raw 池下标。
- * @returns {number}
- */
-export function readIntGlobalStrict(ctx, id) {
-    return readIntGlobal(ctx, id) >>> 0;
+/** `forceFieldPointsVisible` 的逐槽读数（`applied=false` = bit0 本来就有 / 写回执失败）。 */
+export interface FieldPointWrite {
+    readonly slot: number;
+    readonly type: number;
+    readonly before: number;
+    readonly after: number;
+    readonly applied: boolean;
 }
 
-/**
- * 一次性读 `FIELD_OBJECT_TYPE_GLOBAL_ID` / `FIELD_OBJECT_FLAGS_GLOBAL_ID` 的 32 槽快照。
- *
- * @param {RunCtx} ctx RunCtx。
- * @returns {{ slot: number, type: number, flags: number }[]} 下标 0..31（`[0]` 恒不用）。
- */
-export function readFieldObjectSlots(ctx) {
-    /** @type {{ slot: number, type: number, flags: number }[]} */
-    const out = [];
-    for (let slot = 0; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
-        out.push({
-            slot,
-            type: readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot),
-            flags: readIntGlobal(ctx, FIELD_OBJECT_FLAGS_GLOBAL_ID + slot),
-        });
-    }
-    return out;
+/** `forceFieldPointsVisible` 的选项：参与强制的类型（缺省 = 採集 + 発掘）。 */
+export interface ForceFieldPointsOptions {
+    readonly types?: readonly number[] | null;
 }
 
 /**
@@ -248,18 +234,22 @@ export function readFieldObjectSlots(ctx) {
  *     与 `FIELD` 的战利品抽取消费）、⛔ 不碰 bit2（静态 / 动效选择位）。
  *   · 作用面 = `50ff9f`（派生表）⇒ 不是改"这一点位发现过没有"的真值；持久输入一个都不写。
  *   · 只在 `on == 1` 时由调用方调用；`on == 0` ⇒ 连这个函数都不进（0 读 / 0 写）。
+ * ★ v2：读走 `ctx.read`、写走**这一拍的 Tick**（`tick.edit.global.set`）。
  *
- * @param {RunCtx} ctx RunCtx。
- * @param {{ types?: number[] | null }} [options] 参与强制的类型（缺省 = 採集 + 発掘）。
- * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]}
- *   类型命中的槽的逐槽读数（`applied=false` = bit0 本来就有 / 写回执失败）。
+ * @param ctx RunCtx（用 `ctx.read.global.get`）。
+ * @param tick 本拍的 Tick（用 `tick.edit.global.set`）。
+ * @param options 参与强制的类型（缺省 = 採集 + 発掘）。
+ * @returns 类型命中的槽的逐槽读数。
  */
-export function forceFieldPointsVisible(ctx, options) {
+export function forceFieldPointsVisible(
+    ctx: RunCtx,
+    tick: Tick,
+    options?: ForceFieldPointsOptions | null,
+): FieldPointWrite[] {
     const types = options !== null && options !== undefined && Array.isArray(options.types)
         ? options.types
         : [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
-    /** @type {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} */
-    const changed = [];
+    const changed: FieldPointWrite[] = [];
     for (let slot = FIELD_OBJECT_SLOT_FIRST; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
         const type = readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot);
         if (type === 0 || !types.includes(type)) continue;
@@ -271,14 +261,13 @@ export function forceFieldPointsVisible(ctx, options) {
             changed.push({ slot, type, before, after, applied: false });
             continue;
         }
-        /** @type {Receipt | null | undefined} */
-        const receipt = ctx.edit.global.set("int", id, after);
+        const receipt: Receipt | null | undefined = tick.edit.global.set("int", id, after);
         const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
         if (!applied) {
             const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
                 ? String(receipt.code)
                 : "unknown";
-            ctx.log("warn", `guest-globals: forceFieldPointsVisible 未生效 — slot=${slot} global=${hex(id)} ` +
+            log.warn(`guest-globals: forceFieldPointsVisible 未生效 — slot=${slot} global=${hex(id)} ` +
                 `before=${hex(before)} after=${hex(after)} code=${code}`);
         }
         changed.push({ slot, type, before, after, applied });

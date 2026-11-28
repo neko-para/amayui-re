@@ -25,7 +25,6 @@
 #include "aot/aot_host.h"
 #include "plugin/plugin_host.h"      // C2a：QJS 单插件（--plugin）的宿主适配器
 #include "plugin/plugin_search.h"    // S1：`--plugin <id|path>` 的**纯**解析器（id 只查两个白名单根）
-#include "plugin/readings.h"         // C2a：生产 ReadingsSource（marker + 鼠标）
 #include "runtime/capability.h"      // ★ 能力面（`caps=` 的**唯一真源**：与 hello 同一张表）
 #include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
 #include "runtime/experience_lock.h"  // `--user-run`：机器级体验锁（header-only；⛔ 不加 CMake 源文件）
@@ -1120,12 +1119,9 @@ int main(int argc, char** argv) {
     //   ★ 顺序照测绘 §3.3：`init`（= 编译 + 沙箱，⛔ 不调 start）→ `attachMemory`（Edit/Read）→
     //     `setReadPointObserver`（装配点必须在**循环外**）→ `stop_requested`。
     //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp`（守卫：执行循环里 0 命中 pump 词）。
-    std::unique_ptr<lift::plugin::PluginReadings> plugin_readings;
     std::unique_ptr<lift::plugin::PluginHost> plugin_host;
     if (!plugin_path.empty()) {
-        // 生产读数源：marker 身份 / 位置 + 鼠标（每读点一次）。
-        plugin_readings = std::make_unique<lift::plugin::PluginReadings>(host.mem(), *host.cpu().windows);
-        plugin_host = std::make_unique<lift::plugin::PluginHost>(*plugin_readings);
+        plugin_host = std::make_unique<lift::plugin::PluginHost>();
         // ★ `ctx.appdata`（2026-11-25）：根由宿主绝对化（`Vfs::setAppDataDir` 存的是 CLI 原串）。
         //   没有 `--appdata` ⇒ `available=false`（正常）；根不可用 / 落在安装树 ⇒ 一行 warn + 继续
         //   —— 插件能力缺失不是启动失败（⛔ 不 exit 2）。
@@ -1166,7 +1162,7 @@ int main(int argc, char** argv) {
         //   ★ S2：只有**有 Run**（`start`/`onTrigger`）的插件才可能调 `ctx.quit`（`RenderCtx` 没有
         //     `quit`）⇒ 纯 render 插件（含内置 `hud`）**不覆盖** `run_opts.stop_requested`
         //     （否则 `--overlay` 的输入队列会被一个永远为 false 的 flag 顶掉）。
-        if (plugin_host->script() != nullptr && plugin_host->script()->hasRun()) {
+        if (plugin_host->script() != nullptr && plugin_host->script()->hasStart()) {
             run_opts.stop_requested = plugin_host->quitFlag();
             run_opts.stop_detail = "plugin: quit";
         }
@@ -1477,6 +1473,16 @@ int main(int argc, char** argv) {
     //     host 摘掉（⛔ 不让窗口留一个指向已销毁 `PluginScript` 的指针）。之后不再提交帧。
     if (plugin_host != nullptr) {
         host.cpu().windows->setReadPointObserver(nullptr);
+        // ★ 2026-11-28（P1 复审 S2 · readout 顺序）：**先拍 readout 快照，再 `releaseOwner()`**。
+        //   为什么顺序是承重的：`releaseOwner` → `releaseRunHooks` → `instrHookReleaseOwner` →
+        //   `on_released` 会把本 Run 的 `ctx.at` 订阅（`at_subs`）逐条摘掉；而 readout 的
+        //   `run=done` 判据是 `runner.done() && !hasPendingWork()`，`hasPendingWork` 恰好把
+        //   `at_subs` 算作存活来源 ⇒ 先 release 再打，**只靠 `at` 常驻的插件**会被误读成 `run=done`
+        //   （`plugin-field-switch` 的 e2e 判据是 `run=waiting`）。跳过这一行的症状是"常驻插件
+        //   在 readout 里看起来已经收口"，而它其实还在等指令点。
+        //   ★ `releaseOwner` 仍要清 owner（hook / 输入状态），收口责任不变 —— 只是读数取的是
+        //   **收口前**那一刻的事实（顺序：快照 → release → 打印）。
+        const std::string plugin_readout = plugin_host->readout();
         plugin_host->releaseOwner(*host.cpu().windows);
         // ★ D2（2026-11-25）：config 桥的收口**必须在 `plugin_host` 还活着的时候**做 ——
         //   桥的实现 = `PluginHost`，而它比 `host` / 窗口 sink 后声明 ⇒ 先析构。
@@ -1486,7 +1492,7 @@ int main(int argc, char** argv) {
             sdl_display->releaseOverlayScript();
         }
         host.setConfigBridge(nullptr);
-        std::printf("%s\n", plugin_host->readout().c_str());
+        std::printf("%s\n", plugin_readout.c_str());
         std::fflush(stdout);
     }
     host.printRunSummary(r, stdout, readout_detail);

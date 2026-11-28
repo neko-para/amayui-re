@@ -28,12 +28,12 @@ let subId: number | undefined;
 function start(ctx: RunCtx): void {
     subId = ctx.at({ script: SCRIPT, lo: POS_LO, hi: POS_HI }, (tick, next) => {
         fires += 1;
-        tick.log("info", "maxfires: hit " + String(fires) + "/" + String(MAX_FIRES));
+        log.info("info", "maxfires: hit " + String(fires) + "/" + String(MAX_FIRES));
 
         if (fires >= MAX_FIRES) {
             // 到量：撤订阅（v1 的 maxFires 耗尽）。tick handler 里 off 是允许的。
             if (subId !== undefined) ctx.off(subId);
-            tick.log("info", "maxfires: budget exhausted; subscription removed");
+            log.info("info", "maxfires: budget exhausted; subscription removed");
         }
 
         next(); // 继续同点后续 at handler（没有就只是示范链语义）

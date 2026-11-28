@@ -23,7 +23,7 @@ const plugin = {
                 // 空转等宿主线程：它会在挂起 6 ms 之后写 FLAG。
                 // ⚠ 若宿主线程不响应，这里会被**CPU deadline**（2 ms）打断 ⇒ 用例红，不是挂死。
             }
-            return [];
+            return;
         }
         if (ctx.params.mode === "js-band") {
             // 只烧 CPU、**不调宿主**，且总字节码 ≪ 10000（中断回调不跑 ⇒ 不被打断）：
@@ -36,7 +36,7 @@ const plugin = {
             }
             // 走到这里 = 没被打断（正确：本模式就是要"跑完"）；写长度只为别让引擎把负载当死代码。
             ctx.edit.global.set("int", SIGNAL, s.length);
-            return [];
+            return;
         }
         // busy：只烧 CPU（没有宿主调用 ⇒ 打断只能来自预算）。
         // 上界只是"时钟/中断全坏时也别挂死"的兜底：正常情况下 2 ms 就被打断。
@@ -45,11 +45,6 @@ const plugin = {
             x = x + i;
         }
         ctx.edit.global.set("int", SIGNAL, x);  // 走到这里 = 预算没触发（用例会因此红）
-        return [];
-    },
-    onTrigger(ctx) {
-        void ctx;
-        return [];
     },
 };
 

@@ -37,7 +37,7 @@ function start(ctx: RunCtx): void {
     // 「重新 arm」= 新的 at 调用 ⇒ 新订阅（新 id）。两条订阅互相独立。
     onceId = ctx.at(POINT, (tick, next) => {
         onceHits += 1;
-        tick.log("info", "rearm: once-sub hit " + String(onceHits));
+        log.info("info", "rearm: once-sub hit " + String(onceHits));
         if (onceHits >= ONCE_HITS && onceId !== undefined) {
             ctx.off(onceId); // v1 Once 的等价物：命中即撤
         }
@@ -46,7 +46,7 @@ function start(ctx: RunCtx): void {
 
     reenterId = ctx.at(POINT, (tick, next) => {
         reenterHits += 1;
-        tick.log("info", "rearm: reenter-sub hit " + String(reenterHits));
+        log.info("info", "rearm: reenter-sub hit " + String(reenterHits));
         if (reenterHits >= REENTER_HITS && reenterId !== undefined) {
             ctx.off(reenterId); // 自己数到量再撤（v1 maxFires 的等价物）
         }
@@ -56,7 +56,7 @@ function start(ctx: RunCtx): void {
     if (onceId === undefined || reenterId === undefined) {
         ctx.fail("rearm", "ctx.at 未装（no_injection）");
     }
-    ctx.log("info", "rearm: two independent subscriptions installed (v2 has no mode)");
+    log.info("info", "rearm: two independent subscriptions installed (v2 has no mode)");
 }
 
 const plugin = { start } satisfies PluginModule;

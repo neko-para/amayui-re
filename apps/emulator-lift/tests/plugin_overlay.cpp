@@ -45,11 +45,11 @@
 #include "runtime/font.h"            // FontEngine::fontFileAvailable（窄 SKIP）
 #include "runtime/host_window.h"     // WindowManager（唯一输入设备面）
 #include "runtime/input_device.h"    // MouseButton / InputSource
-#include "runtime/intent_executor.h" // ReadingsSource（PluginHost 的构造形参）
+#include "runtime/intent_executor.h" // PluginHost 的 executor（六步 pump）
 #include "runtime/memory.h"          // GuestMemory
 #include "runtime/present_sdl.h"     // SdlWindow（叠层 host）
 #include "runtime/surface.h"         // SurfaceArena / GuestSurface
-#include "runtime/trigger.h"         // TriggerReadings
+#include "runtime/instr_hook.h"
 #include "ui/script.h"               // UiScript（adopt 的形参类型）
 
 namespace {
@@ -124,21 +124,6 @@ constexpr std::uint32_t kColorNoSource = 0x112233u;
 constexpr std::uint32_t kColorUp = 0xCCAA22u;
 constexpr std::uint32_t kColorDown = 0x33CC44u;
 
-// 插件宿主的读数源（本用例不跑 Run ⇒ 只满足构造形参；字段值不是判据）。
-class StubReadings final : public lift::plugin::ReadingsSource {
-public:
-    lift::plugin::TriggerReadings sample(lift::InputPoint point) override {
-        lift::plugin::TriggerReadings r;
-        r.script = "SC0000";
-        r.script_ok = true;
-        r.pos = 0x1104;
-        r.pos_ok = true;
-        r.mouse_ok = true;
-        r.point = point;
-        return r;
-    }
-};
-
 // guest 后缓冲（判据 ⑤ 的"⛔ 不写 guest"）。
 struct Fx {
     lift::GuestMemory mem;
@@ -208,7 +193,6 @@ int main() {
     //   `host`（插件）最先死（叠层 host 只存非拥有指针 ⇒ 生产上 `aot_main` 在 run 收口处 release）。
     lift::WindowManager wm;
     lift::SdlWindow win;
-    StubReadings readings;
     std::unique_ptr<lift::plugin::PluginHost> host;
 
     const std::uint32_t hwnd = wm.createWindow("PluginOverlayTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
@@ -236,7 +220,7 @@ int main() {
 
     // ---- 装载插件：字体走**装载之后**的接线（与 aot_main 的窗口装配同一顺序）----
     g_current_case = "plugin-overlay/load";
-    host = std::make_unique<lift::plugin::PluginHost>(readings);
+    host = std::make_unique<lift::plugin::PluginHost>();
     if (!host->init(kPluginOverlaySource, "builtin:c2b2-plugin-overlay", {}, nullptr, &err)) {
         LIFT_CHECK(false);  // PluginHost::init 失败
         std::fprintf(stderr, "  load error: %s\n", err.c_str());

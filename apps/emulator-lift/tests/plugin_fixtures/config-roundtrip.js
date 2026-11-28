@@ -24,16 +24,16 @@ const plugin = {
 
         if (ctx.config === undefined || ctx.config === null) {
             ctx.fail("config-roundtrip", "missing:config");
-            return [];
+            return;
         }
         if (ctx.config.available !== true) {
             ctx.fail("config-roundtrip", `available:${String(ctx.config.available)}`);
-            return [];
+            return;
         }
         const d = ctx.config.domain(DOMAIN);
         if (d === undefined || d === null) {
             ctx.fail("config-roundtrip", "missing:domain");
-            return [];
+            return;
         }
         // ---- 预置值（C++ 侧写进 appdata 根的 plugin-config.json）----
         if (d.get("pre") !== 123) bad.push(`pre:${String(d.get("pre"))}`);
@@ -100,12 +100,10 @@ const plugin = {
         expectTypeError("deep", () => d.set("deep-bad", depthBad));
 
         if (bad.length !== 0) ctx.fail("config-roundtrip", bad.join(","));
-        return [];
-    },
-    // ⛔ 成对：start 存在就必须有 onTrigger（合同 §4.6）；本夹具的用例只用 start。
-    onTrigger() {
-        return [];
+        return;
     },
 };
 
 export default plugin;
+
+
