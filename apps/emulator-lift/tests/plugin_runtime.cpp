@@ -2350,8 +2350,9 @@ void caseHookReleaseOnBudget() {
 //     ② 第二次探针 ⇒ 再 +1、`hits == 2`；
 //     ③ 触发一个 `afterPosition` 读点 ⇒ onTrigger 把 `tick.{seen,pos,opcode,script,id}` 与
 //        `ctx.hook.list()[0].hits` 写进 guest int ⇒ C++ 逐项读回相等。
-//   ★ 为什么字段校验放在 onTrigger：tick 入口 `inCallback()` 恒 false ⇒ `ctx.fail` 也 TypeError
-//     （那会把"参数错"伪装成"handler 抛错"）。onTrigger 是合法的 Run 回调。
+//   ★ 为什么字段校验放在 onTrigger：tick 入口里 v1 写面（`ctx.edit` / `ctx.trigger`）仍 TypeError，
+//     那里做校验会把"参数错"伪装成"handler 抛错"；onTrigger 是合法的 Run 回调。
+//     （★ P0 起 `ctx.fail` 本身在 tick 里允许 —— 它是 Run 侧控制面；本夹具的校验仍不用它。）
 // =====================================================================================
 constexpr std::uint32_t kTickOutSeen = 0xb100u;
 constexpr std::uint32_t kTickOutStatsHits = 0xb101u;
@@ -3341,7 +3342,8 @@ void caseTickStale() {
 constexpr std::uint32_t kTickWriteTarget = 0xb150;  // 夹具的 `TICK_TARGET`（int 池内）
 
 // `plugin/tick-edit`：tick 里 `edit.global.set` ⇒ 读点后 guest int 变；同一 handler 里
-//   `ctx.fail` 仍 TypeError（"写面不是把 in_callback_ 打开"的唯一可判读数）。
+//   **v1 `ctx.edit`** 仍 TypeError（"写面不是把 in_callback_ 打开"的可判读数；P0 起
+//   Run 侧控制面 `ctx.fail` 在 tick 里允许 —— 见 `plugin/once-from-task` / `at-from-task`）。
 void caseTickEdit() {
     lift_test::g_current_case = "plugin/tick-edit";
     Fixture f;
@@ -3365,7 +3367,7 @@ void caseTickEdit() {
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // accepted
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 1u);  // applied
     LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 0u);  // queued == false（Edit 不排队）
-    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // ctx.fail ⇒ TypeError（写面没打开 in_callback_）
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 1u);  // v1 ctx.edit ⇒ TypeError（in_callback_ 没打开）
 }
 
 // `plugin/tick-input`：tick 里 `input.click` ⇒ 回执 queued、下一读点 applied。
@@ -4071,6 +4073,275 @@ void caseAtTickIdAttribution() {
     LIFT_CHECK_EQ_U32(readFieldInt(a, kAtOutB), 1u);
     LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutA), h_b);  // ★ B 的 tick.id = 自己的句柄（修前 = h_a）
     LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutB), 1u);
+}
+
+// =====================================================================================
+// P0 · v2 前置能力（父级裁决：`ctx.once` 全形态 / `ctx.delay` / Run 侧门）
+//
+// 判据（红了意味着什么）：
+//   · `plugin/once-where`      ：`ctx.once` 接受与 `readAtWhere` 逐条一致的**全部** where 形态。
+//       - `{script,lo,hi}` 的 lo 边界（lo-1 不命中、lo 命中）与 hi 边界（hi 不命中、hi-1 命中）；
+//       - `{script}` = 该脚本**下一条指令**：两次（continuation 里注册第二次）在两个不同 pos 都命中；
+//       - `{opcode}` 只按 PC 上的 opcode 命中。
+//     红了 = `once` 仍是"只认 {script,pos}"那套（start 抛 TypeError ⇒ run=failed / hook 表不动）。
+//   · `plugin/delay`           ：`ctx.delay(5)` 期间 `run=waiting`（它算 Run 存活）；到期由泵 resolve、
+//      continuation 在**同一个泵**里跑完；**不 fail Run**（delay 不是 trigger）。
+//   · `plugin/delay-validation`：`ms` 必填 / 整数 / 0..24h；6 种非法值全 TypeError（⛔ 不截断）。
+//   · `plugin/once-from-task`  ：task 第一次 await 之后再注册 once ⇒ 两次都命中（H1 取消）。
+//   · `plugin/finish-from-task`：continuation 里 `ctx.finish(5)` ⇒ `run=finished exit=5`（H2 取消）。
+//   · `plugin/at-from-task`    ：continuation 里 `ctx.at` 装订阅 ⇒ task settle 后 Run 仍活着；
+//      handler 里 `ctx.off(self)` ⇒ 再一个读点收口（run=done）。
+//   ★ render 里"存下来的 RunCtx"仍必须 TypeError：既有 `plugin/render-stored-runctx-rejected` 覆盖。
+// =====================================================================================
+constexpr std::uint32_t kP0Pos2 = 0x00000110u;
+constexpr std::uint32_t kP0Lo = 0x00000110u;
+constexpr std::uint32_t kP0Hi = 0x00000120u;
+
+bool loadP0(Fixture& f, const char* mode) {
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return false;
+    const bool loaded = f.load("p0-async.js", {{"mode", mode}});
+    LIFT_CHECK(loaded);
+    if (!loaded) std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+    return loaded;
+}
+
+std::int64_t p0Hooks(Fixture& f) {
+    return static_cast<std::int64_t>(f.host->instrHookList().size());
+}
+
+std::int64_t p0Logs(Fixture& f) { return static_cast<std::int64_t>(f.host->logLines()); }
+
+void caseOnceWhere() {
+    lift_test::g_current_case = "plugin/once-where";
+    // ---- ① `{script,lo,hi}` 的 **lo 边界**：lo-1 不命中、lo 命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-range-lo")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();  // start：注册 once([lo,hi))
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kP0Lo - 1u);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // lo-1 不命中
+        LIFT_CHECK_EQ_I64(p0Logs(f), base);
+        dispatchInstr(f, kP0Lo);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);  // lo 命中 ⇒ 临时 hook 撤
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] range-lo %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ② `{script,lo,hi}` 的 **hi 边界**：hi 不命中、hi-1 命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-range-hi")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kP0Hi);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // hi 不命中（区间是 [lo,hi)）
+        LIFT_CHECK_EQ_I64(p0Logs(f), base);
+        dispatchInstr(f, kP0Hi - 1u);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);  // hi-1 命中
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] range-hi %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ③ `{script}` = 该脚本**下一条指令**：两条不同 pos 都命中 ----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-script")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        dispatchInstr(f, kInstrPos);  // 第一次命中 ⇒ continuation 里注册第二个 once
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // 第二个 once 已装（在 tick 入口的 drain 里）
+        // +2 = resolve 的 continuation 一行 + 第二条 once 的安装行（`ctx.hook.at …`）。
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+        LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+        dispatchInstr(f, kP0Pos2);  // ★ 另一个 pos 也必须命中（{script} 不是单点）
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] script %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+    // ---- ④ `{opcode}`：只按 PC 上的 opcode 命中（不看 script）----
+    {
+        Fixture f;
+        if (!loadP0(f, "once-where-opcode")) return;
+        LIFT_CHECK(installInstrFrame(f.mem));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+        const std::int64_t base = p0Logs(f);
+        LIFT_CHECK(putInstrOpcode(f, kP0Pos2, kInstrOpcode));
+        dispatchInstr(f, kP0Pos2);
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+        LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+        std::printf("  [%s] opcode %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+}
+
+void caseDelay() {
+    lift_test::g_current_case = "plugin/delay";
+    Fixture f;
+    if (!loadP0(f, "delay")) return;
+    f.pump();  // start：task 打一行 before，然后 await ctx.delay(5)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    // ★ delay 算 Run 存活：runner done 但 Run 仍是 waiting（否则收口后 continuation 永远不跑）。
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    LIFT_CHECK(f.host->instrHookList().empty());  // 不是 trigger：没有 hook
+    const std::int64_t base = p0Logs(f);
+    LIFT_CHECK_EQ_I64(base, 1);
+    LIFT_CHECK(f.host->lastLogLine().find("delay: before") != std::string::npos);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.pump();  // 到期 ⇒ resolve ⇒ continuation 在**同一个泵**里跑完
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());  // ★ delay 不 fail Run
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 1);
+    LIFT_CHECK(f.host->lastLogLine().find("delay: after") != std::string::npos);
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseDelayValidation() {
+    lift_test::g_current_case = "plugin/delay-validation";
+    Fixture f;
+    if (!loadP0(f, "delay-validation")) return;
+    f.pump();  // start：6 种非法 ms 全 TypeError（否则夹具自己抛 ⇒ run=failed）；然后 delay(0)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Logs(f), 0);  // 非法值一个都没被当成延迟跑起来
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    f.pump();  // 下一个泵：0 ms 到期 ⇒ continuation 跑
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->lastLogLine().find("delay-validation: ok") != std::string::npos);
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseOnceFromTask() {
+    lift_test::g_current_case = "plugin/once-from-task";
+    Fixture f;
+    if (!loadP0(f, "once-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：注册第一个 once（task 的同步首段）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    const std::int64_t base = p0Logs(f);
+    dispatchInstr(f, kInstrPos);  // #1 命中 ⇒ continuation 里注册 #2（H1 取消）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    // +2 = resolve 的 continuation 一行 + 第二条 once 的安装行（`ctx.hook.at …`）。
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    dispatchInstr(f, kP0Pos2);  // #2 命中
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+void caseFinishFromTask() {
+    lift_test::g_current_case = "plugin/finish-from-task";
+    Fixture f;
+    if (!loadP0(f, "finish-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：await once
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    dispatchInstr(f, kInstrPos);  // 命中 ⇒ continuation 在 tick 入口的 drain 里 ctx.finish(5)
+    dumpFail(f);
+    LIFT_CHECK(f.host->finished());  // ★ H2 取消：continuation 里 finish 生效
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(f.host->finishCode(), 5);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=finished") != std::string::npos);
+    LIFT_CHECK(line.find("exit=5") != std::string::npos);
+    LIFT_CHECK(line.find("run=failed") == std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+void caseAtFromTask() {
+    lift_test::g_current_case = "plugin/at-from-task";
+    Fixture f;
+    if (!loadP0(f, "at-from-task")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：await once
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    const std::int64_t base = p0Logs(f);
+    dispatchInstr(f, kInstrPos);  // 命中 ⇒ continuation 在 tick 入口的 drain 里装 ctx.at
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);  // 同步订阅已装
+    // +2 = 安装行（`ctx.at …`）+ continuation 自己的 `at-from-task: installed`。
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 2);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    f.pump();  // task 已 settle；Run 靠 at 订阅活着
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 1);
+    LIFT_CHECK(f.host->readout().find("run=waiting") != std::string::npos);
+    dispatchInstr(f, kP0Pos2);  // handler 里 ctx.off(self)
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(p0Hooks(f), 0);
+    LIFT_CHECK_EQ_I64(p0Logs(f), base + 3);  // handler 的 `hit pos` 一行
+    f.pump();  // 订阅撤掉 ⇒ 收口
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->readout().find("run=done") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
 }
 
 // =====================================================================================
@@ -5145,6 +5416,13 @@ int main() {
     caseAtWhereNullField();
     caseAtWhereBig();
     caseAtTickIdAttribution();
+    // ---- P0（v2 前置能力：once 全形态 / delay / Run 侧门 H1+H2）----
+    caseOnceWhere();
+    caseDelay();
+    caseDelayValidation();
+    caseOnceFromTask();
+    caseFinishFromTask();
+    caseAtFromTask();
     // ---- S3（独立全局 `log`：start / task / tick / render / timeout 的 catch）----
     caseGlobalLog();
     // ---- C2b（render / ui / draw；pure 半）----

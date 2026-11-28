@@ -1,5 +1,5 @@
 // C2b / S0 夹具 · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用
-// `fail`/`finish`/`quit`/`profile.*`/**`hook.*`** ⇒ 必须 **TypeError**。
+// `fail`/`finish`/`quit`/`profile.*`/**`hook.*`**/`at`/`delay` ⇒ 必须 **TypeError**。
 //
 // 判据（红了意味着什么）：render 期 `call_host` 非空（`ctx.read`/`ctx.log` 要用），而那些出口
 //   只判"call_host 非空" ⇒ 插件在 `onTrigger`/`start` 里 `saved = ctx`，下一帧 `saved.fail(…)` /
@@ -31,6 +31,8 @@ const OPS = [
     // ★ S2c：`ctx.at(where, fn)` 与 `once` / `task` 同一条门（`inCallback()`）⇒ render 里必须
     //   TypeError。**`off` 故意不进这张表**（它只减、门 = `call_host`；见下面的正向断言）。
     "at",
+    // ★ P0：`ctx.delay(ms)` 的门 = Run 侧入口（render 里 `in_run_entry == false`）⇒ 同样 TypeError。
+    "delay",
 ];
 
 let saved = null;
@@ -57,6 +59,7 @@ const plugin = {
                 else if (op === "hook.handle.clear") savedHook.clear();
                 else if (op === "hook.onTick") savedHook.onTick(() => {});
                 else if (op === "at") saved.at({ script: "FIELD.BIN", pos: 0x100 }, () => {});
+                else if (op === "delay") saved.delay(1);
                 else throw new Error("unknown op: " + op);
             } catch (e) {
                 // 唯一正确的形状：非回调期 ⇒ TypeError（⛔ 不是"接受"、也不是别的错）。

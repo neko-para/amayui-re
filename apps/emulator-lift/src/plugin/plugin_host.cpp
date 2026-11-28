@@ -307,12 +307,17 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     if (failed_ || quit_requested_) releaseRunInput();
 }
 
-void PluginHost::releaseRunHooks() { lift::instrHookReleaseOwner(run_serial_); }
+void PluginHost::releaseRunHooks() {
+    lift::instrHookReleaseOwner(run_serial_);
+    // ★ P0：Run 收口也丢掉**不再推进**的脚本侧异步工作（目前 = `ctx.delay` 的 resolve 表）。
+    //   `script_` 的生命周期 > 本类（unique_ptr 成员）⇒ 这里永远安全。
+    if (script_ != nullptr) script_->onRunClosed();
+}
 
 bool PluginHost::runClosed() const {
-    // ★ S2b：`runner.done()` 不再是唯一条件 —— 还有**待推的异步工作**（task / once / onTick 订阅）时
-    //   Run 必须活着（否则 `return []` 会把一个还在 `await ctx.once(...)` 的 Run 收口掉）。
-    //   `hasPendingWork` 只认那三样：普通 `ctx.hook.at` 是 v1 观察，⛔ 不算。
+    // ★ S2b：`runner.done()` 不再是唯一条件 —— 还有**待推的异步工作**（task / once / delay /
+    //   onTick 订阅 / at 订阅）时 Run 必须活着（否则 `return []` 会把一个还在 `await` 的 Run 收口掉）。
+    //   `hasPendingWork` 只认那几样：普通 `ctx.hook.at` 是 v1 观察，⛔ 不算。
     const bool pending = script_ != nullptr && script_->hasPendingWork();
     // ★ S2b-1：终态判据只有一份 = `runTerminal()`（failed / finished / quit / runner failed）。
     return runTerminal() || (runner_.done() && !pending);

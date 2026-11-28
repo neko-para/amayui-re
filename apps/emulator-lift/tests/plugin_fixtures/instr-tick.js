@@ -8,9 +8,10 @@
 //                    第二次命中不再有日志，但 `stats().hits` 继续涨（entry 还在计数）。
 //   · `mode=done`  ：`return []` ⇒ Run 收口 ⇒ hook 表空；之后的探针**不再跑 JS**。
 //
-// ★ tick 是**只读**的：`ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 在 tick
-//   入口全部 TypeError（`inCallback()` 恒 false）⇒ 本夹具的字段校验放在**下一次 onTrigger**
-//   （那是合法的 Run 回调），而不是 tick 里 `ctx.fail`（那会先抛 TypeError，变成"handler 挂了"）。
+// ★ tick 的**写面**是 `Tick`（`tick.edit/input/patch`）；v1 写面（`ctx.edit/input/trigger/hook.*`）在
+//   tick 入口仍 TypeError（`inCallback()` 恒 false）。★ P0 起 Run 侧控制面（`ctx.fail/finish/quit` /
+//   `once` / `at` / `task` / `delay` / `profile` / `config`）在 tick 入口**可用**（门 = `in_run_entry`）
+//   ⇒ 本夹具的字段校验仍放在**下一次 onTrigger**（合法的 Run 回调），不在 tick 里 `ctx.fail`。
 const SCRIPT = "FIELD.BIN";
 const POS = 0x0100;
 // guest int 槽（C++ 侧按同一组 id 读回；池 = 0xB1B6 个槽 ⇒ 这些 id 都寻址得到）。
@@ -30,11 +31,11 @@ const plugin = {
         let seen = 0;
         if (mode === "hit") {
             handle.onTick((tick) => {
-                // ★ 只读硬边界：tick 入口 `inCallback()` 恒 false ⇒ 写类 trampoline 全 TypeError。
+                // ★ 写面硬边界：tick 入口的 v1 写面（`ctx.edit` / `ctx.trigger`）必须 TypeError。
+                //   ★ P0 起 `ctx.fail` **不在**这张表里（它是 Run 侧控制面，tick 里允许）。
                 //   只要有一个被**接受**，本夹具就抛 ⇒ `plugin/point-hit` 的日志行数当场红
                 //   （比"没报错"强：它证明那条门真的在）。
                 const writes = [
-                    () => ctx.fail("tick", "should-not-work"),
                     () => ctx.edit.global.set("int", 0xb1b0, 1),
                     () => ctx.trigger.afterDelay(1, { name: "bad" }),
                 ];

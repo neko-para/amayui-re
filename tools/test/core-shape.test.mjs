@@ -30,7 +30,7 @@
  *    那是"一个能力两处实现"的入口，而且**没有运行期症状**。
  * ⑦ **`instr_hook` 的代码里 0 命中 `quickjs`**（S2a）：反向 sink 只能是函数指针 + 纯值。
  * ⑧ **每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`**（S2a）：漏 drain ⇒ continuation
- *    落到下一个入口；全文件 `JS_Call(` 白名单 = 6 处（4 个入口 + 2 个宿主值构造），新增必须登记。
+ *    落到下一个入口；全文件 `JS_Call(` 白名单 = 11 处（4 个入口 + 2 个宿主值构造 + 4 个异步面 + 1 个 v1 步），新增必须登记。
  *
  * ## 为什么现在就要它（⛔ 不要推迟到 C2/C4）
  * C1b 一落地，"核心没长出 plan VM"就是**当天**可被静默破坏的性质（下一个人给 trigger 加个
@@ -422,7 +422,7 @@ test('⑦ `instr_hook` 的**代码**里 0 命中 `quickjs`（反向 sink 必须�
   assert.equal(forbiddenHits('// 这里不 include "quickjs.h"\n', ['quickjs']).length, 0, '注释里的 `quickjs` 不许命中');
 });
 
-test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 10）', () => {
+test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且全文件 `JS_Call` 白名单 = 11）', () => {
   // ★ host→JS 的入口清单 = `renderFrame()` / `call()` / `runInstrHits()` / 经典 `render()`。
   //   （S2a 复审 F6：注释原来写"经典 render 见下面 ④"，而 ④ 是 `src/plugin/**` 的 include 禁令，
   //   与 render 无关 ⇒ 经典 render 的 drain 当时**没有守卫**，删掉是静默回归。）
@@ -490,9 +490,9 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
       missing.join('\n  '),
   );
 
-  // ★ 全文件 `JS_Call(` 白名单：**10 处** = 4 个入口（`runInstrHits` 的链调用）+ 2 个宿主值构造
-  //   （`Object.assign` 造 ctx / 造错误对象）+ 3 个 S2b 异步面
-  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject）+ 1 个 v1 步
+  // ★ 全文件 `JS_Call(` 白名单：**11 处** = 4 个入口（`runInstrHits` 的链调用）+ 2 个宿主值构造
+  //   （`Object.assign` 造 ctx / 造错误对象）+ 4 个 S2b/P0 异步面
+  //   （`ctx.task` 调用户函数 / `once` 的 resolve / `once` 的 reject / `delay` 的 resolve）+ 1 个 v1 步
   //   （`runHookStepV1`：`handle.onTick` 的被动调用，S2c 从旧 `runHookEntry` 抽出来的）。
   //   新增一处必须来这里登记（否则"入口"会悄悄多一个）。
   const calls = [];
@@ -509,6 +509,9 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     if (c.text.includes('fn.raw(), JS_UNDEFINED, argc, argv')) return 'call';
     if (c.text.includes('argv[0], JS_UNDEFINED, 1, args')) return 'task-invoke';
     if (c.text.includes('entry->second.resolve.raw(), JS_UNDEFINED, 1, args')) return 'once-resolve';
+    // ★ P0：`ctx.delay` 的 resolve（`runDelayDue`；注意必须排在 `once-resolve` 之后 ——
+    //   后者的 `entry->second.resolve.raw()` 也包含 `resolve.raw()`）。
+    if (c.text.includes('resolve.raw(), JS_UNDEFINED, 1, args')) return 'delay-resolve';
     if (c.text.includes('reject, JS_UNDEFINED, 1, args')) return 'once-reject';
     return `unregistered@${c.line}: ${c.text}`;
   });
@@ -517,6 +520,7 @@ test('⑧ 每个 host→JS 入口都含 `JS_Call(` + `drainPendingJobs(`（且�
     [
       'call',
       'classic-render',
+      'delay-resolve',
       'error-object',
       'object-assign',
       'once-reject',

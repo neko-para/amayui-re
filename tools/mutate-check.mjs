@@ -4664,11 +4664,11 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
+      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
-      '        return !impl_->tasks.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();  // 变异：不把 once 当存活来源\n',
+      '        return !impl_->tasks.empty() || !impl_->delays.empty() ||\n' +
+      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();  // 变异：不把 once 当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -4685,10 +4685,10 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
+      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() ||\n' +
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
       '               !impl_->at_subs.empty();  // 变异：不把 onTick 订阅当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
@@ -4723,11 +4723,11 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
     from:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||\n' +
-      '               !impl_->at_subs.empty();\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
+      '               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();\n',
     to:
-      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty();  ' +
-      '// 变异：不把 at 订阅当存活来源\n',
+      '        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||\n' +
+      '               !impl_->hook_handlers.empty();  // 变异：不把 at 订阅当存活来源\n',
     guard: 'ctest:plugin-runtime',
     ctest: 'plugin-runtime',
     buildDir: 'apps/emulator-lift/out',
@@ -5023,6 +5023,65 @@ const MUTATIONS = [
     what:
       '`installGlobalLog` 不把 `log` 装进 `globalThis`（`defineReadOnly(...)` 改成 no-op）⇒ ' +
       '插件里的 `log.info` / `log.warn` / `log.error` / `log.debug` 全部不可用；`plugin/global-log` 红',
+  },
+
+  // ── P0：`ctx.once` 必须接受 `ctx.at` 的全部 where 形态 ────────────────────────────────────────
+  //   ★ 代表这一类错：`once` 回到"只认 {script,pos}"那一套 ⇒ `{script,lo,hi}` / `{script}` / `{opcode}`
+  //     在注册时就 TypeError（save 翻页链 / "等下一拍"全部写不出来），而 `{script,pos}` 仍绿 ⇒
+  //     单点用例看不出来。
+  //   ★ 红点 = `plugin/once-where`（range / script / opcode 四个子用例的第一条就红）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        std::string why;\n' +
+      '        lift::InstrHookWhere where;\n' +
+      '        if (!readAtWhere(ctx, argv[0], &where, &why)) {\n',
+    to:
+      '        std::string why;\n' +
+      '        lift::InstrHookWhere where;\n' +
+      '        if (!readAtWhere(ctx, argv[0], &where, &why) ||\n' +
+      '            where.form != lift::InstrHookForm::Pos) {  // 变异：once 只认 {script,pos}\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`ctx.once` 只认 `{script,pos}`（非 Pos 形态注册时 TypeError）⇒ `{script,lo,hi}` / `{script}` / ' +
+      '`{opcode}` 全写不出来；`plugin/once-where` 红',
+  },
+
+  // ── P0：`ctx.delay` 到期必须 resolve ────────────────────────────────────────────────────────
+  //   ★ 代表这一类错：泵只摘账不 resolve ⇒ 那个 Promise 永远 pending、task 永远不 settle，Run 停在
+  //     `run=waiting` 直到 `--time-limit`（**没有任何症状**）。
+  //   ★ 红点 = `plugin/delay`（continuation 的 `delay: after` 永远不出现、readout 不是 done）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        runDelayDue(impl, serial);\n',
+    to: '        (void)serial;  // 变异：到期也不 resolve（delay 永不完成）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`pumpImpl` 对到期的 `ctx.delay` 不调 `runDelayDue`（Promise 永远 pending）⇒ continuation 不跑、' +
+      'Run 永远 waiting；`plugin/delay` 红',
+  },
+
+  // ── P0：render 不得打开 Run 侧门（存下来的 RunCtx 仍 TypeError）──────────────────────────────
+  //   ★ 代表这一类错：render 的 `RunEntryScope` 给 true ⇒ `in_run_entry` 在 render 里为真 ⇒
+  //     `saved.fail/finish/quit/profile/at/delay` 全部被接受（成员表不是门面；render 能改 Run 终态）。
+  //   ★ 红点 = `plugin/render-stored-runctx-rejected`（夹具的 `accepted:` 列表非空 ⇒ render false）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        RunEntryScope render_entry(&impl, /*run=*/false);\n',
+    to: '        RunEntryScope render_entry(&impl, /*run=*/true);  // 变异：render 门被打开\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`renderFrame` 把 `RunEntryScope` 设成 true（render 打开 Run 侧门）⇒ 存下来的 RunCtx 的 ' +
+      'fail/finish/quit/profile/at/delay 在 render 里被接受；`plugin/render-stored-runctx-rejected` 红',
   },
 
 ];

@@ -31,8 +31,8 @@
 //   · `where-null-field`：where 的键**存在但值是 null/undefined** ⇒ TypeError（⛔ 不静默退化）+
 //     合法形态仍装得上（`hook.list()` 不新增条目）。
 //   · `tick-id`         ：多 Impl 同活时 `tick.id` 必须是本实例自己的句柄（⛔ 不是 `hits[0]`）。
-//   · `tick-edit`       ：tick 里 `edit.global.set` ⇒ guest int 立即变；同一 handler 里 `ctx.fail` 仍
-//     TypeError（"写面不是把 in_callback_ 打开"的读数）。
+//   · `tick-edit`       ：tick 里 `edit.global.set` ⇒ guest int 立即变；同一 handler 里 v1
+//     `ctx.edit` 仍 TypeError（"写面不是把 in_callback_ 打开"的读数；P0 起 `ctx.fail` 允许）。
 //   · `tick-input`      ：tick 里 `input.click` ⇒ 回执 queued、下一读点 applied。
 //   · `stale-write`     ：旧 Tick 的 `edit` / `input` / `patch` ⇒ 抛 `stale_tick`，guest / 队列零变化。
 //   · `tick-patch`      ：tick 里 `patch({localInt:0},5)` ⇒ 该条指令读到 5；下一拍恢复；CAS 冲突读数。
@@ -42,8 +42,9 @@
 //   · `once-tick-patch` ：同一个 `.then` 里 `tick.patch` ⇒ 回执 `code:"once_tick"`（⛔ 不是 no_such_hook）、
 //     guest 零变化；`tick.local` / `tick.edit` 仍可用。
 //
-// ★ Tick 入口的**写面**（S2c-2）：`tick.edit` / `tick.input` / `tick.patch` 可用；从 RunCtx 调的
-//   `ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 仍 TypeError。
+// ★ Tick 入口的**写面**（S2c-2）：`tick.edit` / `tick.input` / `tick.patch` 可用；v1 写面
+//   （`ctx.edit/input/trigger/hook.*`）仍 TypeError。★ P0 起 Run 侧控制面（`fail/finish/quit/
+//   profile/config/once/at/task/delay`）在 tick 入口**可用**（门 = `in_run_entry`，与 `in_callback_` 正交）。
 // ★ `off` 是既有的例外：只减操作，门 = `call_host != nullptr` ⇒ tick handler 里也能撤（`tick-off`）。
 const SCRIPT = "FIELD.BIN";
 const POS = 0x0100;
@@ -102,7 +103,7 @@ let seenTickRuns = 0;   // 它跑了几次
 // ---- S2c-2b：Tick 的写面（edit / input / patch）与 stale 写 ----
 const TICK_TARGET = 0xb150;  // guest int 输出 / 写面的目标槽（int 池 0xB1B6 个槽 ⇒ 寻址得到）
 const PATCH_VALUE = 5;
-let editRec = null;         // `tick-edit`：回执 + `ctx.fail` 是否仍 TypeError
+let editRec = null;         // `tick-edit`：回执 + v1 `ctx.edit` 是否仍 TypeError
 let editFailType = 0;
 let inputRec = null;        // `tick-input`：回执 + handler 内 status
 let inputStatusInTick = "";
@@ -475,10 +476,11 @@ const plugin = {
                 if (typeof tick.patch !== "function") throw new Error("tick-edit: tick.patch 形状错");
                 const r = tick.edit.global.set("int", TICK_TARGET, 42);
                 editRec = { accepted: r.accepted, applied: r.applied, queued: r.queued };
-                // ★ "写面不是把 in_callback_ 打开"的唯一可判读数：同一个 tick handler 里
-                //   `ctx.fail`（start 的那个 RunCtx）仍必须是 TypeError。
+                // ★ "写面不是把 in_callback_ 打开"的可判读数：同一个 tick handler 里 **v1 写面**
+                //   `ctx.edit`（start 的那个 RunCtx）仍必须是 TypeError。
+                //   ★ P0 起 `ctx.fail` 不再是这个读数（它是 Run 侧控制面，tick 里允许）。
                 try {
-                    ctx.fail("tick-edit", "must-not-run");
+                    ctx.edit.global.set("int", TICK_TARGET, 43);
                 } catch (e) {
                     editFailType = (e && e.name === "TypeError") ? 1 : 2;
                 }

@@ -305,9 +305,22 @@ public:
     // 调用点只有两个（⛔ 不要新增第三个泵概念）：
     //   · `PluginHost::onReadPoint`：`syncRunnerFailure()` 之后、`runClosed()` 之前；
     //   · `PluginScript::render` 的开头（render 边界；`call_host` 用 persistent 那份）。
-    // ★ 泵入口的 `inCallback()` 保持 false ⇒ 泵里的 continuation 只有 `log` / `read` 这类只读口；
-    //   写类（`edit` / `input` / `trigger` / `fail` / …）仍是 TypeError（S2c 才给 Tick 写能力）。
+    // ★ 泵入口的 `inCallback()` 仍保持 false（那一位在 `PluginHost` 手里），但 ★ P0 起泵是
+    //   **Run 侧入口**（`Impl::in_run_entry`）⇒ 里面的 continuation 可以 `once` / `at` / `task` /
+    //   `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat`；v1 写面
+    //   （`ctx.edit` / `ctx.input` / `ctx.trigger` / `ctx.hook.*`）的 `inCallback` 门**没动**。
     virtual void pump(PluginCallHost& host, const lift::plugin::Budget& budget) = 0;
+
+    /**
+     * ★ P0：**Run 收口**的脚本侧钩子（`PluginHost::releaseRunHooks` 是唯一调用点）。
+     * 语义 = 丢掉**不再推进**的异步工作：目前只有 `ctx.delay` 的 resolve 表（清掉、**不 resolve**、
+     * 也不再跑 JS）。为什么要它：`delay` 的 `resolve` 是 JS 引用（必须在 `JS_FreeContext` 之前释放），
+     * 而且"Run 已收口还在账上"会让 `hasPendingWork()` 永远真。
+     * ★ ⛔ 不清 `task` / `once`：那两样由 instr hook 的 owner 收口与 `Impl::shutdown` 兜底
+     * （`once` 被撤时必须 reject —— 正在 await 它的 task 才能 settle；那条语义不能动）。
+     * ★ 幂等（和 `releaseRunHooks` 一样可能被多次调用）；实现方自己判 `ctx == nullptr`。
+     */
+    virtual void onRunClosed() = 0;
 
     void shutdown() override = 0;
 

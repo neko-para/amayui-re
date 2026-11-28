@@ -3,11 +3,14 @@
 // 插件文件 = ES module；`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
 // 宿主 QJS 装载后读 default 导出；不再读 globalThis.render/start/onTrigger。
 //
-// ★ v2（S2c/S3，2026-11-28）：新插件写 `start(ctx)` 装 `ctx.at` / `ctx.once` / `ctx.task`，
+// ★ v2（S2c/S3，2026-11-28；P0 补 `once` 全形态 / `delay` / Run 侧门）：
+//   新插件写 `start(ctx)` 装 `ctx.at` / `ctx.once` / `ctx.delay` / `ctx.task`，
 //   `start` 返回 `void`（不再返回 Trigger 集合）；指令点回调 / `once` 的 resolve 给一个 `Tick`，
 //   写面在 Tick 上（`now` / `local` / `edit` / `input` / `patch` / `log`）。
-//   `ctx.at` / `ctx.once` / `ctx.task` 的门 = **Run 回调**（`start` / `onTrigger`；`ctx.task` 的同步
-//   首段也在 Run 回调里）；tick handler / render / 泵里只读 + `ctx.off`（只减）+ 全局 `log`。
+//   `ctx.at` / `ctx.once` / `ctx.delay` / `ctx.task` 的门 = **Run 侧入口**（Run 回调 / task
+//   continuation / 泵）；**render 里仍 TypeError**。tick handler 里也能用它们（没有 RunCtx 参数，
+//   但存到模块变量再用 = 按 Run 侧允许）；tick 的**写面**仍是 `Tick`，v1 `ctx.edit/input/trigger/hook.*`
+//   在 tick 里仍 TypeError。
 //   v1 面（`ctx.trigger` / `ctx.hook.at` / `ctx.now` / `handle.onTick` / `onTrigger`）仍可用，但都是
 //   **deprecated 兼容层**（见各成员注释）；examples 已全部按 v2 写（`scripts/plugins/examples/`）。
 //
@@ -25,7 +28,7 @@
 // 7. Run（ctx.run）是一次 callback 链的执行实例；一个 endpoint 同时一个 active，已有 ⇒ busy。
 //    ★ v2：**不允许嵌套 Run**；组合用 ctx.task，切换 Run 由控制层做（dispatch 不在插件 API 里）。
 // 8. ctx.finish 结束当前 Run（可映射旧 exit 5）；ctx.quit 请求宿主停机（WM_QUIT/stop_requested）。
-//    ★ 两者都只能在 Run 回调里调；task continuation / 泵 / tick / render 里是 TypeError。
+//    ★ P0 起门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；render 里仍 TypeError。
 declare module "@amayui/lift-plugin" {
 export type GlobalKind = "int" | "uint" | "float" | "string";
 export type GlobalValue<K extends GlobalKind = GlobalKind> =
@@ -518,8 +521,9 @@ export interface ConfigApi {
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
  * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`；
- *   2026-11-26 `config` 加回 `RenderCtx`；S2b/S2c 追加 `once` / `task` / `at` / `off`）：
- *   - **v2（推荐）**：`at` / `off` / `once` / `task` + `config` / `appdata` / `read` / `log` /
+ *   2026-11-26 `config` 加回 `RenderCtx`；S2b/S2c 追加 `once` / `task` / `at` / `off`；
+ *   P0 追加 `delay`，`once` 放开全部 `AtWhere`）：
+ *   - **v2（推荐）**：`at` / `off` / `once` / `delay` / `task` + `config` / `appdata` / `read` / `log` /
  *     `fail` / `finish` / `quit`；
  *   - **v1 兼容层（deprecated）**：`trigger` / `hook` / `now`（新代码见各成员的 `@deprecated`）；
  *   - 其它已实现：`edit` / `input` / `read.global.get` / `ui`（**只写**宿主本地状态，v2 里 UI 只归
@@ -550,31 +554,43 @@ export interface RunCtx<State = Record<string, unknown>> {
      *  `id` = 这条 `once` 自己的临时订阅）。★ S2c-2 起 `local` / `edit` / `input` 在 resolve 的
      *  `.then` 里可用（continuation 在同一入口的 drain 里跑）；`patch` 会回执 `once_tick`
      *  （临时条目已撤）。
-     *  · `where` 只收 `{script,pos}`（S2c 把 `{script,lo,hi}` / `{script}` / `{opcode}` 扩给了
-     *    `ctx.at`；`ctx.once` 仍是**单点**）。
-     *  · **门 = Run 回调**：要连续等多个点，必须在 `ctx.task` 的**同步首段**（第一个 await 之前）
-     *    把各个 `once` 都注册好，再按顺序 `await`；continuation 里再 `ctx.once` 会 TypeError。
+     *  · `where` = **与 `ctx.at` 完全相同的 `AtWhere` 五种形态**（同一个 `readAtWhere`）：
+     *    `{script,pos}` / `{script,lo,hi}`（`[lo,hi)`）/ `{script}` / `{opcode}` / `{script,opcode}`。
+     *    ★ `{script}` 的语义 = **该脚本下一条指令**（第一条命中即 resolve）—— 用于"等下一拍"的
+     *      采样（替代 v1 `atReadPoint("any")`；频率是脚本指令而非读点）。
+     *  · **门 = Run 侧入口**：Run 回调 / `ctx.task` 的 continuation / 泵（读点或 render 前）里都能注册
+     *    —— **H1 已取消**：可以"翻一页 → 判 → 再注册下一道门"地把动态链写下去（save 页链就靠这条）。
      *  · `opts.timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：到点 = **失败截止**
      *    （先 reject，让 `catch` 在泵里 drain 到；随后宿主记 timeout 并 **fail Run**）。
      *    ⛔ 不提供"永不结束的等待"；
      *  · 每次调用装一条**临时** hook（owner = 本 Run）；命中 / 超时 / Run 收口自动撤；
      *  · 同一个 Run 可以有多个 `once`（与 `ctx.hook.at` 走同一张 owner 表）。
-     *  ★ 它让 Run **保持存活**（与 task 一样）：等待期间的 Run 不收口。 */
-    once(
-        where: { readonly script: string; readonly pos: number },
-        opts: { readonly timeoutMs: number },
-    ): Promise<Tick>;
+     *  ★ 它让 Run **保持存活**（与 task / delay 一样）：等待期间的 Run 不收口。 */
+    once(where: AtWhere, opts: { readonly timeoutMs: number }): Promise<Tick>;
+    /** **墙钟延迟**（P0）：`await ctx.delay(ms)` ⇒ 至少等 `ms` 毫秒后 resolve。
+     *  · `ms` **必填 / 整数 / `0 <= ms <= 24h`**（越界 / 小数 / 非数字 ⇒ TypeError；⛔ 不截断）；
+     *  · **不是 trigger**：到点只 resolve，**不 fail Run**；由**既有泵**推进（读点 / render 入口）——
+     *    ⛔ 没有独立 timer；
+     *  · **NON-DIFFABLE**：墙钟随机器 / 负载变化，⛔ 不用它做 A/B、指纹或"多久发生"的判据
+     *    （它是"等一拍"的脚本逻辑，替代 v1 `afterDelay`）；
+     *  · 门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；render 里 TypeError；
+     *  · 等待期间让 Run **保持存活**（`hasPendingWork`）；Run 收口时清表（**不 resolve**、也不再跑 JS）。
+     *  @example `ctx.task(async (t) => { await ctx.delay(500); t.input.click(640, 480); });`
+     */
+    delay(ms: number): Promise<void>;
     /** **协程**（S2b）：`fn(ctx)` 必须**同步**返回 Promise（否则 TypeError）；返回的 promise 进本
      *  Run 的 task 账。每个 host→JS 入口末尾（drain 之后）检查 settle：
      *  fulfilled ⇒ 移除；rejected ⇒ **fail Run**（reason = 拒绝原因）；pending ⇒ 保留。
      *  · `fn` 收到**当前 RunCtx**（同一个 `now` / `state`）；
-     *  · 只用于 `start` / `onTrigger`（tick / pump / render 里调 ⇒ TypeError：那些入口只读）；
+     *  · 门 = **Run 侧入口**（Run 回调 / 泵）；render 里 TypeError。★ 但"当前 RunCtx"只在 Run 回调
+     *    入口内存在 ⇒ 在 task continuation 里再 `ctx.task(...)` 会因缺当前 RunCtx 抛 TypeError
+     *    （要组合用 `await` / `Promise.all`；`once` / `at` / `delay` 不需要它）。
      *  · 不需要 `await`：登记即返回 `undefined`；task 组合用 Promise 自身的 `await` / `Promise.all`。
      *  ★ 它让 Run **保持存活**：所有 task settled 之前 Run 不收口（`return []` 也不会）。 */
     task(fn: (ctx: RunCtx<State>) => Promise<unknown>): void;
     /**
      * **同步订阅**一个指令点（S2c）：命中时按**注册序**跑 handler；调 `next()` 继续，不调 = 截断。
-     *  · 门 = Run 回调（`start` / `onTrigger`）；`ctx.task` 的**同步首段**里可以调；
+     *  · 门 = **Run 侧入口**（Run 回调 / `ctx.task` 的 continuation / 泵）；render 里 TypeError；
      *  · 返回订阅 id（`> 0`）；`no_injection`（`--no-s7`）⇒ `undefined` + 宿主一行显眼 error；
      *  · 每条订阅让 Run **保持存活**（`hasPendingWork`）⇒ 要收口就 `ctx.off(id)` / `finish` / `quit`；
      *  · handler 必须**同步**（返回 Promise 会被忽略 + 一次性 warn；`next()` 必须在 await 之前调）；
@@ -813,14 +829,14 @@ export interface PluginModule<State = Record<string, unknown>> {
 //   ★ `script` 是 **marker 文件名（含 `.BIN`）**，宿主做**精确相等**；`pos` 从 1 开始。
 //   function start(ctx: RunCtx): void {
 //     ctx.task(async (t) => {
-//       // ★ once 的门 = Run 回调 ⇒ 全部在第一个 await 之前注册
+//       // 门 = Run 侧入口 ⇒ 也可以在第一个 await **之后**再注册（P0 起 H1 取消）
 //       const title = t.once({ script: "TITLE.BIN", pos: TITLE_POS }, { timeoutMs: 30000 });
 //       const save  = t.once({ script: "SAVE.BIN",  pos: SAVE_POS  }, { timeoutMs: 30000 });
 //       const titleTick = await title;
 //       titleTick.input.click(LOAD_X, LOAD_Y);       // 入队，下一读点落地
 //       const saveTick = await save;
 //       saveTick.input.click(SLOT_X, rowY(slot));
-//     });   // task settle + 没有订阅 ⇒ Run 自然收口（要 exit code 才用 finish，且只能在 Run 回调里）
+//     });   // task settle + 没有订阅 ⇒ Run 自然收口（要 exit code 才用 finish；continuation 里也可）
 //   }
 //
 // 同步订阅（ctx.at；同点多条 = 一条链：next() 继续、不调 = 截断）：

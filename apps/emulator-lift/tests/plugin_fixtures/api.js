@@ -17,6 +17,8 @@ const REQUIRED = [
     // ★ S2b：异步面（`once` 返回 Promise<InstrTick>；`task` 登记协程）。
     "once",
     "task",
+    // ★ P0：`delay(ms)` 返回 `Promise<void>`（墙钟；NON-DIFFABLE）。
+    "delay",
     // ★ S2c：同步订阅面（`at` 返回订阅 id；`off` 撤一条、幂等）。
     "at",
     "off",

@@ -172,11 +172,24 @@ struct OnceEntry {
     Value reject;
     std::uint64_t deadline_ns = 0;  // steadyNowNs() 绝对（timeoutMs 必填 > 0 ⇒ 恒非 0）
     std::uint64_t serial = 0;       // 日志 / 诊断的唯一性（`once #N`）
-    std::string script;
-    std::uint32_t pos = 0;
+    // ★ P0：与 `ctx.at` **同一份**形状（`readAtWhere` 的产物）。`{script}` = 该脚本的**下一条**
+    //   指令（第一次命中就 resolve）⇒ 替代 v1 `atReadPoint("any")` 的"下一拍采样"。
+    lift::InstrHookWhere where;
     std::uint32_t timeout_ms = 0;
 };
 
+// ---- 插件（P0）：`ctx.delay(ms)` 的待到期账 ----
+// ★ 语义（父级裁决）：**墙钟** `Promise<void>`；不是 trigger、不 fail Run；由既有泵推进
+//   （读点 / render 边界）——⛔ 没有独立 timer。**NON-DIFFABLE**（注入 / 时序不在判据里）。
+// ★ key = serial（单调、永不复用）；deadline 用 `steadyNowNs()`（与 `OnceEntry` 同一把钟）。
+//   `resolve` 是唯一的 JS 引用；到期由 `runDelayDue` 摘账 + resolve（continuation 在**同一个泵**的
+//   drain 里跑）。Run 收口时整表清掉（**不 resolve**、也不再跑 JS；见 `PluginScript::onRunClosed`）。
+struct DelayEntry {
+    std::uint32_t serial = 0;
+    Value resolve;
+    std::uint64_t deadline_ns = 0;  // steadyNowNs() 绝对
+    std::uint32_t ms = 0;
+};
 // ---- 插件（S2c）：`ctx.at` 的一条同步订阅 ----
 // ★ 与 `hook_handlers`（v1 `onTick`：1 句柄 : 1 handler、被动）**分开**：at 订阅参与链、算 Run 存活、
 //   失败摘**整条**订阅。`serial` 只给日志唯一性（`at #N`；`PluginHost::log` 会对连续同文去重）。
@@ -249,6 +262,18 @@ struct Impl {
     //   **同一个**对象（同一个 `now` 快照 / 同一个 `state`），⛔ 不重建第二个。
     std::map<std::uint32_t, OnceEntry> onces;
     std::uint64_t next_once_serial = 1;
+    // ---- 插件（P0）：`ctx.delay(ms)`（见 `DelayEntry`）----
+    std::map<std::uint32_t, DelayEntry> delays;
+    std::uint32_t next_delay_serial = 1;
+    // ---- 插件（P0）：**Run 侧入口**作用域（H1/H2 的落点）----
+    // ★ 谁能调"注册 / 控制"面（`once` / `at` / `task` / `finish` / `fail` / `quit` / `profile` /
+    //   `appdata.stat` / `config` / `delay`）：`call()`（Run 回调）、`runInstrHits()`（tick handler）、
+    //   `pumpImpl()`（泵 / task continuation）里为 true；`renderFrame()` 里**恒 false**
+    //   （⇒ 存下来的 RunCtx 在 render 里仍 TypeError）。
+    // ★ 嵌套保存-恢复（`RunEntryScope`）：一次入口里再进一次入口不会把外层的门提前关掉。
+    // ⛔ 不要拿 `PluginHost::inCallback()` 当这个门：它只在 `start` / `onTrigger` 里为真，而 v2 的
+    //   task continuation / 泵 / tick handler 都要求这些面可用（父级裁决 H1/H2 取消）。
+    bool in_run_entry = false;
     std::uint64_t pump_serial = 0;  // 泵里的失败日志唯一性（`pump #N`；`PluginHost::log` 会去重）
     std::vector<Value> tasks;
     Value current_run_ctx;
@@ -354,6 +379,8 @@ struct Impl {
             // ★ S2b：once / task 持有的 JS 值也必须在 FreeContext 之前释放（与 hook handler 同一条）。
             //   正常路径已经由 `on_released` / `settleTasks` 逐条清；这里兜住"宿主先拆脚本"的顺序。
             onces.clear();
+            // ★ P0：`ctx.delay` 的 resolve 也是 `Value` ⇒ 必须在这一行之前释放（不 resolve、不跑 JS）。
+            delays.clear();
             tasks.clear();
             current_run_ctx.invalidate();
             JS_FreeContext(ctx);
@@ -378,6 +405,25 @@ struct Impl {
     void setHookHandler(std::uint32_t handle, Value fn) { hook_handlers[handle] = std::move(fn); }
     // erase ⇒ `Value` 析构 ⇒ `JS_FreeValue`（`on_released` / `onTick(null)` / 失败摘除的唯一出口）。
     void dropHookHandler(std::uint32_t handle) { hook_handlers.erase(handle); }
+    // ★ P0：Run 收口 ⇒ 丢掉**不再推进**的 `ctx.delay`（不 resolve、也不再跑 JS）。
+    //   为什么要清：那些 `resolve` 是 `Value`（必须在 `JS_FreeContext` 之前释放）；而且"Run 已
+    //   收口还在账上"会让 `hasPendingWork()` 永远真（readout 只能等 `--time-limit`）。
+    void clearDelays() { delays.clear(); }
+};
+
+// ★ P0：**Run 侧入口**作用域（H1/H2 取消的落点）。`value=true` 用于 `call()` / `runInstrHits()` /
+//   `pumpImpl()`；`value=false` 用于 `renderFrame()`（render 永不打开 Run 侧门）。
+// ★ 保存-恢复而不是"进入置 true、返回置 false"：入口可能嵌套（tick handler 里经宿主能力再进一次
+//   入口；render 边界的泵就在 render 里跑）⇒ 嵌套时内层退出必须把外层的值放回。
+struct RunEntryScope {
+    Impl* impl = nullptr;
+    bool prev = false;
+    RunEntryScope(Impl* i, bool value) : impl(i), prev(i->in_run_entry) { i->in_run_entry = value; }
+    ~RunEntryScope() {
+        if (impl != nullptr) impl->in_run_entry = prev;
+    }
+    RunEntryScope(const RunEntryScope&) = delete;
+    RunEntryScope& operator=(const RunEntryScope&) = delete;
 };
 
 // ★ S2a/S2c：sink 的自由函数（`createImpl` 要用，所以前置声明；定义在 hook trampoline 段之后，
@@ -1987,6 +2033,17 @@ lift::ui::PluginCallHost* callHost(JSContext* ctx) {
     return impl != nullptr ? impl->call_host : nullptr;
 }
 
+// ★ P0：**Run 侧入口**的统一门（H1/H2 取消后的唯一判据）。
+//   允许 = 有宿主来路 **且** 在一个 Run 侧入口里（`call()` / `runInstrHits()` / `pumpImpl()`）
+//   **且** Run 还没到终态。reject 的两个面：
+//     · `renderFrame()` ⇒ `in_run_entry == false`（存下来的 RunCtx 在 render 里仍 TypeError）；
+//     · `finish` / `fail` / `quit` 之后 ⇒ `runTerminal()`（同一 Run 里不再收新工作 / 不再改终态）。
+//   ⛔ 不要退回 `host->inCallback()`：那只覆盖 `start` / `onTrigger`，会把 task continuation / 泵 /
+//      tick handler 全挡掉（H1/H2 正是父级裁决要取消的那两条）。
+bool runSideAllowed(Impl* impl, lift::ui::PluginCallHost* host) {
+    return impl != nullptr && host != nullptr && impl->in_run_entry && !host->runTerminal();
+}
+
 // ---- `ctx.*` 的 trampoline 前置声明 ----
 // ★ 为什么需要：`buildRunCtx` / `makeUiObject` 比它们的定义**先用**。这个匿名命名空间里没有
 //   "头文件里统一声明"这回事 ⇒ 显式列一次（⛔ 不要靠挪定义顺序凑）。
@@ -2012,6 +2069,8 @@ JSValue jsCtxHookList(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxHookClear(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- S2b：异步面（`once` 返回 Promise；`task` 登记一个协程）----
 JSValue jsCtxOnce(JSContext*, JSValueConst, int, JSValueConst*);
+// ---- P0：`ctx.delay(ms)` → `Promise<void>`（墙钟；NON-DIFFABLE；由泵推进）----
+JSValue jsCtxDelay(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxTask(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- S2c：同步订阅面（`at` / `off`）与 Tick 的只读 `local` ----
 JSValue jsCtxAt(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2031,14 +2090,20 @@ JSValue jsCtxUiGet(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxLog(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxProfileBegin(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxProfileEnd(JSContext*, JSValueConst, int, JSValueConst*);
+// ★ P0：`ctx.once` 的 where 与 `ctx.at` **同一份**校验（`readAtWhere`；定义在下面）。
+bool readAtWhere(JSContext*, JSValueConst, lift::InstrHookWhere*, std::string*);
+// ★ P0：`ctx.delay` 的 `ms` 也用同一套严格整数口径（`readAtWhereU32`；定义在下面）。
+bool readAtWhereU32(JSContext*, const Value&, const char*, double, double, std::uint32_t*,
+                    std::string*);
 JSValue jsCtxFail(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxFinish(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxQuit(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- AppData（同步只读宿主 I/O；只 RunCtx；宿主段包 `HostPause`）----
 JSValue jsCtxAppDataStat(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- Config（域式 JSON 配置；RunCtx 的 `ctx.config` 与经典回退 HUD 的 `host.config`）----
-// ★ 一份实现体、两条门（`configCall` 判定）：Run 回调（`host->inCallback()`）与 render 帧
-//   （`impl.current`/`builder` + 不可枚举的 `__render` 标记）。⛔ 不要复制第二套校验 / 值转换。
+// ★ 一份实现体、两条门（`configCall` 判定）：Run 侧入口（`runSideAllowed` = Run 回调 / task
+//   continuation / 泵）与 render 帧（`impl.current`/`builder` + 不可枚举的 `__render` 标记）。
+//   ⛔ 不要复制第二套校验 / 值转换。
 Value makeConfigObject(Impl&, bool render);
 JSValue jsCtxConfigDomain(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxConfigGet(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2054,9 +2119,10 @@ JSValue jsCtxReadFrames(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxReadScriptPos(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsRenderGameMouse(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsRenderGameLocalFrames(JSContext*, JSValueConst, int, JSValueConst*);
-// ★ S2：`RenderCtx.profile` 的 trampoline 与 RunCtx 的**分开两份**（`jsCtxProfile*` 仍只认
-//   `inCallback()` ⇒ render 里拿一个存下来的 RunCtx 调 profile 仍 TypeError；见
-//   `plugin/render-stored-runctx-rejected`）。render 的两个判 `impl.current != nullptr`。
+// ★ S2：`RenderCtx.profile` 的 trampoline 与 RunCtx 的**分开两份**（`jsCtxProfile*` 走
+//   `runSideAllowed` ⇒ render 里 `in_run_entry == false` ⇒ 存下来的 RunCtx 调 profile 仍 TypeError；
+//   `RenderCtx.profile` 自己的那份判 `impl.current != nullptr`）。见
+//   `plugin/render-stored-runctx-rejected`。
 JSValue jsRenderProfileBegin(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsRenderProfileEnd(JSContext*, JSValueConst, int, JSValueConst*);
 
@@ -2489,14 +2555,15 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "hook", std::move(hook));
         if (!ok) qjs::clearException(ctx);
     }
-    // ---- S2b：异步面 = { once, task }（只 RunCtx；RenderCtx 没有）----
-    //   `once` 返回 Promise<InstrTick>（timeout 必填 > 0）；`task` 登记一个 async 协程。
-    //   两者都让 Run 保持存活（`PluginScript::hasPendingWork`），直到 settle / 超时 / 收口。
+    // ---- S2b：异步面 = { once, delay, task }（只 RunCtx；RenderCtx 没有）----
+    //   `once` 返回 Promise<InstrTick>（timeout 必填 > 0）；`delay` 返回 Promise<void>（墙钟）；
+    //   `task` 登记一个 async 协程。三者都让 Run 保持存活（`PluginScript::hasPendingWork`）。
     if (ok) ok = setFunction(ctx, obj.raw(), "once", jsCtxOnce, 2, nullptr);
+    if (ok) ok = setFunction(ctx, obj.raw(), "delay", jsCtxDelay, 1, nullptr);
     if (ok) ok = setFunction(ctx, obj.raw(), "task", jsCtxTask, 1, nullptr);
     // ---- S2c：同步订阅面 = { at, off }（只 RunCtx）----
-    //   `at` 门 = `inCallback()`（与 once / task 同一条）；`off` 门 = `call_host != nullptr`
-    //   （只减操作 ⇒ tick / 泵 / render 里都能撤；见 d.ts 与合同）。返回订阅 id / boolean。
+    //   `at` / `once` / `task` / `delay` 的门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；
+    //   `off` 门 = `call_host != nullptr`（只减操作 ⇒ tick / 泵 / render 里都能撤）。
     if (ok) ok = setFunction(ctx, obj.raw(), "at", jsCtxAt, 2, nullptr);
     if (ok) ok = setFunction(ctx, obj.raw(), "off", jsCtxOff, 1, nullptr);
     if (!ok) qjs::clearException(ctx);
@@ -3145,9 +3212,11 @@ bool buildRenderCtx(Impl& impl, Value* out) {
 TickRef* tickRefOf(JSContext* ctx, JSValueConst obj, Impl* impl);
 
 // ★ S2c-2：`Tick.edit.global.set` 的门 = `tickRefOf`（这一拍没 stale）+ `host->editAttached()`
-//   （**装配**，不含 `in_callback_`）。⛔ 不把 `in_callback_` 打开：那会一次放开 `ctx.fail` /
-//   `finish` / `quit` / `trigger` / `hook.*` / `profile` / `config` 七个副作用 —— "写面不是把
-//   in_callback_ 打开"的唯一可判读数就是同一个 tick handler 里 `ctx.fail` 仍 TypeError。
+//   （**装配**，不含 `in_callback_`）。⛔ 不把 `in_callback_` 打开：那会一次放开 v1 写面
+//   （`ctx.edit` / `ctx.input` / `ctx.trigger` / `ctx.hook.*`）。★ P0 起 Run 侧控制面
+//   （`fail` / `finish` / `quit` / `profile` / `config` / `once` / `at` / `task` / `delay`）走的是
+//   `in_run_entry`（tick 里**允许**），与 `in_callback_` 正交 ⇒ "写面不是把 in_callback_ 打开"的
+//   可判读数仍是同一个 tick handler 里 v1 `ctx.edit` 抛 TypeError（见 `at-chain` 的 tick-edit）。
 bool tickStaleError(JSContext* ctx, JSValueConst this_val, Impl* impl, const char* fn) {
     if (impl == nullptr || tickRefOf(ctx, this_val, impl) == nullptr) {
         JS_ThrowPlainError(ctx, "%s: 这个 Tick 已过期（stale_tick：Tick 只在产生它的那次入口内有效）",
@@ -3405,45 +3474,35 @@ JSValue jsCtxHookClear(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, 
 // S2b · `ctx.once(where, { timeoutMs })` → `Promise<InstrTick>`
 //
 // 语义（父级裁决，写死）：
-//   · `where` = `{ script, pos }`（本切片只收这一种；`{script,lo,hi}` / `{opcode}` 是 S2c）；
+//   · `where` = **与 `ctx.at` 完全相同的五种形态**（共用 `readAtWhere`）：
+//     `{script,pos}` · `{script,lo,hi}`（`[lo,hi)`）· `{script}` · `{opcode}` · `{script,opcode}`。
+//     ★ `{script}` 的语义 = **该脚本下一条指令**（整本脚本第一条命中即 resolve）—— 它替代 v1
+//       `atReadPoint("any")` 的"下一拍采样"（save 翻页链用它重读页号；频率是脚本指令而非读点）。
 //   · `timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：与 v1 `AtReadPoint.max_fires` 一样
 //     "不给你一个永不结束的等待"；
 //   · 命中 ⇒ resolve 一个**与 `onTick` 同形**的只读 Tick（`makeTickObject` 的唯一实现）；
 //   · 超时 = **失败截止**：`pump()` 里先 reject（让 `catch` 在同一个泵里 drain 到、可以 `log`），
 //     随后宿主 `fail("once-timeout", …)` —— 即使 rejection 被 catch 也照样 fail Run。
+//   · 门 = **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation / 泵）；render 里仍 TypeError。
 // ★ 实现 = 一条**临时** instr hook（owner = 本 Run；S0 的 owner 收口会自动清）+ `Impl::onces` 的一行账。
 //   ⛔ 没有独立 timer：到期判定只发生在既有泵（`PluginScript::pump`，读点 / render 边界）。
 // =====================================================================================
 JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.once: 只用于 Run 回调（start / onTrigger）里");
-        }
         Impl* impl = implOf(ctx);
-        if (impl == nullptr) return JS_ThrowTypeError(ctx, "ctx.once: 实例缺失");
-        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.once(where, { timeoutMs })");
-        if (!JS_IsObject(argv[0])) {
-            return JS_ThrowTypeError(ctx, "ctx.once: where 必须是 { script, pos }");
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(ctx,
+                                     "ctx.once: 只用于 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.once(where, { timeoutMs })");
         if (!JS_IsObject(argv[1])) {
             return JS_ThrowTypeError(ctx, "ctx.once: opts 必须是 { timeoutMs }（timeoutMs 必填且 > 0）");
         }
         std::string why;
-        std::string script;
-        if (!readPluginText(ctx, argv[0], "script", &script, &why)) {
+        lift::InstrHookWhere where;
+        if (!readAtWhere(ctx, argv[0], &where, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.once: %s", why.c_str());
-        }
-        if (script.empty()) {
-            return JS_ThrowTypeError(ctx,
-                                     "ctx.once: where.script 必须非空（marker 文件名，如 \"FIELD.BIN\"）");
-        }
-        std::int64_t pos = 0;
-        if (!readPluginInt(ctx, argv[0], "pos", true, 0, &pos, &why)) {
-            return JS_ThrowTypeError(ctx, "ctx.once: %s", why.c_str());
-        }
-        if (pos < 1 || pos > 4294967295ll) {
-            return JS_ThrowTypeError(ctx, "ctx.once: where.pos 必须是正的 label 坐标（1..2^32-1）");
         }
         std::int64_t timeout = 0;
         if (!readPluginInt(ctx, argv[1], "timeoutMs", true, 0, &timeout, &why)) {
@@ -3476,10 +3535,8 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         const char* code = nullptr;
         // ★ S2c：once 的临时 hook 走 `instrHookAddWhere(..., Once)` —— **不再**与 v1 `ctx.hook.at`
         //   共用 `(script,pos)` 去重（那是 v1 的已发布语义；once 是新面，同点共存是它的用法）。
-        lift::InstrHookWhere where;
-        where.form = lift::InstrHookForm::Pos;
-        where.script = script;
-        where.pos = static_cast<std::uint32_t>(pos);
+        // ★ P0：`where` 直接来自 `readAtWhere`（五种形态与 `ctx.at` 逐条一致）⇒ `{script}` 的
+        //   "下一条指令"就是 Script 形态的第一次命中。
         const std::uint32_t handle =
             host->instrHookAddWhere(where, lift::InstrHookKind::Once, &code);
         if (handle == 0) {
@@ -3495,8 +3552,7 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         entry.reject = std::move(reject_fn);
         entry.deadline_ns = now_ns + timeout_ns;
         entry.serial = impl->next_once_serial++;
-        entry.script = script;
-        entry.pos = static_cast<std::uint32_t>(pos);
+        entry.where = where;
         entry.timeout_ms = static_cast<std::uint32_t>(timeout);
         try {
             impl->onces[handle] = std::move(entry);
@@ -3512,22 +3568,77 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 }
 
 // =====================================================================================
+// P0 · `ctx.delay(ms)` → `Promise<void>`（**墙钟**；NON-DIFFABLE）
+//
+// 语义（父级裁决，写死）：
+//   · `ms` **必填 / 整数 / `0 <= ms <= 24h`**（越界 / 小数 / 非数字 ⇒ TypeError；⛔ 不截断、不 toString）；
+//   · 返回 `Promise<void>`；**不是 trigger、不 fail Run**（到点只是 resolve）；
+//   · 由**既有泵**推进（读点 / render 入口的 `pumpImpl`）——⛔ 没有独立 timer；`hasPendingWork` 计入
+//     它 ⇒ 等待期间 Run 保持存活（`run=waiting`）；
+//   · Run 收口时整表清掉（`PluginScript::onRunClosed`）：**不 resolve、也不再跑 JS**；
+//   · 门 = **Run 侧入口**（`runSideAllowed`）；render 里 TypeError。
+// ★ NON-DIFFABLE：墙钟延迟随机器 / 负载变化，⛔ 不作为 A/B 或指纹判据（只用于"等一拍"的脚本逻辑）。
+// =====================================================================================
+JSValue jsCtxDelay(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(ctx,
+                                     "ctx.delay: 只用于 Run 侧入口（Run 回调 / task continuation / 泵）里");
+        }
+        if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.delay(ms): ms 必填（0..86400000）");
+        std::uint32_t ms = 0;
+        std::string why;
+        {
+            Value ms_v(ctx, JS_DupValue(ctx, argv[0]));
+            // ★ 与 `where` 的整数口径同一个（`readAtWhereU32`：必须是有限整数、⛔ 不截断小数）。
+            if (!readAtWhereU32(ctx, ms_v, "delay.ms", 0.0, 86400000.0, &ms, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.delay: %s（0..86400000 = 24h）", why.c_str());
+            }
+        }
+        const std::uint64_t now_ns = steadyNowNs();
+        const std::uint64_t ns = static_cast<std::uint64_t>(ms) * 1'000'000ull;
+        JSValue funcs[2] = {JS_UNDEFINED, JS_UNDEFINED};
+        Value promise(ctx, JS_NewPromiseCapability(ctx, funcs));
+        if (promise.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.delay: Promise 创建失败");
+        }
+        Value resolve_fn(ctx, funcs[0]);
+        Value reject_fn(ctx, funcs[1]);  // delay 不会 reject；这一份立刻释放（只留 resolve）。
+        const std::uint32_t serial = impl->next_delay_serial++;
+        DelayEntry entry;
+        entry.serial = serial;
+        entry.resolve = std::move(resolve_fn);
+        entry.deadline_ns = now_ns + ns;
+        entry.ms = ms;
+        impl->delays.emplace(serial, std::move(entry));
+        return promise.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.delay: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// =====================================================================================
 // S2b · `ctx.task(async (ctx) => …)`：登记一个协程（返回 Promise 是**要求**，不是返回值）
 //
-// ★ 门 = `inCallback()`：tick / pump / render 里 `call_host` 非空但**不在 Run 回调**里 ⇒ 必须
-//   TypeError。这不是"顺手关掉"—— 那三个入口的 continuation 只允许 `log` / `read` 这类只读口
-//   （否则等于在 tick 里开了一条能跑任意用户 JS 的路）。
+// ★ 门 = **Run 侧入口**（`runSideAllowed`）：Run 回调 / task continuation / 泵里都可以；
+//   render 里 `in_run_entry == false` ⇒ TypeError。★ `current_run_ctx` 仍只在 `call()` 入口内有效
+//   ⇒ 在 continuation 里再 `ctx.task(...)` 会因"没有当前 RunCtx"报 TypeError（本轮不改这条）；
+//   `ctx.once` / `ctx.at` / `ctx.delay` 不需要 `current_run_ctx`，所以 continuation 里可用。
 // ★ 传的是**当前 RunCtx**（`call()` 里造的那个对象，存进 `Impl::current_run_ctx`）：同一个
 //   `now` 快照 / 同一个 `state`；⛔ 不做第二个 ctx（那会让 per-Run 语义分叉）。
 // =====================================================================================
 JSValue jsCtxTask(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.task: 只用于 Run 回调（start / onTrigger）里");
-        }
         Impl* impl = implOf(ctx);
-        if (impl == nullptr) return JS_ThrowTypeError(ctx, "ctx.task: 实例缺失");
+        // ★ P0：门 = Run 侧入口（与 `once` / `at` / `delay` 同一条）。
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(ctx,
+                                     "ctx.task: 只用于 Run 侧入口（Run 回调 / task continuation / 泵）里");
+        }
         if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
             return JS_ThrowTypeError(ctx, "ctx.task(fn): fn 必须是 async 函数");
         }
@@ -3560,7 +3671,7 @@ JSValue jsCtxTask(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 //   · 同一次派发里按注册序（= handle 升序）跑成**一条链**：handler 调 `next()` 继续，不调 = 截断；
 //     `next()` 二次 = 幂等；链外调 `next()`（存起来 / await 之后）⇒ 抛 `next_outside_chain`；
 //   · 返回订阅 id（> 0）；`no_injection` ⇒ `undefined` + 宿主一行**响亮** error；形状错 ⇒ TypeError；
-//   · 门 = `inCallback()`（与 `ctx.once` / `ctx.task` 同一条）；`ctx.task` 的同步首段里可以调；
+//   · 门 = **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation / 泵）；render 里 TypeError；
 //   · 每条订阅让 Run **保持存活**（`hasPendingWork`）⇒ 要收口就 `ctx.off(id)` / `finish` / `quit`；
 //   · handler 抛错 / 超预算 ⇒ **撤整条订阅**（否则留下"永远不跑、却算 Run 存活"的僵尸）+
 //     一行 error（`at #N hit #M`）+ 截断链；**不 fail Run**。
@@ -3776,12 +3887,12 @@ std::string describeAtWhere(const lift::InstrHookWhere& where) {
 JSValue jsCtxAt(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        // ★ 门 = `inCallback()`（与 `ctx.once` / `ctx.task` 同一条；⛔ 不新造第二个"注册门"）。
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.at: 只用于 Run 回调（start / onTrigger）里");
-        }
         Impl* impl = implOf(ctx);
-        if (impl == nullptr) return JS_ThrowTypeError(ctx, "ctx.at: 实例缺失");
+        // ★ P0：门 = Run 侧入口（与 `once` / `task` / `delay` 同一条；H1/H2 已取消）。
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(ctx,
+                                     "ctx.at: 只用于 Run 侧入口（Run 回调 / task continuation / 泵）里");
+        }
         if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.at(where, handler)");
         if (!JS_IsFunction(ctx, argv[1])) {
             return JS_ThrowTypeError(ctx, "ctx.at: handler 必须是函数（tick, next) => …）");
@@ -4057,8 +4168,9 @@ JSValue jsHookClear(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValue
 //   · 门 = `inCallback()`（与 `handle.patch` 等 4 个句柄出口同形）⇒ render 里（含**存下来的
 //     RunCtx**）调它必须 TypeError（`plugin/render-stored-runctx-rejected` 的 OPS 表）。
 // ★ S2a 的 tick 是 S2c `Tick` 的**只读前身**：`{id, script, pos, opcode?, log}`。
-//   `in_callback_` 在 tick 入口**保持 false** ⇒ `edit/input/trigger/fail/finish/quit/profile/
-//   config/hook.*` 全 TypeError（这是"只读"的唯一硬边界，写在施工图 §D 的对齐表里）。
+//   `in_callback_` 在 tick 入口**保持 false** ⇒ v1 写面（`ctx.edit/input/trigger/hook.*`）仍
+//   TypeError。★ P0 起 Run 侧控制面（`fail/finish/quit/profile/config/once/at/task/delay`）在 tick
+//   入口**可用**（门 = `Impl::in_run_entry`；`plugin/once-from-task` / `at-from-task` 钉住它）。
 // =====================================================================================
 JSValue jsHookOnTick(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
@@ -4329,10 +4441,9 @@ void runOnceResolve(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit)
 bool runOnceTimeout(Impl& impl, std::uint32_t handle, std::string* reason_out) {
     const auto entry = impl.onces.find(handle);
     if (entry == impl.onces.end()) return false;
-    char pos_hex[16];
-    std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", entry->second.pos);
+    // ★ P0：reason 用与 `ctx.at` 同一份 where 描述（五种形态都可能：`{script}` / `{opcode}` …）。
     const std::string reason = "once timeout (#" + std::to_string(entry->second.serial) + "): " +
-                               entry->second.script + " pos=" + pos_hex + "（timeoutMs=" +
+                               describeAtWhere(entry->second.where) + "（timeoutMs=" +
                                std::to_string(entry->second.timeout_ms) + "）";
     rejectOnceValue(impl.ctx, entry->second.reject.raw(), reason);
     // ★ S2b-4：先摘账再撤 hook（理由同 `runOnceResolve`）⇒ `on_released` 不会把这次 timeout 再 reject 一次。
@@ -4340,6 +4451,18 @@ bool runOnceTimeout(Impl& impl, std::uint32_t handle, std::string* reason_out) {
     lift::instrHookRemove(handle);
     if (reason_out != nullptr && reason_out->empty()) *reason_out = reason;
     return true;
+}
+
+// 到期：**先摘账、再 resolve**（`Promise<void>`）—— continuation 里可能再注册一个 delay，
+// 所以不能一边迭代一边改表。★ 不 fail Run（delay 不是 trigger）。
+void runDelayDue(Impl& impl, std::uint32_t serial) {
+    const auto it = impl.delays.find(serial);
+    if (it == impl.delays.end()) return;
+    Value resolve = std::move(it->second.resolve);
+    impl.delays.erase(it);
+    JSValueConst args[1] = {JS_UNDEFINED};
+    Value ignored(impl.ctx, JS_Call(impl.ctx, resolve.raw(), JS_UNDEFINED, 1, args));
+    if (ignored.isException()) qjs::clearException(impl.ctx);
 }
 
 // 每个入口末尾（drain 之后）检查 task：FULFILLED ⇒ 移除；REJECTED ⇒ **fail Run**；PENDING ⇒ 保留。
@@ -4375,22 +4498,42 @@ void settleTasks(Impl& impl, lift::ui::PluginCallHost* host) {
  * `renderFrame()` 开头）。
  *
  * 语义 = 在**非 tick 入口**推进所有到期 / 可推进的异步状态：
- *   ① `Impl::onces` 的 deadline 到期 ⇒ reject（先不 fail）；
+ *   ① `Impl::delays` 的 deadline 到期 ⇒ **resolve**（`Promise<void>`；不 fail Run）；
+ *   ①b `Impl::onces` 的 deadline 到期 ⇒ reject（先不 fail）；
  *   ② 用**同一 CPU 预算窗** drain 到静止（与 S2a 的入口 drain 同形）；
  *   ③ drain 之后检查 task settle；
  *   ④ 若刚才有 timeout ⇒ **现在** fail Run（`catch` 已经有机会 log；用户 catch 了也照样 fail）。
  *
- * ★ `in_callback_` 保持 false（那一位在 `PluginHost` 手里，本函数够不到）⇒ 泵里的 continuation
- *   只有 `log` / `read` / `ui` 这类只读口；`edit` / `input` / `trigger` / `fail` / … 仍 TypeError。
+ * ★ P0：泵是 **Run 侧入口**（`RunEntryScope`）⇒ 里面的 continuation 可以 `once` / `at` / `task` /
+ *   `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat` / `delay`。v1 写面
+ *   （`ctx.edit/input/trigger/hook.*`）的 `inCallback` 门**没动**。`in_callback_` 仍 false
+ *   （那一位在 `PluginHost` 手里，本函数够不到）—— 两套门正交，⛔ 不要合并。
  * ★ **预算保存-恢复**：render 边界调用时 `deadline_ns` 是 present_sdl 给本帧的墙钟预算，
  *   ⛔ 不能被泵清掉；泵自己只用 CPU 窗（与 S2a 的入口一致）。`overran` 取**或**：泵自己超预算要
  *   留下读数（guard `plugin/pump-budget`），但不能把外层入口的标记冲掉。
  */
 void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Budget& budget) {
     if (impl.ctx == nullptr) return;
+    // ★ P0：Run 已到终态 ⇒ 不再推进任何异步状态（`delay` 的 resolve 也不调）：清表 + 早退。
+    if (host != nullptr && host->runTerminal()) {
+        impl.clearDelays();
+        return;
+    }
+    // ★ P0：泵是 **Run 侧入口** ⇒ 里面的 continuation 可以注册 once/at/task、可以 finish/fail/quit、
+    //   可以读 config / appdata / profile（H1/H2 已取消）；render 里的泵同样打开（render 自己的
+    //   `RunEntryScope(..., false)` 在泵返回之后才重新生效 —— 嵌套的保存-恢复）。
+    RunEntryScope run_entry(&impl, true);
+    // ①a `ctx.delay` 到期 ⇒ resolve（**不 fail Run**）。与 once 的 timeout 分开：那个是失败截止。
+    std::vector<std::uint32_t> due_delays;
+    const std::uint64_t now_ns = steadyNowNs();
+    for (const auto& kv : impl.delays) {
+        if (now_ns >= kv.second.deadline_ns) due_delays.push_back(kv.first);
+    }
+    for (const std::uint32_t serial : due_delays) {
+        runDelayDue(impl, serial);
+    }
     // ① 到期检查（**墙钟**；与 2 ms 的 CPU 窗不同源，见 `OnceEntry`）。
     std::vector<std::uint32_t> expired;
-    const std::uint64_t now_ns = steadyNowNs();
     for (const auto& kv : impl.onces) {
         if (now_ns >= kv.second.deadline_ns) expired.push_back(kv.first);
     }
@@ -4462,7 +4605,11 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
 // S2c · 链（`ctx.at`）：一次派发 = 一个 host→JS 入口 = 一条链
 //
 // 与 `call()` 的对齐（施工图 §D 的表）：
-//   · `in_callback_` **保持 false** ⇒ 写类 trampoline 全 TypeError（"只读"的硬边界）；
+//   · `in_callback_` **保持 false** ⇒ v1 写面（`ctx.edit/input/trigger/hook.*`）仍 TypeError；
+//   · ★ P0：tick 入口是 **Run 侧入口**（`Impl::in_run_entry = true`）⇒ 存下来的 RunCtx 上的
+//     `once` / `at` / `task` / `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat`
+//     **允许**（父级裁决：tick handler 没有 RunCtx 参数，但"存到模块变量再用"按 Run 侧处理）；
+//     tick 自己的写面仍是 `Tick`（`tick.edit/input/patch`）；
 //   · `call_host` = `call_host_persistent`（同 render；`tick.log` / 只读来路）；
 //   · 预算 = `Budget{}` 生产缺省（sink 拿不到 runner 的预算；tick 是观察者）；
 //   · 失败 = **摘 handler / 撤订阅 + 一行 log**，**不 fail Run**（观察者挂了让 guest 继续跑）。
@@ -4529,6 +4676,10 @@ void runHookStepV1(Impl& impl, std::uint32_t handle, const lift::InstrHit& hit, 
  */
 void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     if (impl.ctx == nullptr || hits == nullptr || n == 0) return;
+    // ★ P0：tick handler 是 **Run 侧入口**（脚本把 RunCtx 存到模块变量后在 tick 里用它 = 允许；
+    //   `once` / `at` / `task` / `finish` / … 都可调）。tick 自己的**写面**仍是 `Tick`
+    //   （`tick.edit/input/patch`）；v1 `ctx.edit/input/trigger/hook.*` 的门没动（仍是 `inCallback`）。
+    RunEntryScope run_entry(&impl, true);
 
     // ⓪ 这次派发里有没有**本实例**的订阅 / handler？没有 ⇒ 零成本早退
     //   （hook 表是进程级的：另一个存活的 Impl 的 sink 也会收到同一次 on_hits）。
@@ -5459,11 +5610,12 @@ bool installGlobalLog(Impl& impl, std::string* err) {
 JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        // ★ C2b 复审 F2：`profile` 是 **Run 回调**的出口（RenderCtx 有自己的一份
-        //   `jsRenderProfileBegin`）⇒ 判"正在回调"，
-        //   ⛔ 只判 `host != nullptr`（render 期 host 也非空，那样"存下来的 RunCtx"就能用）。
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.profile.begin: 不在插件回调里");
+        // ★ P0：门 = Run 侧入口（与 `once` / `at` / `delay` 同一条）。render 面有**自己**的
+        //   `jsRenderProfileBegin`（见下），⛔ 不复用这一份。
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.profile.begin: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         std::string label;
         if (argc >= 1 && !JS_IsUndefined(argv[0]) && !qjs::toString(ctx, argv[0], &label)) {
@@ -5483,8 +5635,10 @@ JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, J
 JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.profile.end: 不在插件回调里");
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.profile.end: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         std::string why;
         // ★ **宿主调用暂停**（`REQ-01M86VRT1YP53CJS0M885FCCJM`）：`profile.end` 是**宿主能力** ——
@@ -5507,8 +5661,9 @@ JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
 // ★ `begin(label?)` 是 `void`（失败 = TypeError，与 RunCtx 同形）；**`end()` 返回结果对象**
 //   `{ok, text, error}`（与旧 UiScript 的 `host.profileEnd()` 同形）—— S2 复审 I3：HUD 要判报告
 //   文本里的 `INVALID` token ⇒ 文本必须回 JS，⛔ 不能只写 stdout。
-// ★ ⛔ 不复用 `jsCtxProfile*`：那两个靠 `inCallback()` 区分"存下来的 RunCtx"，放宽会破
-//   `plugin/render-stored-runctx-rejected`。这里判 `impl.current != nullptr`（render 的判据）。
+// ★ ⛔ 不复用 `jsCtxProfile*`：那两个走 `runSideAllowed`（render 里 `in_run_entry == false`），
+//   而本份判 `impl.current != nullptr`（render 的判据）—— 两条门正交，见
+//   `plugin/render-stored-runctx-rejected`。
 // ★ `end` 同样走 `HostPause`（宿主的报告 / 剪贴板成本不算用户 JS；同一口径）。
 // =======================================================================================
 JSValue jsRenderProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
@@ -5570,8 +5725,10 @@ JSValue jsRenderProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc
 JSValue jsCtxFail(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.fail: 不在插件回调里");
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.fail: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         std::string name;
         std::string reason;
@@ -5595,8 +5752,10 @@ JSValue jsCtxFail(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 JSValue jsCtxFinish(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.finish: 不在插件回调里");
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.finish: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.finish(exitCode, reason?)");
         double code = 0.0;
@@ -5620,8 +5779,10 @@ JSValue jsCtxFinish(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 JSValue jsCtxQuit(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.quit: 不在插件回调里");
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.quit: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         std::string reason;
         if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) &&
@@ -5644,8 +5805,10 @@ JSValue jsCtxQuit(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.appdata.stat: 不在插件回调里");
+        Impl* impl = implOf(ctx);
+        if (!runSideAllowed(impl, host)) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.appdata.stat: 不在 Run 侧入口（Run 回调 / task continuation / 泵）里");
         }
         if (argc < 1 || !JS_IsString(argv[0])) {
             return JS_ThrowTypeError(ctx, "ctx.appdata.stat(rel): rel 必须是字符串（相对 appdata 根）");
@@ -5690,8 +5853,8 @@ JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.5 / §4.6 / §6 行 41–42；值类型与上限在
 //       `runtime/config.h`（语言无关），宿主实现 = `src/plugin/plugin_config.cpp`（PIMPL）。
 //
-// ★ `ctx.config` 的宿主实现只有一份：RunCtx（`inCallback()`）与两条渲染面（`host.config` /
-//   `RenderCtx.config`，`__render` + current/builder）的门都在 `configCall`。
+// ★ `ctx.config` 的宿主实现只有一份：RunCtx（Run 侧入口 = `runSideAllowed`）与两条渲染面
+//   （`host.config` / `RenderCtx.config`，`__render` + current/builder）的门都在 `configCall`。
 //   render 可经宿主桥写 `plugin-config.json`，仍⛔ 不做 guest 写 / 任意路径 I/O
 //   （`ctx.appdata` 仍只 RunCtx）。
 // ★ 为什么值走**中立树**而不是 JSON 字符串：沙箱里没有 `JSON`（`JS_NewContextRaw` + BaseObjects），
@@ -5913,8 +6076,9 @@ JSValue throwPlainError(JSContext* ctx, const std::string& message) {
 constexpr const char* kConfigDomainProp = "__domain";
 // ★ D2：渲染面的不可枚举标记（RunCtx 的对象**没有**它）。经典 `host.config` 与
 //   `RenderCtx.config` 的 config / domain 对象都带 `__render` ⇒ trampoline 走"正在 render"那条门；
-//   RunCtx 的走 `inCallback()`。⛔ 不做帧令牌：经典 `host` 是**全局对象**（跨帧合法），
-//   而 `__render` 挡的是"把对象存下来、离开 render 再调"（两条渲染面同一口径）。
+//   RunCtx 的走 `runSideAllowed`（Run 回调 / task continuation / 泵；render 里 false）。
+//   ⛔ 不做帧令牌：经典 `host` 是**全局对象**（跨帧合法），而 `__render` 挡的是"把对象存下来、
+//   离开 render 再调"（两条渲染面同一口径）。
 constexpr const char* kConfigRenderProp = "__render";
 
 // 在 config / domain 对象上装渲染标记（不可枚举、不可写、不可配置）。
@@ -5939,8 +6103,9 @@ lift::plugin::ConfigBridge* configBridgeFor(const Impl& impl, bool render) {
 
 // 本调用的桥 + **门**（一份实现体，两条门）：
 //   · render 面（对象带 `__render`）：必须正在 render（`current` / `builder` 非空）；
-//   · Run 面（无标记）：必须正在 Run 回调（`host->inCallback()`）—— 存下来的 RunCtx 在 render
-//     里调用、或存下来的 `host.config` domain 在回调外调用，都走这条 ⇒ TypeError。
+//   · Run 面（无标记）：必须正在 **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation /
+//     泵）—— 存下来的 RunCtx 在 render 里调用（`in_run_entry == false`）、或存下来的 `host.config`
+//     domain 在回调外调用，都走这条 ⇒ TypeError。
 // 返回 nullptr ⇒ `*why` 是原因（调用方转 TypeError）。
 lift::plugin::ConfigBridge* configCall(JSContext* ctx, JSValueConst this_val, std::string* why,
                                        bool* render_face) {
@@ -5973,8 +6138,10 @@ lift::plugin::ConfigBridge* configCall(JSContext* ctx, JSValueConst this_val, st
         return bridge;
     }
     lift::ui::PluginCallHost* host = impl->call_host;
-    if (host == nullptr || !host->inCallback()) {
-        *why = "不在插件回调里";
+    // ★ P0：Run 面的门 = **Run 侧入口**（Run 回调 / task continuation / 泵）；render 里打开的是
+    //   "存下来的 RunCtx 的 config" ⇒ `in_run_entry == false` ⇒ TypeError（渲染面走上面的分支）。
+    if (!runSideAllowed(impl, host)) {
+        *why = "不在 Run 侧入口（Run 回调 / task continuation / 泵）里";
         return nullptr;
     }
     lift::plugin::ConfigBridge* bridge = host->config();
@@ -6318,14 +6485,23 @@ public:
     //   不算的话 `start` 返回 null 的 Run 第一拍就被收口、订阅被撤掉（`plugin/at-keeps-run` 红）。
     bool hasPendingWork() const override {
         if (impl_ == nullptr) return false;
-        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->hook_handlers.empty() ||
-               !impl_->at_subs.empty();
+        // ★ P0：`ctx.delay` 也是待推工作（等待期间 Run 必须活着，否则到期没人推进）。
+        return !impl_->tasks.empty() || !impl_->onces.empty() || !impl_->delays.empty() ||
+               !impl_->hook_handlers.empty() || !impl_->at_subs.empty();
     }
 
     // ★ S2b：非 tick 入口的泵（唯一实现 = `pumpImpl`；调用点 = `PluginHost::onReadPoint` /
-    //   `renderFrame()` 开头）。`in_callback_` 保持 false ⇒ 泵里的 continuation 只读。
+    //   `renderFrame()` 开头）。`in_callback_` 保持 false，但 ★ P0 起泵是 Run 侧入口
+    //   （`in_run_entry`）⇒ 里面的 continuation 可以 once/at/task/finish/…（见 `pumpImpl`）。
     void pump(PluginCallHost& host, const lift::plugin::Budget& budget) override {
         if (impl_ != nullptr) pumpImpl(*impl_, &host, budget);
+    }
+
+    // ★ P0：Run 收口 ⇒ 丢掉不再推进的 `ctx.delay`（不 resolve、也不再跑 JS）。
+    //   `PluginHost::releaseRunHooks()` 是唯一调用点（fail / finish / quit / runner done /
+    //   budget 超限 / 卸载 / 析构都经它）⇒ 不新增"第二个收口点"。
+    void onRunClosed() override {
+        if (impl_ != nullptr && impl_->ctx != nullptr) impl_->clearDelays();
     }
 
     void shutdown() override { impl_->shutdown(); }
@@ -6364,6 +6540,11 @@ private:
             if (err != nullptr) *err = "quickjs: 插件已 shutdown";
             return false;
         }
+        // ★ P0：**render 永不打开 Run 侧门** —— 存下来的 RunCtx 里的 fail / finish / quit / profile /
+        //   appdata / config / once / at / task / delay 一律 TypeError（既有守卫
+        //   `plugin/render-stored-runctx-rejected`）。变异条目 `plugin-render-gate` 把下面这个
+        //   `false` 改成 `true` ⇒ 那条守卫当场红。
+        RunEntryScope render_entry(&impl, /*run=*/false);
         // ★ S2b-2（复审 S2-2）：Run 已到**终态**（failed / finished / quit / runner failed）⇒
         //   与 `PluginHost::onReadPoint` 的早退**同口径**：不泵、不 settle、不跑用户 JS。
         //   Run 收口后窗口档每个 present 仍会调 render；继续 drain 用户 continuation 等于绕过
@@ -6374,7 +6555,8 @@ private:
             return true;
         }
         // ★ S2b：**render 边界**的泵（没有第三个 pump 概念）。`call_host` 用 persistent 那份
-        //   （render 期间 `inCallback()` 恒 false ⇒ 泵里的 continuation 只有只读口）。
+        //   （render 自己的 Run 侧门是 **false**；泵在自己作用域里临时打开 ⇒ 泵的 continuation 可用
+        //   注册 / 控制面，render 本体仍不可用 —— 嵌套的保存-恢复）。
         //   ★ 必须在 `setBudget` 之后调用（present_sdl 每帧先设本帧墙钟预算）——`pumpImpl`
         //   自己**保存-恢复** `deadline_ns`，所以本帧的 20 ms 不会被子泵的 CPU 窗冲掉。
         // ★ S2b-2（复审 S3）：`overran` 也要保存-恢复。本帧 render 的预算窗从 0 起（先清），泵之后
@@ -6491,6 +6673,9 @@ private:
         //   宿主替用户 JS 花了多少 CPU"，跨回调累计会让下一次的预算凭空变宽。
         impl.paused_ns = 0;
         impl.call_host = &host;
+        // ★ P0：本函数 = **Run 侧入口**（ctx / 事件的构造期不算；但整段 JS + drain 都算）。
+        //   为什么覆盖 drain：task 的 continuation 在这里跑，而它现在允许 `once` / `at` / `finish`。
+        RunEntryScope run_entry(&impl, true);
 
         bool ok = true;
         std::string local_err;
@@ -6586,8 +6771,9 @@ private:
         // ★ S2b：本入口 drain 出来的 continuation 可能让 task 完成 / 拒绝 ⇒ **同一入口**检查 settle
         //   （在 `call_host` 复位之前；task 拒绝要经宿主 fail）。
         settleTasks(impl, &host);
-        // ★ S2b：`current_run_ctx` 只在本入口内有效（task 的拦截门是 `inCallback()`；这里复位
-        //   让**下一次**入口不会拿到一个已经过期的 ctx 对象）。
+        // ★ S2b：`current_run_ctx` 只在本入口内有效（`ctx.task` 需要它；这里复位让**下一次**入口
+        //   不会拿到一个已经过期的 ctx 对象）。★ P0：`ctx.once` / `ctx.at` / `ctx.delay` **不需要**
+        //   它 ⇒ task continuation / 泵里可以直接用（H1 取消）。
         impl.current_run_ctx.reset();
         impl.cpu_deadline_ns = 0;
         // ★ 终点与起点同一对墙钟；范围 = 组 ctx / 事件对象 + JS_Call + collectTriggers。
