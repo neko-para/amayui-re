@@ -1328,7 +1328,7 @@ set_tests_properties(gdi-font-fallback-assets PROPERTIES
 #   ⇒ 那 6 条都是"带 `--native-overrides` 的解释器压力/效率读数"，AOT 结构上没有 override。
 #   ⚠ **空窗期**：端到端压力档在 AOT 侧还没建（新档见 `REQ-01M7HQJEEENYDJ91FB5DAC4K23`）⇒
 #     这一段里端到端速度只能人手跑（`emulator-lift-aot --control-root` 的暂停 / 采样读数，
-#     或 JS 插件场景 `scripts/plugins/scenario-*.js`），⛔ 不许把"没有读数"说成"没有退化"。
+#     或 JS 插件场景 `scripts/plugins/scenario-*.ts`），⛔ 不许把"没有读数"说成"没有退化"。
 # =====================================================================================
 if(DEFINED ENV{LIFT_STRESS})
     # ---- LIFT_STRESS：boot trace（A4）的**读数 + 阈值**面（2026-11-14 从默认档移入）----
@@ -1371,7 +1371,7 @@ if(DEFINED ENV{LIFT_STRESS})
     #   lift-aot-quit-exit` 只编守卫 exe、产品 exe 停在变异前 ⇒ 变异自检假绿。
     add_dependencies(lift-aot-quit-exit emulator-lift-aot)
     # ★ 2026-11-27（用户裁决：`--input-plan` 整体退役）：本用例的**驱动器**从 `.plan` 换成
-    #   JS 插件 `scripts/plugins/quit-at-title.js`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click`）。
+    #   JS 插件 `scripts/plugins/quit-at-title.ts`（`bootToTitle` 门 + TITLE 上一条 `ctx.input.click`）。
     #   第 5 个参数 = 插件入口的**绝对路径**（QJS 的 import 根 = 入口文件目录 ⇒ 入口必须与
     #   `lib/` 同一个根：`scripts/plugins/`；夹具不能放 `tests/plugin_fixtures/` 再向上 import，
     #   实测被 `moduleNormalize` 拒成"越出 UI 根目录"）。
@@ -1381,7 +1381,7 @@ if(DEFINED ENV{LIFT_STRESS})
         COMMAND lift-aot-quit-exit
                 "$<TARGET_FILE:emulator-lift-aot>" "${_LIFT_STRESS_RAW_GAME_DIR}"
                 "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/quit-at-title.js")
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/quit-at-title.ts")
     set_tests_properties(aot-quit-exit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 420)
 
     # ---- 2026-11-27：`aot-stress-plan-exit5` / `aot-stress-boot-title` **已按用户裁决删除** ----
@@ -1393,7 +1393,7 @@ if(DEFINED ENV{LIFT_STRESS})
 
     # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
     # ★ 判据（详见 `tests/aot_stress_fellow_switch.cpp` 文件头）：真库驱动
-    #   `scripts/plugins/scenario-fellow-switch.js`（S1 起入口在**根**，库在 `lib/`）⇒ **exit 0** +
+    #   `scripts/plugins/scenario-fellow-switch.ts`（S1 起入口在**根**，库在 `lib/`）⇒ **exit 0** +
     #   readout `run=finished exit=0` + stdout 里 `=== profile window:` **恰好 6 条**（6 个切换
     #   窗口标签逐字齐全）。⛔ 不断言 ms（读数进文档）。
     # ★ 为什么判 readout 而不只判退出码：`--plugin` 路的失败**不**改宿主退出码
@@ -1414,7 +1414,7 @@ if(DEFINED ENV{LIFT_STRESS})
         COMMAND lift-aot-stress-fellow-switch
                 "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../saves"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/scenario-fellow-switch.js")
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/scenario-fellow-switch.ts")
     # ★ 2026-11-24 曾登记 `DISABLED TRUE`（两张既有缺口挡路）；2026-11-25 两张单都收口 ⇒ **已删除**。
     #   ⛔ 今后再红就当一个真回归修，⛔ 不要用 `DISABLED` 藏起来（`ctest -N` 里 Disabled 看得见，
     #   但"没跑"与"跑绿了"在输出里长得一样 —— 那正是 AGENTS §12.4 反对的形状）。
@@ -3099,7 +3099,7 @@ target_sources(emulator-lift-runtime PRIVATE
     src/plugin/plugin_search.cpp)
 
 # ★ S1：`--plugin <id>` 的**开发根**（编译期注入源码树，与 `LIFT_UI_SCRIPT_DIR` 同形）。
-#   id 只查 `<exeDir>/scripts/plugins/<id>.js`（发行）与 `<本目录>/<id>.js`（开发）两处，
+#   id 只查 `<exeDir>/scripts/plugins/<id>.js|.ts|.mts`（发行）与 `<本目录>/<id>.js|.ts|.mts`（开发）两处，
 #   ⛔ 不查 `lib/`（那是被 import 的库目录）、⛔ 不递归子目录。
 target_compile_definitions(emulator-lift-runtime PUBLIC
     LIFT_PLUGIN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins")
@@ -3107,8 +3107,8 @@ target_compile_definitions(emulator-lift-runtime PUBLIC
 if(LIFT_BUILD_TESTS)
     # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
     #   **入口文件目录**（`script_quickjs.cpp` 的 `moduleNormalize`）⇒ `tests/plugin_fixtures/*`
-    #   **不能** import 它。★ S1 起 `save.js` 只是**库**（`loadSave` 等），参考入口拆到
-    #   **根** `scripts/plugins/load-save.js`（id = `load-save`）；场景入口也都在根（id = 文件名 stem）。
+    #   **不能** import 它。★ S1 起 `save.ts` 只是**库**（`loadSave` 等），参考入口拆到
+    #   **根** `scripts/plugins/load-save.ts`（id = `load-save`）；场景入口也都在根（id = 文件名 stem）。
     #   ⛔ 不复制文件、不另开 lib 子目录。
     # ★ `LIFT_SAVES_DIR`（只给 e2e）：`saves/` 是**只读**复现素材 ⇒ 测试把需要的存档**复制**进
     #   `.tmp/` 下的私有 `--appdata`（照 `apps/emulator-lift/scripts/clean-appdata.sh`），⛔ 不就地写。
@@ -3164,7 +3164,7 @@ if(LIFT_BUILD_TESTS)
     # ---- `plugin-field-switch`：`field-point-visible.js` 是**开关**（⛔ 不自驱读档 / ⛔ 不点鼠标）----
     # ★ 判据（详 `tests/plugin_field_switch.cpp` 文件头）：
     #   ① 静态（剥注释后扫**代码**，零资产）：模块里没有输入写面（`ctx.input`）/ 没有读档链
-    #      （`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）/ 不自己收口
+    #      （`loadSave` / `bootToTitle` / `save.ts` / `boot-to-title.ts` / `chains.js`）/ 不自己收口
     #      （`ctx.finish` / `ctx.quit`）；同一条用例还断言它仍写着该写的链（`forceFieldPointsVisible`
     #      + `afterPosition` + `reenter` + `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO`/`HI` / `fp:draw`），
     #      且**没有** `FIELD_MAIN_LOOP` / `afterDelay` / `poll` ⇒ "禁令全过"不能靠一个空文件达成。
@@ -3245,9 +3245,10 @@ endif()
 
 # =====================================================================================
 # Q · quickts E1（TypeScript 纯类型擦除）的引擎级判据
-# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 16 个发行 `.js`（module）在 flags 0 与
+# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 剩下的发行 `.js`（`ui/*.js` 3 个，module）在 flags 0 与
 #   `JS_EVAL_FLAG_TYPESCRIPT` 下 `JS_WriteObject(BYTECODE|STRIP_SOURCE)` **逐字节相同**；
 #   ② 一组内联 GLOBAL 脚本同上（含 `a < b` / `b > c`、计算字段、static block、模板串）；
+#   ⑧ 发行插件 `plugins/**` 的 12 个 `.ts` 用 `MODULE|COMPILE_ONLY|TYPESCRIPT`（同形 loader）编过；
 #   ③ examples 9/9 用 `MODULE|COMPILE_ONLY|TYPESCRIPT` 编过 + `JS_ResolveModule` 成功
 #   （证明 `import type` 整条擦掉、零 module request）+ 不带 flag 时 9/9 报错；
 #   ④ 一个 `.ts` module 求值并调导出函数；⑤ class 夹具实跑 R1（index signature vs 计算字段）
@@ -3256,7 +3257,8 @@ endif()
 #   `if(LIFT_BUILD_TESTS)` 当透明）。零资产：只读 `scripts/**` 文本，零窗口 / 字体 / 安装树 / LFS。
 # ★ 直接链 `lift-qjs`（⛔ 不链 `emulator-lift-runtime`）：这是**引擎内部**判据，只 include
 #   `quickjs.h`；宿主 TU（`src/ui/script_quickjs.cpp`）仍是唯一的**产品** QJS 边界。
-# ★ 目录宏：测试自己遍历清单（`scripts/**` 的 16 个 `.js` + `plugins/examples/*.ts` 的 9 个）。
+# ★ 目录宏：测试自己遍历清单（`scripts/ui/*.js` 的 3 个 + `plugins/**` 的 12 个 `.ts` +
+#   `plugins/examples/*.ts` 的 9 个）。
 # ★ 变异：`tools/mutate-check.mjs` 的 `quickts-flag-not-read` 把
 #   `quickjs.c` 的 `s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;` 改成 `s->ts = false;`
 #   ⇒ ③ 的 `TYPESCRIPT 下编译失败` 与本文件 ④⑤ 当场红（`buildTarget` = `lift-quickts`）。

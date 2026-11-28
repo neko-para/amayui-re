@@ -1,4 +1,4 @@
-// scripts/plugins/scenario-save10-field.js —— **复现**「载入存档 10 → 在 FIELD 点 (540,450) → 退出」
+// scripts/plugins/scenario-save10-field.ts —— **复现**「载入存档 10 → 在 FIELD 点 (540,450) → 退出」
 //
 // 三段组合（v2）：`bootToTitle(t)` → `loadSave(t, slot, …)` → 本文件的场景 —— 一条 `ctx.task` 的
 // 顺序 `await`。它是**一条可复跑的复现入口**（不是产品场景）：所有翻页都走 `loadSave` 的真翻页
@@ -8,7 +8,7 @@
 //   **先等 FIELD 的主轮询体 `[0x579C,0x5860)`**（= 地图就绪、在等输入），再 move → 一拍 → click。
 //   直接点会被加载过程吞掉（实测：第一版在 `expect` 命中那一拍就点，什么也没发生）。
 //
-// 用法（cwd = apps/emulator-lift；存档 010/011/… 在**第 2 页**，翻页由 `save.js` 自己做）：
+// 用法（cwd = apps/emulator-lift；存档 010/011/… 在**第 2 页**，翻页由 `save.ts` 自己做）：
 //   ★ 参数来源（2026-11-25 起）：`<--appdata>/plugin-config.json` 的域 **`scenario.save10-field`**
 //     （`slot` number / `expect` string[] 或逗号串），**优于** `--plugin-param`；没有 appdata 时
 //     完全回退到 params。例：
@@ -16,7 +16,7 @@
 //   ./out/emulator-lift-aot.exe --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
 //     --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-<x> \
 //     --present headless --skip-logo --audio off --time-limit 120 --log-level info --frame-log \
-//     --plugin scripts/plugins/scenario-save10-field.js
+//     --plugin scripts/plugins/scenario-save10-field.ts
 //   ★ 回退（夹具 / 诊断）：`--plugin-param slot=10 --plugin-param expect=FIELD`。
 //
 // 判据（"点击之后能继续"）：点完**再活 `SURVIVE_MS`** ⇒ `ctx.finish(0)`；期间进程没了 ⇒ stderr 的 `stop :` 就是现场。
@@ -29,17 +29,17 @@
 //     它是**诊断判据**（"点完之后还活着"），不是业务门；⛔ 不要拿它做 A/B 或指纹。
 //   · 终点 `ctx.finish(0)` 在 task 里可用（P0 起 Run 侧门）⇒ 读数仍是 `run=finished exit=0`。
 
-import { bootToTitle } from "./lib/boot-to-title.js";
-import { awaitPosition, awaitWhere } from "./lib/gates.js";
-import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.js";
-import { loadSave } from "./lib/save.js";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
+
+import { bootToTitle } from "./lib/boot-to-title.ts";
+import { awaitPosition, awaitWhere } from "./lib/gates.ts";
+import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.ts";
+import { loadSave } from "./lib/save.ts";
 import {
     openConfigDomain,
     scriptListSetting,
     slotSetting,
-} from "./lib/settings.js";
-
-/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+} from "./lib/settings.ts";
 
 // 点击点（用户报的坐标；1280×720 参考系，原样照抄 —— ⛔ 不要按"看起来像"改）。
 const CLICK_X = 540;
@@ -54,20 +54,17 @@ const SURVIVE_MS = 8000;
 //   （实测 `applied=true`、进屏仍读回 1；读数见 `docs/03-emulator/save-format.md` §翻页）。
 //   翻页这件事由 `loadSave` 自己读页号 + 走箭头完成，本文件不再需要诊断旋钮。
 
-/** @type {number} */
-const SLOT = 10;
+const SLOT: number = 10;
 
-/** @type {string[]} */
-const DEFAULT_EXPECT = ["FIELD.BIN"];
+const DEFAULT_EXPECT: string[] = ["FIELD.BIN"];
 
 /** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
 const CONFIG_DOMAIN = "scenario.save10-field";
 
-/** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
-    start(ctx) {
+    start(ctx: RunCtx): void {
         // ★ 一次 Run 内 config / params 不变 ⇒ 只在 `start`（Run 回调）里读一次。
-        //   取配置的语义统一在 `./lib/settings.js`（`slot` 整数校验 / `expect` 归一 / 默认 10）。
+        //   取配置的语义统一在 `./lib/settings.ts`（`slot` 整数校验 / `expect` 归一 / 默认 10）。
         const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
         const slot = slotSetting(ctx, domain, SLOT, CONFIG_DOMAIN);
         const listed = scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN);
@@ -106,6 +103,6 @@ const plugin = {
             t.finish(0, "scenario-save10: survived");
         });
     },
-};
+} satisfies PluginModule;
 
 export default plugin;

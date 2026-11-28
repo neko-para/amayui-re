@@ -3949,7 +3949,7 @@ const MUTATIONS = [
   //   守卫 `tools/test/recipe-wait-policy.test.mjs`（`scripts/recipes/*.plan` 的 wait 白名单）
   //   只对 `.plan` 有意义 ⇒ 与本批的 `--input-plan` 退役一起删除（`.plan` 文件本身下一批删）。
 
-  // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.js`）──
+  // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.ts`）──
   //   ★ 这一类错长什么样：某次调试把"从 trace 抄来的区间"直接写进消费方（`save.js` / 场景文件），
   //     于是同一段读数有两份真源；改一处、另一处静默过期 ⇒ 门不命中 / 点击被吞，表现成偶发
   //     `gate timeout`，而**链照样能跑**（只看 `run=done` 抓不到）。
@@ -3957,14 +3957,14 @@ const MUTATIONS = [
   //     ⛔ 不选"改某个坐标 / 改某个门的值"当变异：那会被 CTest 的坐标断言先抓住，
   //       证明不了"裸写字面量"这条规则本身会红。
   {
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
     from: 'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
     to:
       'const BARE_0X9F8 = 0x9F8;  // 变异：裸写位置字面量（绕过 script-positions.js）\n' +
       'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
     guard: 'tools/test/script-map.test.mjs',
     what:
-      '往 `save.js` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '往 `save.ts` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
       '（"位置只有一个数字真源"被绕过；而这条链照旧能跑完 ⇒ 只看 run=done 的断言抓不到）',
   },
 
@@ -3972,14 +3972,14 @@ const MUTATIONS = [
   //   ★ 为什么单列一条：`script-map` 扫两个目录（根 + `lib/`），只证明 `lib/` 会红**证明不了**
   //     根目录被扫（漏扫根 ⇒ 入口里的裸字面量静默通过，而库那条变异照旧红 ⇒ 看起来"守卫好的"）。
   {
-    file: 'apps/emulator-lift/scripts/plugins/scenario-save07-battle.js',
-    from: 'import { bootToTitle } from "./lib/boot-to-title.js";',
+    file: 'apps/emulator-lift/scripts/plugins/scenario-save07-battle.ts',
+    from: 'import { bootToTitle } from "./lib/boot-to-title.ts";',
     to:
-      'const BARE_0X579C = 0x579C;  // 变异：根上的入口裸写位置字面量（绕过 lib/script-positions.js）\n' +
-      'import { bootToTitle } from "./lib/boot-to-title.js";',
+      'const BARE_0X579C = 0x579C;  // 变异：根上的入口裸写位置字面量（绕过 lib/script-positions.ts）\n' +
+      'import { bootToTitle } from "./lib/boot-to-title.ts";',
     guard: 'tools/test/script-map.test.mjs',
     what:
-      '往 plugin 根上的 `scenario-save07-battle.js` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '往 plugin 根上的 `scenario-save07-battle.ts` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
       '（根目录确实被 `script-map` 扫到；别靠 `lib/save.js` 那条变异冒充"根也扫了"）',
   },
 
@@ -4241,7 +4241,7 @@ const MUTATIONS = [
     //   ★ 2026-11-28 P1-fix S1：常量从 1200（读点单位）按**实测 61.9 SAVE 回调/s** 重算成 205
     //     （同一 ≈3.3 s 墙钟）⇒ 这条变异体的 `from`/`to` 跟着改；判据 / guard 不变
     //     （该 guard 现在 9/9 红属 P3，见 P1 复审 S3 —— 本条目在 P3 之前都不可信）。
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
     from: 'const PAGE_STALL_LIMIT = 205;',
     to: 'const PAGE_STALL_LIMIT = 60;',
     guard: 'tools/test/plugin-loadsave-page.test.mjs',
@@ -4255,7 +4255,7 @@ const MUTATIONS = [
     //   ★ 代表"前置检查被静默绕过"这一类错：删掉 `if (!st.exists)` 之后，缺文件仍照常点 LoadData，
     //     症状退回 30 s 门超时（与"点击被吞"混在一起）——整条链照样能跑、只看 `run=done` 的断言抓不到。
     //   守卫 = `tools/test/plugin-loadsave-page.test.mjs` 的 `loadsave-page/save-missing`（pure）。
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.ts',
     from: '    if (!st.exists) {\n',
     to: '    if (false) {  // 变异：缺文件不报\n',
     guard: 'tools/test/plugin-loadsave-page.test.mjs',
@@ -4295,7 +4295,7 @@ const MUTATIONS = [
   //   ★ 这就是为什么这条守卫必须两半都在：e2e 抓"自驱读档 ⇒ `boot:`/`load:` 行 + 不再常驻"，
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
-    file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
+    file: 'apps/emulator-lift/scripts/plugins/field-point-visible.ts',
     // ★ 2026-11-28 P1 迁移后：v2 的常驻订阅是 `ctx.at({script,pos})`（v1 的
     //   `ctx.trigger.afterPosition(...)` 行已不存在）。只改 `from` / `to` 的**落点**，
     //   判据与 guard 一个字不动（仍是"`start` 里多一次 `ctx.input.click`"）。
@@ -4321,7 +4321,7 @@ const MUTATIONS = [
   //   ★ 红点落在 `plugin/field-switch-apply`：假 guest 的 slot3 是 `0x5`（已触发），要求它**保持** 0x5；
   //     变异后变成 `0x7` 当场红。
   {
-    file: 'apps/emulator-lift/scripts/plugins/lib/guest-globals.js',
+    file: 'apps/emulator-lift/scripts/plugins/lib/guest-globals.ts',
     from: '        const after = (before | FIELD_OBJECT_DRAW_BIT) >>> 0;\n',
     to:
       '        const after = (before | FIELD_OBJECT_DRAW_BIT | 0x4) >>> 0;  // 变异：把 bit2 也强加上去\n',

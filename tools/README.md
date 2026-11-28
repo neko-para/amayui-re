@@ -65,7 +65,7 @@ pnpm test           # ② 全仓测试（不属于任何域）
 | `disasm.mjs` | `disasm-at` | 语料的**定位与切片**：`EA → 行号`、有界上下文、switch/跳转表、派生索引（见 `pnpm tools disasm-at describe`） |
 | `disasm-fn.mjs` | `disasm-fn` | ★ **item 目录与影响面**：逐函数/逐定义切分、`.c` ↔ `.lst` 关联、调用链 / 全局变量 / 参数偏移（见 `pnpm tools disasm-fn describe`） |
 | `patch.mjs` | `patch` | ★ 翻译 patch 的查询 / **提取（唯一写入口）** / 复验 / **视图（`data`·`src`）与全库检索**（见 `pnpm tools patch describe` 与 `tools/patch.md`） |
-| `script-positions.mjs` | `script-positions` | ★ **脚本内位置（`pos`）的锚表 → 生成物**：`tools/script-positions.json` 是真源，`gen --write` 重写 `apps/emulator-lift/scripts/plugins/lib/script-positions.js`；`check` 红 = 忘了 gen（见 `pnpm tools script-positions describe` 与 `tools/script-positions.md`） |
+| `script-positions.mjs` | `script-positions` | ★ **脚本内位置（`pos`）的锚表 → 生成物**：`tools/script-positions.json` 是真源，`gen --write` 重写 `apps/emulator-lift/scripts/plugins/lib/script-positions.ts`；`check` 红 = 忘了 gen（见 `pnpm tools script-positions describe` 与 `tools/script-positions.md`） |
 | `ui-bake.mjs` | `ui-bake` | ★ **UI 图片烘焙链**：原始 ALF → 改图配方（`tools/ui-bake/recipes/*.json`）→ 生效版 PNG / 注回 AGF；判据是**逐像素相同**（见 `pnpm tools ui-bake describe` 与 `tools/ui-bake.md`） |
 | `release.mjs` | `release` | ★ **发行打包**：把「当前所有变更过的资源」（patch 的键 + ui-bake 的配方集 + AGERC/字体）算成**测试安装树**（ALF 硬链接）或**发给玩家的 zip**（见 `pnpm tools release describe` 与 `tools/release.md`） |
 | `old-repo-inventory.mjs` | `old-repo` | **只读旧仓**：重新实测 → `docs/00-origin/old-repo-inventory.md`；重建翻译参考快照 → `docs/01-translation/ref/`（资产散件 + `archive.zip`） |

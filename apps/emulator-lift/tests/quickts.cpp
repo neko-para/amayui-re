@@ -1,11 +1,13 @@
 // emulator-lift · quickts E1（TypeScript 纯类型擦除）的引擎级 **pure** 判据。
 //
 // 判据（红了意味着什么）：
-//   ① js-bytecode-identical：`scripts/**` 下 16 个发行 `.js`（模块）用**同一个**引擎编两次
+//   ① js-bytecode-identical：`scripts/**` 下剩下的发行 `.js`（`ui/*.js` 3 个，模块）用**同一个**引擎编两次
 //      （flags 0 / `JS_EVAL_FLAG_TYPESCRIPT`），`JS_WriteObject(BYTECODE|STRIP_SOURCE)` 必须
 //      **逐字节相同**。红了 ⇒ 某个 TS 钩子没有全部关在 `if (s->ts)` 里 —— 即 flags off 的
 //      JS 解析/字节码被改了（这是本移植最强的不变量）。⚠ 故意 **不** 用 STRIP_DEBUG：
 //      pc2line 必须留在比较里，否则 `ts_next_gt` 的行/列保真（`>>` 拆成两个 `>`）测不出来。
+//      ★ 2026-11-28（T1）：发行插件（`scripts/plugins/**`）从 `.js` 迁到 `.ts` ⇒ 清单只剩 `ui/*.js`；
+//        `.ts` 的解析 / 擦除由 `plugin/ts-module` + `ts-plugins-compile`（本文件 ⑧）与 e2e 覆盖。
 //   ② js-global-bytecode-identical：同上，但用一组内联 GLOBAL 脚本（含 `a < b` / `b > c`、
 //      计算字段、static block、模板串、for-of、try/catch）——模块清单走不到 GLOBAL 解析路径，
 //      这里补上；`f < a > (b)` 是上游自认"flags on 会改含义"的唯一一处，**故意不放进清单**。
@@ -26,6 +28,8 @@
 //   ⑦ ts-flag-load-bearing（S1 复审 I1 的阳性对照）：带类型注解的片段 flags 0 必须报错、
 //      TYPESCRIPT 必须求值成功（default = 42）；另一个两腿都能编的片段（`f<a>(b)`）两腿
 //      字节码必须**不同** ⇒ `s->ts=false` 的变异会当场打红，而不是只靠 examples 用例兜底。
+//   ⑧ ts-plugins-compile（2026-11-28 T1）：`scripts/plugins/**` 的 **12 个发行 `.ts`** 用
+//      `MODULE|COMPILE_ONLY|TYPESCRIPT` + 同形 module loader 编译；失败即红。
 //
 // ★ 顶层无条件注册（`if(LIFT_BUILD_TESTS)` 之外还有一层透明条件）⇒ **pure** 档
 //   （AGENTS.md §12.4：判据 = 注册位置）。零资产：只读 `scripts/**` 里的文本，无窗口 / 无字体 /
@@ -276,22 +280,11 @@ void expectIdentical(const char* what, const CompileResult& off, const CompileRe
 }
 
 // ---------------------------------------------------------------------------------------
-// ① 15 个发行 .js（全部是 ES module；经 `rg '^\s*(import|export)\s'` 取证）
-//   ★ 2026-11-28：v1 的 `plugins/lib/chains.js`（`route`）已随插件 v2 迁移删除 ⇒ 清单 16 → 15。
+// ① 剩下的发行 .js（全部是 ES module；经 `rg '^\s*(import|export)\s'` 取证）
+//   ★ 2026-11-28：v1 的 `plugins/lib/chains.js`（`route`）已随插件 v2 迁移删除；同一批里
+//     12 个发行插件又迁到 `.ts`（宿主直接装载，见 `ts-plugins-compile`）⇒ 本清单只剩 `ui/*.js`。
 // ---------------------------------------------------------------------------------------
 constexpr const char* kLiftScripts[] = {
-    "plugins/field-point-visible.js",
-    "plugins/load-save.js",
-    "plugins/quit-at-title.js",
-    "plugins/scenario-fellow-switch.js",
-    "plugins/scenario-save07-battle.js",
-    "plugins/scenario-save10-field.js",
-    "plugins/lib/boot-to-title.js",
-    "plugins/lib/gates.js",
-    "plugins/lib/guest-globals.js",
-    "plugins/lib/save.js",
-    "plugins/lib/script-positions.js",
-    "plugins/lib/settings.js",
     "ui/hud.js",
     "ui/kit.js",
     "ui/settings-page.js",
@@ -323,7 +316,7 @@ void caseJsBytecodeIdentical() {
             ++compared;
         }
     }
-    LIFT_CHECK_EQ_I64(compared, 15);
+    LIFT_CHECK_EQ_I64(compared, 3);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -422,6 +415,47 @@ void caseTsExamplesCompile() {
     LIFT_CHECK_EQ_I64(compiled, 9);
     LIFT_CHECK_EQ_I64(resolved, 9);
     LIFT_CHECK_EQ_I64(without_flag_rejected, 9);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑧ 发行插件 `.ts`（12 个）：`MODULE|COMPILE_ONLY|TYPESCRIPT` 必须编过（带同形 module loader）。
+//   ★ 2026-11-28（T1）：插件从 `.js` 迁到 `.ts` ⇒ ① 的清单不再覆盖它们；这里补上"引擎能读"的判据。
+//   ★ 为什么带 loader：`load-save.ts` / `scenario-*.ts` 有**运行期** import（`./lib/x.ts`），
+//     `JS_Eval(MODULE|COMPILE_ONLY)` 会 `js_resolve_module()` ⇒ 没有 loader 就只报 "could not load module"，
+//     测到的不是语法。loader 与 ① 同一个（root = `<scripts>/`，按被导入名的扩展名加 TS flag）。
+//   ★ 只判"编过"：`import type` 的整条擦除由 ③（examples，零 module request）证明；这里不重复要求零请求
+//     （发行插件本来就有运行期 import，见文件头 ③ 的说明）。
+// ---------------------------------------------------------------------------------------
+constexpr const char* kPluginTs[] = {
+    "plugins/field-point-visible.ts",    "plugins/load-save.ts",
+    "plugins/quit-at-title.ts",          "plugins/scenario-fellow-switch.ts",
+    "plugins/scenario-save07-battle.ts", "plugins/scenario-save10-field.ts",
+    "plugins/lib/boot-to-title.ts",      "plugins/lib/gates.ts",
+    "plugins/lib/guest-globals.ts",      "plugins/lib/save.ts",
+    "plugins/lib/script-positions.ts",   "plugins/lib/settings.ts",
+};
+
+void caseTsPluginsCompile() {
+    lift_test::g_current_case = "quickts/ts-plugins-compile";
+    int compiled = 0;
+    for (const char* rel : kPluginTs) {
+        const std::string path = std::string(kScriptsDir) + "/" + rel;
+        std::string source;
+        ++lift_test::g_checks;
+        if (!readFile(path, &source)) {
+            lift_test::failf(__FILE__, __LINE__, "读不到 %s（清单过期？）", path.c_str());
+            continue;
+        }
+        const CompileResult result =
+            compileOnly(source, rel, JS_EVAL_TYPE_MODULE, JS_EVAL_FLAG_TYPESCRIPT);
+        ++lift_test::g_checks;
+        if (!result.ok) {
+            lift_test::failf(__FILE__, __LINE__, "%s: TYPESCRIPT 下编译失败: %s", rel, result.error.c_str());
+        } else {
+            ++compiled;
+        }
+    }
+    LIFT_CHECK_EQ_I64(compiled, 12);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -811,6 +845,7 @@ int main() {
     caseJsBytecodeIdentical();
     caseJsGlobalBytecodeIdentical();
     caseTsExamplesCompile();
+    caseTsPluginsCompile();
     caseTsHello();
     caseTsClass();
     caseTsFlagLoadBearing();

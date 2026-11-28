@@ -8,7 +8,7 @@
  *     ⇒ **翻页那条链（`load:pg:*`）在两道门里一次也没跑过**。
  *   · 于是 `PAGE_STALL_LIMIT` 从 60 起就没有任何守卫：60 个读点 ≈ 164 ms，而一次箭头点击要跨
  *     **两个完整 guest 回调**（闸门②′）才抬起 ⇒ 真机上页号要 76–77 个读点才变（读数出处：
- *     `apps/emulator-lift/scripts/plugins/lib/save.js` 文件头 §2026-11-25）。
+ *     `apps/emulator-lift/scripts/plugins/lib/save.ts` 文件头 §2026-11-25）。
  *   ⇒ 本用例用一个**假的 ctx + 假的 guest** 把那条链跑起来，判三件事（都是"变了就是 bug、而且变了
  *     是静默的"）：
  *       ① 正常路径（第一下点击被消费）⇒ **只允许一次**箭头点击（多一次 = 页会被多翻一格 → 点到空槽）；
@@ -26,13 +26,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { loadSave } from '../../apps/emulator-lift/scripts/plugins/lib/save.js';
+import { loadSave } from '../../apps/emulator-lift/scripts/plugins/lib/save.ts';
 
 /** 模型参数：一次箭头点击从"提交"到"页号变"要跨过的读点数（读数出处见文件头）。 */
 const CLICK_LATENCY_READS = 76;
-/** 翻页链要读的页号 global（与 `guest-globals.js` 的 `SAVE_PAGE_GLOBAL_ID` 同一个数；本用例只做假读数）。 */
+/** 翻页链要读的页号 global（与 `guest-globals.ts` 的 `SAVE_PAGE_GLOBAL_ID` 同一个数；本用例只做假读数）。 */
 const SAVE_PAGE_GLOBAL_ID = 0x138e;
-/** `SAVE.BIN` 的回调体（`load:page-ready` 的门区间；真值来自 `script-positions.js`）。 */
+/** `SAVE.BIN` 的回调体（`load:page-ready` 的门区间；真值来自 `script-positions.ts`）。 */
 const SAVE_BODY = [0x1104, 0x11c4];
 const SCRIPT_SAVE = 'SAVE.BIN';
 /** 目标槽 = 9（页 0 第 9 行）⇒ 页 1 进屏时必须翻到页 0。 */

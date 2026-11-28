@@ -1,10 +1,10 @@
-// scripts/plugins/scenario-fellow-switch.js —— **复现**「载入存档 009 → 进 FELLOW → 立绘来回切换 3 轮（6 次）」
+// scripts/plugins/scenario-fellow-switch.ts —— **复现**「载入存档 009 → 进 FELLOW → 立绘来回切换 3 轮（6 次）」
 //
 // 它是 `scripts/recipes/fellow-switch.plan` 的**取代件**（那个 `.plan` 的文件头已注明）。为什么换掉配方：
 //   · 配方第 4 步之前用的是**硬编码行 y=626**（只在读档界面**第 1 页** `LOAD 000..009` 成立）；
 //   · `saves/SAVE.DAT` + `RT.DAT` 在 2026-11-22 09:33 被重写（并新增 `SAVE10`）⇒ 读档界面进屏的**持久化页号变成 1**
 //     （第一屏 = `LOAD 010..019`）⇒ 那一行点空 ⇒ `await position SBUNKI` 超时 / `exit 5` / `pending=51`；
-//   · 用户的既定口径：**「`loadsave` 里面应该要自行判断到底是哪一页」** ⇒ 翻页这件事属于 `save.js` 的 `loadSave`
+//   · 用户的既定口径：**「`loadsave` 里面应该要自行判断到底是哪一页」** ⇒ 翻页这件事属于 `save.ts` 的 `loadSave`
 //     （它自己读页号 `0x138e`、按更短方向点左右大箭头、等页号真的变、翻完等列表刷新），⛔ 不在场景里重算坐标。
 //   ⇒ 本文件 = `bootToTitle(t)` → `loadSave(t, 9, { expect })` → 本场景（一条 `ctx.task` 的顺序 `await`）。
 //
@@ -12,12 +12,12 @@
 //   scripts/clean-appdata.sh ../../.tmp/fellow-js/appdata-1
 //   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/fellow-js/appdata-1 \
 //     --present headless --skip-logo --audio off --time-limit 240 \
-//     --plugin scripts/plugins/scenario-fellow-switch.js
+//     --plugin scripts/plugins/scenario-fellow-switch.ts
 //
 // 时序 / 门（**全部来自 `scripts/recipes/fellow-switch.plan` 已取证的那几个读数**，⛔ 本文件不另立数值；位置值只在
-// `./lib/script-positions.js` 里写一次，坐标是本文件的 1280×720 参考系常量）：
-//   TITLE  回调体 `[0x0460,0x0520)`          → 载入屏（`boot-to-title.js`）
-//   SAVE   回调体 `[0x1104,0x11C4)`          → 列表就绪；页号由 `loadSave` 自己判断（`save.js`）
+// `./lib/script-positions.ts` 里写一次，坐标是本文件的 1280×720 参考系常量）：
+//   TITLE  回调体 `[0x0460,0x0520)`          → 载入屏（`boot-to-title.ts`）
+//   SAVE   回调体 `[0x1104,0x11C4)`          → 列表就绪；页号由 `loadSave` 自己判断（`save.ts`）
 //   SBUNKI 读段之后 `[0x0B18,0x0C58)`        → 「是」(640,323)
 //   REIGN  回调体 `[0x2048,0x2234)`          → 目录屏就绪（前置门，不出手）
 //   REIGN  读输入段 `[0x2214,0x2234)`        → ★ 右键 (640,360) 进 FELLOW（**单条** `click … "right"`）
@@ -65,9 +65,11 @@
 // ★ 超时那拍**不** `profile.end()`：超时可能没有开着的窗口，硬关会 TypeError；半开的窗口随 Run 收口
 //   一起放着（v1 同一条）。`awaitPosition` 超时 = `finish(5)` + 结束。
 
-import { bootToTitle } from "./lib/boot-to-title.js";
-import { awaitPosition, awaitScript } from "./lib/gates.js";
-import { loadSave } from "./lib/save.js";
+import type { PluginModule, RunCtx } from "@amayui/lift-plugin";
+
+import { bootToTitle } from "./lib/boot-to-title.ts";
+import { awaitPosition, awaitScript } from "./lib/gates.ts";
+import { loadSave } from "./lib/save.ts";
 import {
     FELLOW_POLL_HI,
     FELLOW_POLL_LO,
@@ -77,9 +79,7 @@ import {
     REIGN_CALLBACK_LO,
     REIGN_READ_INPUT_HI,
     REIGN_READ_INPUT_LO,
-} from "./lib/script-positions.js";
-
-/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+} from "./lib/script-positions.ts";
 
 // marker 身份 = **文件名**（含 `.BIN`；C1 的门是精确 `==`，⛔ 不剥后缀）。
 // ★ `SETTOOLLIST.BIN` 只当**脚本身份**用（`{script}` = 该脚本下一条指令），没有一个取证过的位置区间
@@ -93,7 +93,7 @@ const SLOT = 9;
 // 载入**落点**由调用方按预期给（工具不猜）：`SAVE09` 存在**目录屏**（`REIGN.BIN`）。
 // `FIELD.BIN` 也在表里 = 同一份存档集上若游戏先进地图再切目录，门不会漏；下一道门仍是 REIGN 的回调体，
 // 所以"多认一个名字"不会把失败读成成功（⛔ 不是放宽判据：真正的进度判据是下面那道 REIGN 门）。
-const EXPECT = ["REIGN.BIN", "FIELD.BIN"];
+const EXPECT: string[] = ["REIGN.BIN", "FIELD.BIN"];
 
 // 坐标（1280×720 参考系；与配方逐字同源，⛔ 不按"看起来像"改）。
 const REIGN_MENU_X = 640; // 目录中心 = 右键进 FELLOW 的那一点
@@ -107,10 +107,15 @@ const REIGN_TIMEOUT_MS = 180000;
 const FELLOW_TIMEOUT_MS = 120000;
 const SWITCH_TIMEOUT_MS = 60000;
 
+/** 一次切换（窗口名 + 立绘按钮的 x）。 */
+interface Switch {
+    readonly label: string;
+    readonly x: number;
+}
+
 // 6 次切换（顺序 = 配方 ⑤ 的 3 轮 × 2 个方向；窗口名逐字沿用 `s1-to-avaro` … `s3-to-fia`）。
 // ⛔ 这是**数据**，不是进度：`for` 的下标就是进度。
-/** @type {ReadonlyArray<{ label: string, x: number }>} */
-const SWITCHES = [
+const SWITCHES: readonly Switch[] = [
     { label: "s1-to-avaro", x: AVARO_X },
     { label: "s1-to-fia", x: FIA_X },
     { label: "s2-to-avaro", x: AVARO_X },
@@ -125,18 +130,13 @@ const SCENARIO_PREFIX = "scenario:";
 const REIGN_NAME = "scenario:reign";
 const REIGN_CLICK_NAME = "scenario:reign-click";
 
-/** @param {number} i @returns {string} */
-const fellowName = (i) => `${SCENARIO_PREFIX}fellow:${i}`;
-/** @param {number} i @returns {string} */
-const toolName = (i) => `${SCENARIO_PREFIX}tool:${i}`;
-/** @param {number} i @returns {string} */
-const backName = (i) => `${SCENARIO_PREFIX}back:${i}`;
-/** @param {number} i @returns {string} */
-const settleName = (i) => `${SCENARIO_PREFIX}settle:${i}`;
+const fellowName = (i: number): string => `${SCENARIO_PREFIX}fellow:${i}`;
+const toolName = (i: number): string => `${SCENARIO_PREFIX}tool:${i}`;
+const backName = (i: number): string => `${SCENARIO_PREFIX}back:${i}`;
+const settleName = (i: number): string => `${SCENARIO_PREFIX}settle:${i}`;
 
-/** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
-    start(ctx) {
+    start(ctx: RunCtx): void {
         ctx.task(async (t) => {
             const titleTick = await bootToTitle(t);
             await loadSave(t, SLOT, { expect: EXPECT }, titleTick);
@@ -218,6 +218,6 @@ const plugin = {
             t.finish(0, `scenario-fellow: ${SWITCHES.length} switches done`);
         });
     },
-};
+} satisfies PluginModule;
 
 export default plugin;

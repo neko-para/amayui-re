@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "_doc": "本文件是**不透明数据**：字段语义 / 不变量 / 怎么查怎么改 见 `pnpm tools script-positions describe`（说明书 tools/script-positions.md）。不要手改 —— 它是锚表，改完跑 `pnpm tools script-positions gen --write`。",
   "scriptHeaderLen": 60,
-  "js": "apps/emulator-lift/scripts/plugins/lib/script-positions.js",
+  "js": "apps/emulator-lift/scripts/plugins/lib/script-positions.ts",
   "layout": [
     {
       "kind": "section",

@@ -1,9 +1,9 @@
-// emulator-lift · `field-point-visible.js` 是**开关**，不是"自驱复现脚本"（父级裁决 2026-11-25）
+// emulator-lift · `field-point-visible.ts` 是**开关**，不是"自驱复现脚本"（父级裁决 2026-11-25）
 //
 // 判据（红了意味着什么）：
 //   ① **静态契约**（剥注释后只看**代码**；零资产、无子进程）：
 //      · 没有输入写面（`ctx.input`）⇒ 不会点鼠标；
-//      · 没有读档链（`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）⇒ 不会自己读档；
+//      · 没有读档链（`loadSave` / `bootToTitle` / `save.ts` / `boot-to-title.ts` / `chains.js`）⇒ 不会自己读档；
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
 //      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 点位绘制脚本入口
 //        `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO` / `DRAWOBJ_ENTRY_HI` / `fp:draw` / `forceFieldPointsVisible`；
@@ -23,7 +23,7 @@
 //   ★ 档位 = **pure**（`add_test` 在顶层 `if(LIFT_BUILD_TESTS)` 里 ⇒ `cmakeTestTier()` 把该 if 当透明，
 //     `AGENTS.md` §12.4 判据 = 注册位置）。端到端那一段要安装树 —— 缺了 skip，⛔ 不是"这档变 assets"。
 //
-// ⛔ 本用例**不**断言画面 / 游戏业务（"点位真的画出来了"属 FIELD 复现，归 `scenario-save10-field.js`）。
+// ⛔ 本用例**不**断言画面 / 游戏业务（"点位真的画出来了"属 FIELD 复现，归 `scenario-save10-field.ts`）。
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -42,7 +42,7 @@ namespace {
 namespace fs = std::filesystem;
 
 // 剥掉 `//` 行注释与 `/* … */` 块注释，只留**代码**。
-// ★ 为什么要剥：文件头注释里**必须**能写"⛔ 不 import boot-to-title.js / save.js / chains.js"，
+// ★ 为什么要剥：文件头注释里**必须**能写"⛔ 不 import boot-to-title.ts / save.ts / chains.js"，
 //   否则禁令与判据会互相打架（守卫只能靠注释说明，而注释里不许出现被禁的名字 = 荒谬）。
 // ★ ⛔ 不解析字符串字面量：代码里的字符串出现这些名字同样算坏（那是"换了个马甲继续驱动输入"）。
 std::string stripComments(const std::string& src) {
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
     // ① 静态契约（零资产；缺资产的机器上也跑）
     // =================================================================================
     g_current_case = "field-switch/static-contract";
-    const fs::path plugin = fs::path(LIFT_PLUGIN_DIR) / "field-point-visible.js";
+    const fs::path plugin = fs::path(LIFT_PLUGIN_DIR) / "field-point-visible.ts";
     std::string source;
     if (!readWholeFile(plugin, &source)) {
         LIFT_CHECK(false);
@@ -156,8 +156,8 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.input") == std::string::npos);
     LIFT_CHECK(code.find("loadSave") == std::string::npos);
     LIFT_CHECK(code.find("bootToTitle") == std::string::npos);
-    LIFT_CHECK(code.find("boot-to-title.js") == std::string::npos);
-    LIFT_CHECK(code.find("save.js") == std::string::npos);
+    LIFT_CHECK(code.find("boot-to-title.ts") == std::string::npos);
+    LIFT_CHECK(code.find("save.ts") == std::string::npos);
     LIFT_CHECK(code.find("chains.js") == std::string::npos);
     LIFT_CHECK(code.find("ctx.finish") == std::string::npos);
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
     }
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.exit_code), 0);
     LIFT_CHECK(r.out.find("plugin    : ") != std::string::npos);
-    LIFT_CHECK(r.out.find("field-point-visible.js") != std::string::npos);
+    LIFT_CHECK(r.out.find("field-point-visible.ts") != std::string::npos);
     LIFT_CHECK(r.out.find("entry=default") != std::string::npos);
     LIFT_CHECK(r.out.find("callbacks=yes") != std::string::npos);
     LIFT_CHECK(r.out.find("run=waiting") != std::string::npos);   // ★ 常驻（Run 还没收口）

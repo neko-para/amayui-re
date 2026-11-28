@@ -3,26 +3,26 @@
  * tools/test/script-map.test.mjs —— "脚本位置 / guest global 只有一个数字真源"的守卫
  *
  * 红了意味着什么（三件都是"变了就是 bug、而且变了**是静默的**"）：
- *   ① `apps/emulator-lift/scripts/plugins/` **两个目录**（根上的入口 `*.js` 与 `lib/*.js` 的库）里
+ *   ① `apps/emulator-lift/scripts/plugins/` **两个目录**（根上的入口 `*.ts` 与 `lib/*.ts` 的库）里
  *      出现了 `0x…` 字面量 —— 除了两张常量表
- *      （`lib/script-positions.js` = 脚本内位置；`lib/guest-globals.js` = guest global 的 id / 位）。
+ *      （`lib/script-positions.ts` = 脚本内位置；`lib/guest-globals.ts` = guest global 的 id / 位）。
  *      危害不是"难读"：同一段区间被写死在两处之后，改一处读数另一处**照样跑**，只是门不命中 /
  *      点不进窗口 ⇒ 表现成"偶发 gate timeout"，没人能看出是哪份数字过期了。
  *   ② 常量表里的导出**重名**（ES module 同文件重名是语法错，但复制粘贴时很容易造成"以为用了新的、
  *      其实是旧的"的假象；这里按名字查一遍，报错时点名）。
- *   ③ 两个已知消费方（`lib/save.js` / 根上的 `scenario-save07-battle.js`）不再 import 常量表 ——
+ *   ③ 两个已知消费方（`lib/save.ts` / 根上的 `scenario-save07-battle.ts`）不再 import 常量表 ——
  *      那意味着它们把值写成了十进制/字符串形式（钻字面量检查的空子）或者根本没接线。
  *
- * ★ **S1（2026-11-25）起扫两个目录**：入口（`scenario-*.js` / `load-save.js`）搬到了 plugin 根，
- *   库（`save.js` / `script-positions.js` / `guest-globals.js` / …）留在 `lib/`。
+ * ★ **S1（2026-11-25）起扫两个目录**：入口（`scenario-*.ts` / `load-save.ts`）搬到了 plugin 根，
+ *   库（`save.ts` / `script-positions.ts` / `guest-globals.ts` / …）留在 `lib/`。
  *   只扫其中一个 ⇒ 另一个里的裸 `0x…` **静默漏检**（本文件的地板断言就是防这个）。
- * ★ **必须剥注释再扫**：`save.js` / `scenario-save07-battle.js` 的头注释里印着同一批区间
+ * ★ **必须剥注释再扫**：`save.ts` / `scenario-save07-battle.ts` 的头注释里印着同一批区间
  *   （那是给人看的读数台账）—— 朴素扫描会在"已经改对了"的树上误报。`stripComments()` 同时
- *   认得字符串字面量（`//` 在字符串里不是注释），所以 `save.js` 里 `"0x" + text` 这类写法不会被当成注释吃掉。
+ *   认得字符串字面量（`//` 在字符串里不是注释），所以 `save.ts` 里 `"0x" + text` 这类写法不会被当成注释吃掉。
  * ★ 允许列表是**文件名**（不是 glob）：新增一张常量表要显式改这里 —— 那正是希望有人停下来想一下的地方。
  *
- * 怎么加一条新位置：把值加进 `lib/script-positions.js`（带用途 + 读数出处），消费方 `import`。
- *   guest global 的 id / 位 ⇒ 加进 `lib/guest-globals.js`。
+ * 怎么加一条新位置：把值加进 `lib/script-positions.ts`（带用途 + 读数出处），消费方 `import`。
+ *   guest global 的 id / 位 ⇒ 加进 `lib/guest-globals.ts`。
  * 运行：`node --test tools/test/script-map.test.mjs`（`@env pure` ⇒ 也在 `pnpm test` 里）。
  */
 import assert from 'node:assert/strict';
@@ -36,13 +36,13 @@ const PLUGIN_DIR = path.join(REPO_ROOT, 'apps', 'emulator-lift', 'scripts', 'plu
 const LIB_DIR = path.join(PLUGIN_DIR, 'lib');
 
 /** 唯一允许出现 `0x…` 的文件（各自是**一张表的真源**；都在 `lib/` 下）。 */
-const HEX_ALLOWED = new Set(['script-positions.js', 'guest-globals.js']);
+const HEX_ALLOWED = new Set(['script-positions.ts', 'guest-globals.ts']);
 
 /** 必须 import 常量表的消费方（③）；`dir` 区分根上的入口与 `lib/` 的库。 */
 const CONSUMERS = [
-    { dir: LIB_DIR, file: 'save.js', table: './script-positions.js' },
-    { dir: PLUGIN_DIR, file: 'scenario-save07-battle.js', table: './lib/script-positions.js' },
-    { dir: PLUGIN_DIR, file: 'scenario-save07-battle.js', table: './lib/guest-globals.js' },
+    { dir: LIB_DIR, file: 'save.ts', table: './script-positions.ts' },
+    { dir: PLUGIN_DIR, file: 'scenario-save07-battle.ts', table: './lib/script-positions.ts' },
+    { dir: PLUGIN_DIR, file: 'scenario-save07-battle.ts', table: './lib/guest-globals.ts' },
 ];
 
 /**
@@ -107,7 +107,7 @@ export function findHexLiterals(code) {
 }
 
 /**
- * 两个目录下的全部 `.js`：`{ rel, name, file }`（`rel` 是相对 `scripts/plugins/` 的展示路径）。
+ * 两个目录下的全部 `.ts`：`{ rel, name, file }`（`rel` 是相对 `scripts/plugins/` 的展示路径）。
  * ★ 读不到目录 ⇒ 直接抛 —— 路径错了不许变成"0 个文件 ⇒ 恒绿"。
  */
 function pluginFiles() {
@@ -117,7 +117,7 @@ function pluginFiles() {
         [PLUGIN_DIR, ''],
     ]) {
         for (const name of fs.readdirSync(dir)) {
-            if (!name.endsWith('.js')) continue;
+            if (!name.endsWith('.ts')) continue;
             entries.push({ rel: prefix + name, name, file: path.join(dir, name) });
         }
     }
@@ -143,16 +143,16 @@ test('script-map/scanner-strips-comments：注释里的 0x 不算，代码里的
 test('script-map/no-bare-hex：plugins 根 + lib/ 里除两张常量表外不许出现 `0x…` 字面量（剥注释后）', () => {
     const files = pluginFiles();
     // 地板：两个目录都真的扫到了（路径错 / 后缀变 / 漏扫一个目录 ⇒ 不许空扫描变绿）。
-    assert.ok(files.length >= 7, `只扫到 ${files.length} 个 .js（${PLUGIN_DIR}）—— 路径 / 后缀变了？`);
+    assert.ok(files.length >= 7, `只扫到 ${files.length} 个 .ts（${PLUGIN_DIR}）—— 路径 / 后缀变了？`);
     const names = new Set(files.map((f) => f.rel));
-    assert.ok(names.has('lib/save.js'), `lib/ 里没有 save.js：${[...names].join(', ')}`);
+    assert.ok(names.has('lib/save.ts'), `lib/ 里没有 save.ts：${[...names].join(', ')}`);
     assert.ok(
-        names.has('lib/script-positions.js') && names.has('lib/guest-globals.js'),
+        names.has('lib/script-positions.ts') && names.has('lib/guest-globals.ts'),
         `lib/ 里没有常量表：${[...names].join(', ')}`,
     );
     // ★ 根上的入口必须真的被扫到（S1 的移动就是把入口搬到这里；漏扫 ⇒ 整个根目录静默失守）。
     assert.ok(
-        names.has('scenario-save07-battle.js') && names.has('load-save.js'),
+        names.has('scenario-save07-battle.ts') && names.has('load-save.ts'),
         `plugins 根上没扫到已知入口：${[...names].join(', ')}`,
     );
 
@@ -169,9 +169,9 @@ test('script-map/no-bare-hex：plugins 根 + lib/ 里除两张常量表外不许
         [],
         '插件脚本里出现了裸 `0x…` 字面量（位置 / global 只有一个数字真源）：\n  ' +
             `${violations.join('\n  ')}\n` +
-            '要么 `import { … } from "./lib/script-positions.js"`（guest global 走 "./lib/guest-globals.js"；' +
-            '`lib/` 内部用同目录 "./script-positions.js"），' +
-            '要么把新值加进 `lib/script-positions.js`。⛔ 不要为了方便就地写死 —— 换个读数时另一份会静默过期。',
+            '要么 `import { … } from "./lib/script-positions.ts"`（guest global 走 "./lib/guest-globals.ts"；' +
+            '`lib/` 内部用同目录 "./script-positions.ts"），' +
+            '要么把新值加进 `lib/script-positions.ts`。⛔ 不要为了方便就地写死 —— 换个读数时另一份会静默过期。',
     );
 });
 
@@ -184,18 +184,18 @@ test('script-map/consumers-import-table：两个已知消费方必须 import 常
     assert.deepEqual(missing, [], missing.join('\n'));
 });
 
-test('script-map/positions-export-names-unique：`script-positions.js` 的导出常量名不重复', () => {
-    const text = fs.readFileSync(path.join(LIB_DIR, 'script-positions.js'), 'utf8');
+test('script-map/positions-export-names-unique：`script-positions.ts` 的导出常量名不重复', () => {
+    const text = fs.readFileSync(path.join(LIB_DIR, 'script-positions.ts'), 'utf8');
     const names = [];
     const re = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*=/gm;
     let m;
     while ((m = re.exec(text)) !== null) names.push(m[1]);
-    assert.ok(names.length > 0, '`script-positions.js` 里一个 `export const` 都没解析到（形态变了？）');
+    assert.ok(names.length > 0, '`script-positions.ts` 里一个 `export const` 都没解析到（形态变了？）');
     const seen = new Set();
     const dup = [];
     for (const n of names) {
         if (seen.has(n)) dup.push(n);
         seen.add(n);
     }
-    assert.deepEqual(dup, [], '`script-positions.js` 里重复导出了：' + dup.join(', '));
+    assert.deepEqual(dup, [], '`script-positions.ts` 里重复导出了：' + dup.join(', '));
 });

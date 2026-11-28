@@ -1,4 +1,4 @@
-// scripts/plugins/field-point-visible.js —— `FIELD` 上的**开关**：渲染帧无条件显示所有采集 / 挖掘点
+// scripts/plugins/field-point-visible.ts —— `FIELD` 上的**开关**：渲染帧无条件显示所有采集 / 挖掘点
 //
 // 是什么（★ 用户裁决 2026-11-25：目标不是"在 FIELD 里无条件显示 `?`/`!` 图标"）：
 //   · 采集 / 挖掘点的本体 = **B 链点位精灵**（`DRAWOBJ.BIN` 每槽 `draw-texture`，纹理槽 = `0xFA + 类型`：
@@ -36,7 +36,7 @@
 //     tick.patch({ptrLocal:2}, 1); })`：每拍瞬时覆盖（handler 之后、指令执行之前写；下一拍 CAS 恢复）。
 //     v1 的 `ctx.hook.at` + `handle.patch` 是"装一次、每命中都覆盖"；v2 是"每命中重新 patch 一次"——
 //     语义等价（都只在 `DRAWOBJ 0x03A0` 那一拍覆盖、净变化 0），代价是每次多一次 JS 调用。
-//   · `on` / `diag` 仍然**每次 fire 重读**（`./lib/settings.js` 的 `ctx.config` 门 = Run 侧入口；
+//   · `on` / `diag` 仍然**每次 fire 重读**（`./lib/settings.ts` 的 `ctx.config` 门 = Run 侧入口；
 //     P0 起 tick handler 里经存下来的 RunCtx 读配置**合法**）⇒ 设置页 `set` 之后下一次入口就生效。
 //   · 日志走**全局 `log`**（v2；`ctx.log` 已弃用）。
 //
@@ -50,10 +50,10 @@
 //   · ★ **判据是"已知的脚本位置"，所以用位置订阅，⛔ 不用轮询**（父级裁决 2026-11-25）。
 //
 // ⛔ 三件事本插件**永远不做**（用户裁决：开关不许驱动任何输入）：
-//   ① ⛔ **不读档**：不 import `lib/save.js`（`loadSave`）、不 import `lib/boot-to-title.js`、
-//      也不 import 已删除的 `lib/chains.js`。验收时**玩家自己读档**：`--overlay --plugin
+//   ① ⛔ **不读档**：不 import `lib/save.ts`（`loadSave`）、不 import `lib/boot-to-title.ts`、
+//      也不 import 已删除的 `lib/chains.ts`。验收时**玩家自己读档**：`--overlay --plugin
 //      field-point-visible` 是目标用法（`--plugin` 与 `--input-plan` / `--control-root` 互斥 ⇒
-//      "输入计划驱动"这条路不存在）。FIELD 的**自动化复现**仍归 `scenario-save10-field.js`。
+//      "输入计划驱动"这条路不存在）。FIELD 的**自动化复现**仍归 `scenario-save10-field.ts`。
 //   ② ⛔ **不点鼠标**：一次都不碰输入写面（插件 API 的输入面只有它 ⇒ 不碰 = 不驱动输入）。
 //   ③ ⛔ **不写盘**：不写 `data/**`、不写存档、不写配置（config 只读；唯一的写是 `settings.schema`
 //      这个**机器写的保留域**，由 `registerSettings` 在 `start` 里做，见下）。
@@ -103,6 +103,8 @@
 //   `DRAWOBJ.BIN` instr#44 `add (local-int 11) fa (local-int 1)` ⇒ 纹理槽 = `0xFA + 类型`；
 //   `SETMAPTEX.BIN` instr#78/#80 把 ALF 20797 / 20798 绑到 `0x119` / `0x11A`。
 
+import type { ConfigDomain, PluginModule, RunCtx, Tick } from "@amayui/lift-plugin";
+
 import {
     FIELD_CELL_BITS_GLOBAL_ID,
     FIELD_CURRENT_MAP_GLOBAL_ID,
@@ -117,22 +119,22 @@ import {
     forceFieldPointsVisible,
     hex,
     readIntGlobal,
-} from "./lib/guest-globals.js";
-import { boolSetting, openConfigDomain, registerSettings } from "./lib/settings.js";
+} from "./lib/guest-globals.ts";
+import { boolSetting, openConfigDomain, registerSettings } from "./lib/settings.ts";
 import {
     DRAWOBJ_ENTRY_HI,
     DRAWOBJ_ENTRY_LO,
     DRAWOBJ_GATE_EQ,
-} from "./lib/script-positions.js";
+} from "./lib/script-positions.ts";
 
-/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
-/** @typedef {import("@amayui/lift-plugin").Tick} Tick */
-/** @typedef {import("@amayui/lift-plugin").ConfigDomain} ConfigDomain */
 /**
  * 本次 fire 的设置（`on` / `diag` **每次 fire 重读**；`types` 一个 Run 内不变）。
- *
- * @typedef {{ on: boolean, types: number[], diag: boolean }} Settings
  */
+interface Settings {
+    readonly on: boolean;
+    readonly types: number[];
+    readonly diag: boolean;
+}
 
 /** 配置文件里的域（`<--appdata>/plugin-config.json`）。 */
 const CONFIG_DOMAIN = "field.point-visible";
@@ -157,10 +159,9 @@ const DIAG_DRAW_EVERY = 60;
 /**
  * `types`：config 可给 hex 串 `"1f,20"` 或数组（元素 = hex 串或数字）；params 只有逗号串。
  *
- * @param {unknown} raw 缺省 = undefined/null ⇒ 採集 + 発掘。
- * @returns {number[]}
+ * @param raw 缺省 = undefined/null ⇒ 採集 + 発掘。
  */
-function parseTypes(raw) {
+function parseTypes(raw: unknown): number[] {
     if (raw === undefined || raw === null) {
         return [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
     }
@@ -168,10 +169,8 @@ function parseTypes(raw) {
     if (typeof raw === "string" && raw.trim() === "") {
         return [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
     }
-    /** @type {number[]} */
-    const out = [];
-    /** @param {unknown} item */
-    const pushOne = (item) => {
+    const out: number[] = [];
+    const pushOne = (item: unknown): void => {
         if (typeof item === "number") {
             if (!Number.isInteger(item) || item < 0) {
                 throw new Error(`types 的数字项必须是非负整数（收到 ${String(item)}）`);
@@ -203,18 +202,15 @@ function parseTypes(raw) {
     return out;
 }
 
-// ---- 配置读取（**唯一的取配置入口** = `./lib/settings.js`；这里只留 per-Run 缓存）------------
+// ---- 配置读取（**唯一的取配置入口** = `./lib/settings.ts`；这里只留 per-Run 缓存）------------
 
 /**
  * 域句柄（模块级缓存的是**对象**，⛔ 不是值）：`domain()` 每次会新建绑定对象 + 若干宿主调用
  * ⇒ 每次 fire 重读只 `get`，不重新 `domain()`。`undefined` = 还没打开；`null` = config 不可用。
- *
- * @type {ConfigDomain | null | undefined}
  */
-let configDomain;
+let configDomain: ConfigDomain | null | undefined;
 /** `types` 一个 Run 内读一次（本期 schema 不暴露它 ⇒ 页面改不到）。 */
-/** @type {number[] | null} */
-let typesCache = null;
+let typesCache: number[] | null = null;
 
 /**
  * 本次 fire 的设置：**config > `--plugin-param` > 默认**（优先级只看"给没给"，`0` / `false` 也算给了）。
@@ -224,10 +220,9 @@ let typesCache = null;
  *   把这一行一起搬进下面的逐 fire 读。
  * ★ 旧配置里的 `static` / `slot` / `hold` / `poll` **不在这里出现**：它们被**无害忽略**。
  *
- * @param {RunCtx} ctx RunCtx。
- * @returns {Settings}
+ * @param ctx RunCtx。
  */
-function settingsFor(ctx) {
+function settingsFor(ctx: RunCtx): Settings {
     if (configDomain === undefined) configDomain = openConfigDomain(ctx, CONFIG_DOMAIN);
     const domain = configDomain;
     if (typesCache === null) {
@@ -253,11 +248,9 @@ let lastDrawState = "";
 /** 开关状态（每次 `fp:draw` 从配置重读；静态门 handler 必它决定这一拍要不要 patch）。 */
 let enabled = false;
 /** `fp:draw` 的订阅 id（`ctx.at` 失败时是 undefined）。 */
-/** @type {number | undefined} */
-let drawSub;
+let drawSub: number | undefined;
 /** 静态门订阅 id（`on=0` ⇒ 撤掉，宿主表里不留订阅）。 */
-/** @type {number | undefined} */
-let gateSub;
+let gateSub: number | undefined;
 
 /**
  * 装 / 撤 **静态门的"到点 + 覆盖"**（v2：一条 `ctx.at` 订阅；覆盖在 handler 里逐拍 `tick.patch`）。
@@ -270,11 +263,10 @@ let gateSub;
  * 写、执行完立刻恢复 ⇒ 静态门通过（画出 `0xFA+type` 的静态纹理），`eb5c1` 的持久值**净变化 0**。
  * ⛔ 不用 `ctx.edit.global.set` 写 `eb5c1`：那是**改存档真值**（用户裁决 2026-11-26）。
  *
- * @param {RunCtx} ctx RunCtx。
- * @param {boolean} on 开关状态。
- * @returns {void}
+ * @param ctx RunCtx。
+ * @param on 开关状态。
  */
-function syncGate(ctx, on) {
+function syncGate(ctx: RunCtx, on: boolean): void {
     if (on === (gateSub !== undefined)) return;
     if (on) {
         const id = ctx.at({ script: DRAWOBJ_SCRIPT, pos: DRAWOBJ_GATE_EQ }, (tick, next) => {
@@ -312,12 +304,11 @@ function syncGate(ctx, on) {
  *   逐槽行只为**真的改了**的槽打（限 `MAX_LOGGED_SLOTS` 行）；`diag` 每 `DIAG_DRAW_EVERY` 帧一行
  *   汇总 + 命中槽全量逐槽行。⛔ 绝不每次都刷屏。
  *
- * @param {RunCtx} ctx RunCtx（读：`ctx.read`）。
- * @param {Tick} tick 本拍的 Tick（写：`tick.edit`；`tick.now.pos` 只用读数）。
- * @param {Settings} settings 本次 fire 的设置。
- * @returns {void}
+ * @param ctx RunCtx（读：`ctx.read`）。
+ * @param tick 本拍的 Tick（写：`tick.edit`；`tick.now.pos` 只用读数）。
+ * @param settings 本次 fire 的设置。
  */
-function applyAtDraw(ctx, tick, settings) {
+function applyAtDraw(ctx: RunCtx, tick: Tick, settings: Settings): void {
     drawFrames += 1;
     // ★ 命中槽（type 读在里面，31 次/次）；`applied=true` 的那些才是真的改了 flags。
     const changed = forceFieldPointsVisible(ctx, tick, { types: settings.types });
@@ -385,13 +376,12 @@ function applyAtDraw(ctx, tick, settings) {
     }
 }
 
-/** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
-    start(ctx) {
+    start(ctx: RunCtx): void {
         // ★ 位置表的不变量：静态门必须落在 DRAWOBJ 的入口窗口里（否则那条订阅永远不会命中）。
         //   这条检查同时把 `DRAWOBJ_ENTRY_HI` 的消费方留在代码里（表本身是生成物，数值不动）。
         if (!(DRAWOBJ_ENTRY_LO <= DRAWOBJ_GATE_EQ && DRAWOBJ_GATE_EQ < DRAWOBJ_ENTRY_HI)) {
-            ctx.fail("field-points", "静态门 pos 不在 DRAWOBJ 入口窗口里（script-positions.js 的读数坏了？）");
+            ctx.fail("field-points", "静态门 pos 不在 DRAWOBJ 入口窗口里（script-positions.ts 的读数坏了？）");
             return;
         }
         const settings = settingsFor(ctx);
@@ -450,6 +440,6 @@ const plugin = {
         //   常驻判据回到插件语义（⛔ 不要把"永不 settle task"当常驻 API）。
         //   ⛔ 不要在正常路径 `finish`。
     },
-};
+} satisfies PluginModule;
 
 export default plugin;

@@ -16,10 +16,10 @@
 //                                            click 坐标 = helper 的**运行期**导出（⛔ 不是"没报错"）。
 //   · `plugin/js-comparison-unchanged`（S1b）：`.js` 的 `f<a>(b)` 仍是比较（⛔ 不按泛型调用）。
 //   · `plugin/ts-uppercase-ext`（S1b）     ：扩展名判据 ASCII 大小写不敏感（`.TS` / `.MTS`）。
-//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）；
-//                                            参考入口 = 根 `scripts/plugins/load-save.js`（S1 拆出）：
+//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.ts`（假读数）；
+//                                            参考入口 = 根 `scripts/plugins/load-save.ts`（S1 拆出）：
 //                                            `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
-//                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.js`）：
+//                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.ts`）：
 //                                            `boot:title` 命中 → `start` 点 LoadData → SAVE → 读点 →
 //                                            SBUNKI → `expect` 命中（用例显式给
 //                                            `--plugin-param expect=FIELD,SC0000`）；两个 slot 的 `move`
@@ -187,13 +187,13 @@ std::string fixturePath(const std::string& name) {
 }
 
 // ★ C2c：**真库**目录（`scripts/plugins/lib`）。QJS 的 import 根 = 入口文件目录 ⇒ 夹具不能
-//   import 它。★ S1 起 `lib/save.js` 只是库（没有 default 导出）；参考入口在**根** `load-save.js`。
+//   import 它。★ S1 起 `lib/save.ts` 只是库（没有 default 导出）；参考入口在**根** `load-save.ts`。
 std::string libPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR) / name).string();
 }
 
 // ★ S1：`--plugin` 的 id 根 = `scripts/plugins/`（`LIFT_PLUGIN_LIB_DIR` 的父目录）。场景入口在根上，
-//   库仍在 `lib/`；`load-save.js` 是 `lib/save.js` 的参考入口（id = `load-save`）。
+//   库仍在 `lib/`；`load-save.ts` 是 `lib/save.ts` 的参考入口（id = `load-save`）。
 std::string pluginRootPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR).parent_path() / name).string();
 }
@@ -282,11 +282,11 @@ struct Fixture {
         return loadFile(fixturePath(file), params, host_ops);
     }
 
-    // ★ S1：参考入口（config > params > 默认、自带 TITLE 门）在根 `load-save.js` —— 与 e2e
+    // ★ S1：参考入口（config > params > 默认、自带 TITLE 门）在根 `load-save.ts` —— 与 e2e
     //   同一个文件，⛔ 不复制。
     bool loadLib(const std::map<std::string, std::string>& params = {},
                  const lift::ui::UiHostOps* host_ops = nullptr) {
-        return loadFile(pluginRootPath("load-save.js"), params, host_ops);
+        return loadFile(pluginRootPath("load-save.ts"), params, host_ops);
     }
 
     // 一个读点（本文件里"读点"的唯一含义）。
@@ -380,7 +380,7 @@ bool installInstrFrame(lift::GuestMemory& mem) {
     for (std::size_t i = 0; i <= sizeof(kOtherName) - 1; ++i) {
         mem.wr8(other + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kOtherName[i]));
     }
-    // TITLE.BIN（id 5）：`control-script/save-missing-precheck` 的 boot 门（真库 `load-save.js`）。
+    // TITLE.BIN（id 5）：`control-script/save-missing-precheck` 的 boot 门（真库 `load-save.ts`）。
     const std::uint32_t title = kInstrName + lift::kFileNameStride * kInstrTitleId;
     const char kTitleName[] = "TITLE.BIN";
     for (std::size_t i = 0; i <= sizeof(kTitleName) - 1; ++i) {
@@ -487,10 +487,10 @@ void caseApiSurface() {
 // =====================================================================================
 
 // =====================================================================================
-// `control-script/start-on-trigger-chain`：**真库** `lib/save.js`（经根入口 `load-save.js`）+ 假读数走完整条链
+// `control-script/start-on-trigger-chain`：**真库** `lib/save.ts`（经根入口 `load-save.ts`）+ 假读数走完整条链
 //
 // ★ 2026-11-21 起 `loadSave.start` **不等 TITLE**（前提 = 调用方保证已在 TITLE；TITLE 门搬到了
-//   `lib/boot-to-title.js`）⇒ 以根入口 `load-save.js` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
+//   `lib/boot-to-title.ts`）⇒ 以根入口 `load-save.ts` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
 //   `start` arm `boot:title`，命中后才 `click(1070,480)` 并 arm `load:save`。
 //   ⇒ 下面两道 armed-name 断言就是"拆分"的地面真相：TITLE 门属于 boot 链，载入链的第一道门是 SAVE。
 //
@@ -539,7 +539,7 @@ bool writeHostFile(const fs::path& path, const std::string& text) {
 //
 // 判据：缺文件时任何 click 都不得提交（staged/depth 都是 0、光标不动）；Run 自己收口
 //   （`finished + exit=5`，reason 点名 `SAVE15.DAT` / `slot 15`）。
-// ★ v2 驱动：真库 `load-save.js` 的 `start` → task → `bootToTitle`（TITLE.BIN once）→ `loadSave`
+// ★ v2 驱动：真库 `load-save.ts` 的 `start` → task → `bootToTitle`（TITLE.BIN once）→ `loadSave`
 //   的前置检查。用假帧派发一条 TITLE 指令（id 5 / pos 0x480）让 boot 门命中。
 // =====================================================================================
 void caseSaveMissingPrecheck() {
@@ -691,7 +691,7 @@ void caseConfigHostPause() {
 }
 
 // =====================================================================================
-// `plugin/field-switch-apply`：`field-point-visible.js` 的**施加面**（纯 QJS + 假 guest 内存）
+// `plugin/field-switch-apply`：`field-point-visible.ts` 的**施加面**（纯 QJS + 假 guest 内存）
 //
 // 判据（红了意味着什么）：
 //   ① 唯一钩子 = **`DRAWOBJ.BIN` 的入口窗口** `[0x003C,0x06BC)`（`fp:draw`；全语料 4 处
@@ -712,7 +712,7 @@ void caseConfigHostPause() {
 // =====================================================================================
 
 // `50ff9f` 的 32 槽派生位 / `50ffd1` 的 32 槽类型（数值的唯一出处在
-// `scripts/plugins/lib/guest-globals.js`；本用例是它的**消费者**，所以在这里重复一组只读常量）。
+// `scripts/plugins/lib/guest-globals.ts`；本用例是它的**消费者**，所以在这里重复一组只读常量）。
 constexpr std::uint32_t kFieldFlagsId = 0x50ff9Fu;
 constexpr std::uint32_t kFieldTypeId = 0x50ffD1u;
 constexpr std::uint32_t kFieldMapId = 0xB222u;        // 当前地图号（只读；日志用）

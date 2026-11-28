@@ -31,7 +31,7 @@
 
 import { Button, Checkbox } from "./kit.js";
 
-/** 设置注册表所在的保留域（与 `plugins/lib/settings.js` 的 `SETTINGS_SCHEMA_DOMAIN` 同一个字面量）。 */
+/** 设置注册表所在的保留域（与 `plugins/lib/settings.ts` 的 `SETTINGS_SCHEMA_DOMAIN` 同一个字面量）。 */
 const SCHEMA_DOMAIN = "settings.schema";
 
 const PAD = 8;

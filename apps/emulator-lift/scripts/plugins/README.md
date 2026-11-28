@@ -9,19 +9,20 @@
 scripts/plugins/
 ├── plugin.d.ts / README.md      # 合同 + 本说明
 ├── examples/                    # 类型示例（不参与构建）
-├── load-save.js                 # 入口：save 的参考插件（id = load-save）
-├── scenario-save07-battle.js    # 入口（id = 文件名 stem）
-├── scenario-save10-field.js
-├── scenario-fellow-switch.js
-├── field-point-visible.js
+├── load-save.ts                 # 入口：save 的参考插件（id = load-save）
+├── quit-at-title.ts             # 入口：TITLE → Quit 的 e2e 驱动器（CTest aot-quit-exit）
+├── scenario-save07-battle.ts    # 入口（id = 文件名 stem）
+├── scenario-save10-field.ts
+├── scenario-fellow-switch.ts
+├── field-point-visible.ts
 └── lib/                         # **只被 import**：永远不是 --plugin 的 id 目标
-    ├── save.js                  #   loadSave / SAVE_DIR_REL / 前置检查（没有 default 导出）
-    ├── settings.js              #   插件侧**唯一**的取配置入口（config > params > 默认 + settings.schema）
-    ├── boot-to-title.js · chains.js · script-positions.js · guest-globals.js · recipe.js
+    ├── save.ts                  #   loadSave / validateLoadSave / SAVE_DIR_REL / 前置检查（没有 default 导出）
+    ├── settings.ts              #   插件侧**唯一**的取配置入口（config > params > 默认 + settings.schema）
+    ├── boot-to-title.ts · gates.ts · script-positions.ts · guest-globals.ts
 ```
 
-- **`--plugin <id>` 只查本目录的根**（`<exeDir>/scripts/plugins/<id>.js` 与编译期
-  `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**；S1b 起同一 id 也试 `.ts` / `.mts`，见下节）；⛔ 不查
+- **`--plugin <id>` 只查本目录的根**（`<exeDir>/scripts/plugins/<id>.js|.ts|.mts` 与编译期
+  `LIFT_PLUGIN_DIR/<id>.js|.ts|.mts` 两处，**非递归**；S1b 起同一 id 也试 `.ts` / `.mts`，见下节）；⛔ 不查
   `lib/`、⛔ 不递归子目录。需要单独加载的东西必须在根上；库只被 `import`。
 - id 语法 `^[A-Za-z0-9_-]{1,64}$`；含 `.` / `/` / `\` 的写法**一律当路径**（所以 `x.js` / `x.ts` 是
   cwd 相对路径，与旧版逐字相同）。两根都命中 ⇒ `exit 2` 并列全部候选；都不在 ⇒ `exit 2` 并列搜过的根与候选。
@@ -30,9 +31,10 @@ scripts/plugins/
   ⇒ ⛔ 不要在本目录放 `hud.js`：它会**遮蔽**保留 id ⇒ 启动 `exit 2`（列路径 + "改名或给路径"），
   而不是被静默装上（⛔ 不静默被内置件遮住，也不静默换源）。保留 id 判据 **ASCII 大小写不敏感**
   （`--plugin HUD` 同样触发遮蔽 / 同样解析内置件）。
-- import 根 = **入口文件所在目录**：入口用 `./lib/x.js`（向下，允许）；`lib/` 内部用同目录 `./x.js`。
+- import 根 = **入口文件所在目录**：入口用 `./lib/x.ts`（向下，允许）；`lib/` 内部用同目录 `./x.ts`。
   ⛔ 入口不能住在库的下层（`../` 越根会被 QJS 拒）。`.ts` / `.mts` 同形，且 specifier **必须带扩展名**
-  （loader 不补扩展名；见下节）。
+  （loader 不补扩展名；见下节）。★ 2026-11-28（T1）起**发行插件本身就是 `.ts`**（12 个），
+  类型档 = `pnpm typecheck` 的 `plugins/tsconfig.json`（`strict` + `erasableSyntaxOnly`）。
 
 ## `.ts` 插件（E1）
 
@@ -46,7 +48,8 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
   插件入口 / module loader（被 import 的 `lib/*.ts`）/ classic 探针 / 一般 `load`。
   `.ts` 入口**强制 module**（跳过 classic / `JS_DetectModule`：ng 的公开探测 API 没有 flags）。
 - **id 候选与 `.js` 优先**：`<id>.js` → `<id>.ts` → `<id>.mts`，**扩展名优先于根**；同一 id 同时有
-  `.js` / `.ts` ⇒ **`.js` 优先**（`.js` 是历史行为 / 发行件，⛔ 不静默换源、⛔ 不报歧义）。
+  `.js` / `.ts` ⇒ **`.js` 优先**（`.js` 是历史行为；2026-11-28 起**发行件是 `.ts`** —— 给路径或让
+  同一 id 的 `.js` 不存在即可，⛔ 不静默换源、⛔ 不报歧义）。
   保留 id `hud` 的遮蔽检查**只看 `hud.js`**（`hud.ts` 不参与；`.ts` HUD 不在本轮范围）。
 - **import 扩展名策略**：loader 按 specifier 原文解析，**不补扩展名** ⇒ 多文件 `.ts` 必须写
   `import … from "./lib/x.ts"`（`import type` 整条擦除、不产生 module request）。写 `./lib/x` 会在
@@ -99,7 +102,7 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 ★ **`null` = 没给**（与 2026-11 前逐字一致）：`{"on":null}` 等价于没写这个 key ⇒ 回退
 `--plugin-param` / 默认；⛔ 不 throw、⛔ 不当"值非法"（`null` 不是一种合法的设置值）。
 
-★ **取配置只有一条路**（2026-11-25）：`./lib/settings.js` 的 `openConfigDomain` / `slotSetting` /
+★ **取配置只有一条路**（2026-11-25）：`./lib/settings.ts` 的 `openConfigDomain` / `slotSetting` /
 `scriptListSetting` / `textSetting` / `intSetting` / `boolSetting`。⛔ 入口里再抄一份
 `configDomainOrNull` / `hasConfig` / 自己解析值 —— 四份语义分叉过一次（`precheck` 收 `"true"`、
 `on` 只收数字），改一处另一处静默过期。布尔是**并集语义**：`boolean` / `0|1` /
@@ -107,12 +110,12 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 
 | 域 id | key | owner（文件） |
 |---|---|---|
-| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.js`（库 = `lib/save.js`） |
-| `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.js`（根） |
-| `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`diag` (bool，缺省 false)；旧配置里的 `static` / `poll` **无害忽略** | `field-point-visible.js`（根） |
-| `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{owner?, title, live, entries}`（`owner` = 插件名，可缺省） | 写 = `lib/settings.js` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
+| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.ts`（库 = `lib/save.ts`） |
+| `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.ts`（根） |
+| `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`diag` (bool，缺省 false)；旧配置里的 `static` / `poll` **无害忽略** | `field-point-visible.ts`（根） |
+| `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{owner?, title, live, entries}`（`owner` = 插件名，可缺省） | 写 = `lib/settings.ts` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
 
-- ★ `field-point-visible.js` 是**常驻开关**（用户裁决 2026-11-25：目标 = **无条件显示所有采集 / 挖掘点**，
+- ★ `field-point-visible.ts` 是**常驻开关**（用户裁决 2026-11-25：目标 = **无条件显示所有采集 / 挖掘点**，
   不是"在 FIELD 里无条件显示 `?`/`!`"）：它常驻 arm **一条** `afterPosition(…, { mode: "reenter" })`
   （判据 = **已知脚本位置**）：
   `DRAWOBJ_ENTRY_LO/HI` = **`DRAWOBJ.BIN` 的入口窗口** `[0x003C,0x06BC)`
@@ -132,12 +135,12 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
   ⇒ 插件写在这张派生表上的位必被抹掉（所以**两条 `FIELD.BIN` setmap 钩子已删**：它们写在 SETOBJ
   之后但同帧就会被重算，留着只是让日志看起来"做了事"）。`fp:draw` 每进一次 `DRAWOBJ` 就 fire ⇒ ⛔ **不刷屏**：
   首帧 / `matched/patched` 变化才一行（行里带 `map=`），逐槽行只为**真的改了**的槽打，`diag=1` 时每 60 次一行。
-  ⛔ 不轮询（没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP`）、⛔ 不读档（不 import `lib/save.js` /
-  `lib/boot-to-title.js` / `lib/chains.js`）、
+  ⛔ 不轮询（没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP`）、⛔ 不读档（不 import `lib/save.ts` /
+  `lib/boot-to-title.ts` / `lib/chains.ts`）、
   ⛔ 不点鼠标、⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
   ⇒ 验收用法 = **玩家自己读档**：`--overlay --plugin field-point-visible`（`--plugin` 与
   `--input-plan` / `--control-root` 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的**自动化复现**仍归
-  `scenario-save10-field.js`。守卫：CTest `plugin-field-switch`（静态契约 + headless 常驻）与
+  `scenario-save10-field.ts`。守卫：CTest `plugin-field-switch`（静态契约 + headless 常驻）与
   `plugin-runtime` 的 `plugin/field-switch-apply`（`DRAWOBJ` 入口：`0x2→0x3` / `0x6→0x7` 补 bit0，
   `0x3`/`0x5`/`0x7` 不写，同窗口不重复 fire / 下一帧重新补 / 同状态不刷日志 / `on=0` 不写）。
   ★ `?` / `!` 是 **A 链格标记**（`SO030` 槽 `0x49`），不是点位；`on=1` 之后它们照旧出现。
@@ -166,7 +169,7 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 - ★ 与页面**同进程**才有热改：`--overlay --plugin field-point-visible`（经典回退 HUD 与 Run 插件
   同进程、同一份 store）。跨进程（hud 写、另一个 run 进程读）改完要重启。
 - 新增一条可配置项：**先**在 owner 的 `registerSettings.entries` 里登记（页面据此画控件）**再**在
-  消费者读点用 `lib/settings.js` 读它 —— 只登记不读 = 假开关，只读不登记 = 页面上改不到。
+  消费者读点用 `lib/settings.ts` 读它 —— 只登记不读 = 假开关，只读不登记 = 页面上改不到。
 
 - 域自动创建、不注册、可共享；域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
   `__proto__` / `prototype` / `constructor`。未知顶层键 / 未知域内键**保留**（前向兼容）。
