@@ -16,6 +16,7 @@
 //     本文件的 script / pos / timeoutMs 全是占位，⛔ 不是可运行配方。
 //
 // ⚠ `once` 的 `timeoutMs` 是**失败截止**：到点不是「放弃等待」，而是宿主先 reject、随后 fail Run。
+//   本文件**故意不写 try/catch**：超时 = 这个 Run 失败（catch 只能 log，不能续命）。
 //   ⇒ `Promise.race` 只适合「两个点都必然会出现、只想先知道顺序」的场合；
 //     真要取消一条等待只能结束 Run（once 没有取消 API）。
 

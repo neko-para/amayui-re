@@ -12,6 +12,7 @@
 //     这也意味着所有 timeout 的 deadline 都从 `start` 起算：总时长要留够；
 //     「每段从上一段命中起算」在 v2 里要用多个 Run（once 不能在 continuation 里再注册）。
 //   · `timeoutMs` 是**失败截止**：到点 reject 并 fail Run，不是「等不到就跳过」。
+//     ★ 本文件**故意不写 try/catch**：超时由宿主直接 fail 这个 Run（catch 只能 log，不能续命）。
 //   · `ctx.profile.begin/end` 也是 Run 回调能力（`inCallback()` 门）；v2 的 task continuation 里调会
 //     TypeError，所以本例子不演示 profile —— 要 profile 就把它放在仍然存在的 Run 回调里。
 //
