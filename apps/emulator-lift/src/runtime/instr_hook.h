@@ -1,10 +1,10 @@
 // emulator-lift · **脚本指令位置钩子**（插件面能力；正式实现）
 //
 // 三种能力是**彼此独立**的（用户裁决 2026-11-26 晚：触发 ≠ 修改）：
-//   ① **触发**：`ctx.hook.at(script, pos)` 装一条"到点"的观察 —— 只计数，⛔ 不做任何写；
-//   ② **读**：`handle.capture({ints, ptrs})` 采样该点的 local（最近一次命中，`handle.stats()` 读）；
-//   ③ **改**：`handle.patch(target, value, {maxHits})` 在**这条指令读之前**覆盖一个 dword，
-//      下一条脚本指令派发前逐字节恢复 ⇒ **净变化 0**（⛔ 不是持久写；持久写是 `ctx.edit`）。
+//   ① **触发**：`ctx.at` / `ctx.once` 装一条"到点"的观察 —— 只计数，⛔ 不做任何写；
+//   ② **读**：`tick.local.{int,ptr,ptrDword}` 在**命中那一拍**按需读 local；
+//   ③ **改**：`tick.patch(target, value)` 在**这条指令读之前**覆盖一个 dword，
+//      下一条脚本指令派发前逐字节恢复 ⇒ **净变化 0**（⛔ 不是持久写；持久写是 `tick.edit`）。
 //   ⇒ 插件可以只触发不读、只读不改、或装好触发后再决定改什么（`patch` 可反复覆盖/撤回）。
 //
 // 入口（谁在什么时刻调本模块）：VM 的脚本派发是 3 个 `call eax/edx`（`aot/aot_hook_ea.h` 的
@@ -40,8 +40,8 @@ enum class InstrPatchKind : std::uint8_t {
 const char* instrPatchKindName(InstrPatchKind kind);
 
 // ---- 订阅形状（S2c）----
-// ★ 为什么 form 是枚举而不是"一个 pos + lo/hi 的联合"：v1 的 `pos` 语义必须逐字保留
-//   （`InstrHookStatus.pos` / `hook.list().pos` / `duplicate` 判据都读它）。
+// ★ 为什么 form 是枚举而不是"一个 pos + lo/hi 的联合"：`Pos` 的 `pos` 语义必须逐字保留
+//   （`InstrHookStatus.pos` 与 `matchEntry` 都读它；Range 的 `pos` 保持 0）。
 enum class InstrHookForm : std::uint8_t {
     Pos = 0,     // {script, pos}
     Range = 1,   // {script, lo, hi} —— [lo, hi)
@@ -63,16 +63,13 @@ inline const char* instrHookFormName(InstrHookForm form) {
     return "?";
 }
 
-// ★ 三种**用途**（决定去重、链参与、Run 存活），⛔ 不要合并成 bool：
-//   V1At = `ctx.hook.at`（v1：按 (script,pos) 全局去重、不参与链、不算 hasPendingWork）
-//   Sub  = `ctx.at`（v2：允许重复、参与链、算 hasPendingWork）
-//   Once = `ctx.once` 的临时 hook（v2：允许重复、被动、算 hasPendingWork）
-enum class InstrHookKind : std::uint8_t { V1At = 0, Sub = 1, Once = 2 };
+// ★ 两种**用途**（决定链参与 / Run 存活），⛔ 不要合并成 bool：
+//   Sub  = `ctx.at`（参与链、算 hasPendingWork；同点多条允许）
+//   Once = `ctx.once` 的临时 hook（被动、算 hasPendingWork；同点多条允许）
+enum class InstrHookKind : std::uint8_t { Sub = 0, Once = 1 };
 
 inline const char* instrHookKindName(InstrHookKind kind) {
     switch (kind) {
-        case InstrHookKind::V1At:
-            return "v1";
         case InstrHookKind::Sub:
             return "sub";
         case InstrHookKind::Once:
@@ -106,13 +103,13 @@ struct InstrLocalView {
 };
 
 struct InstrHookStatus {
-    std::uint32_t id = 0;                 // 句柄（`ctx.hook.at` 返回的那个）
+    std::uint32_t id = 0;                 // 句柄（`ctx.at` 返回的那个）
     std::string script;
     std::uint32_t pos = 0;
     // ★ S2c 的观测面：用例要能判"装进去的是什么形状"（`hook.list()`），否则只能判 hits。
     //   ⛔ 复用不了 `kind`（下面那个是 **patch** 的种类，v1 语义）；这两个是新字段。
     //   `form != Pos` 时 `pos` 保持 0（form 决定哪个字段有意义，pos==0 不是错）。
-    InstrHookKind hook_kind = InstrHookKind::V1At;
+    InstrHookKind hook_kind = InstrHookKind::Sub;
     InstrHookForm form = InstrHookForm::Pos;
     std::uint32_t lo = 0;
     std::uint32_t hi = 0;
@@ -198,23 +195,10 @@ void instrHookRemoveSink(void* user);
 bool instrHookHasSink();
 
 /**
- * ① 触发：装一条"到点"的 hook（**纯观察**：不写、不读 guest 内存）。
- * `owner` = 这条 hook 的**归属**（`PluginHost` 传本 Run 的序号；`0` = 无主，只有纯 runtime / 测试用）。
- *   ★ 为什么需要 owner（S0 缺陷 1）：hook 表是**进程级**的，Run 结束必须能把"本 Run 装的"一次撤干净；
- *     没有 owner 就只能 `instrHookClear()`（会把别人的也撤掉），而 v1 的收口路径大多**连 clear 都没调**
- *     ⇒ Run 失败 / done 之后 guest 内存仍被按条改写。
- * 成功 ⇒ 返回句柄 id（≥1）；失败 ⇒ 0 + `*err` 静态字面量
- *   （`script_empty` / `pos_zero` / `duplicate` / `no_injection`）。
- */
-std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err);
-
-/**
- * 装一条**任意形状**的订阅（S2c）。`owner` = 本条订阅的归属（`PluginHost` 传 `run_serial_`）。
+ * 装一条**任意形状**的订阅。`owner` = 本条订阅的归属（`PluginHost` 传 `run_serial_`）。
  * 失败 ⇒ 0 + `*err` 静态字面量：
- *   `script_empty` / `pos_zero` / `range_empty` / `bad_where` / `duplicate`（**只有 V1At**）/ `no_injection`。
- * ★ `duplicate` 只对 `kind == V1At`：v1 的「同一 (script,pos) 只能一条」是**已发布语义**
- *   （合同 §4.5）；v2 的 `Sub` / `Once` 是**新面**，同点多条是它的用法（多 handler / 链）。
- * ★ 每条订阅 = 一条 Entry（各自 handle、同一个 owner）。
+ *   `script_empty` / `pos_zero` / `range_empty` / `bad_where` / `no_injection`。
+ * ★ 每条订阅 = 一条 Entry（各自 handle、同一个 owner）；同点多条**允许**（v2 的链 / 多 handler）。
  */
 std::uint32_t instrHookAddEx(std::uint64_t owner, const InstrHookWhere& where, InstrHookKind kind,
                              const char** err);
@@ -253,7 +237,7 @@ std::vector<InstrHookStatus> instrHookList();
  * ★ S0（缺陷 3）：告诉 runtime"这一趟构建到底在几个脚本派发点注入了 `lift_instr_hook`"。
  * 由 **AOT 的初始化路径**调一次（`aot_dispatch.cpp` 的 `ensureDispatchTable()` 把
  * `lift_pin.h` 的 `LIFT_AOT_PIN_INSTR_HOOK_SITES` 传进来）。`n == 0` ⇒ 注入面不存在
- * （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `instrHookAdd` 返回 `no_injection` 而**不是**一个
+ * （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `instrHookAddEx` 返回 `no_injection` 而**不是**一个
  * "装上了但永远 hits=0"的假句柄。
  * ★ **没人调** = 视作可用（纯 runtime / 测试夹具没有 AOT 生成形状可言；⛔ 不要让测试被迫先"打开"）。
  */

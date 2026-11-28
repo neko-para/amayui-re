@@ -107,7 +107,6 @@ let editRec = null;         // `tick-edit`：回执 + v1 `ctx.edit` 是否仍 Ty
 let editFailType = 0;
 let inputRec = null;        // `tick-input`：回执 + handler 内 status
 let inputStatusInTick = "";
-let inputStatusInDump = "";
 let patchRec = null;        // `tick-patch-cas`：回执
 let patchPreLocal = null;   // handler 里 patch 之后读到的 local.int(0)（必须是**打补丁前**的 7）
 let patchStat = null;       // 第二次 onTrigger 读到的 restores / restore_conflicts
@@ -125,8 +124,24 @@ function note(value) {
     return value === undefined ? UNDEF : value;
 }
 
+// ★ 回读通道（P2b）：读点任务里**没有 Tick**（guest 写只走 Tick）⇒ 本拍读数不再写 guest，
+//   改成一行 `dump#<seq> {...}` 日志；C++ 侧用 `PluginHost::lastLogLine()` 解析（`dumpInt`）。
+//   带递增序号 ⇒ 连续相同内容不会被宿主的"连续去重"吞掉（`PluginHost::log`）。
+let dumpOut = {};
+let dumpSeq = 0;
+
+// ★ QJS 沙箱没有 `JSON` 全局 ⇒ 手写一个只处理"数字值"的序列化（键 = 数字 id）。
+function dumpLine(obj) {
+    let out = "";
+    for (const key in obj) {
+        if (out.length !== 0) out += ",";
+        out += '"' + key + '":' + String(obj[key]);
+    }
+    return "{" + out + "}";
+}
+
 function put(ctx, id, value) {
-    ctx.edit.global.set("int", id, note(value));
+    dumpOut[id] = note(value);
 }
 
 function hitsOf(hooks, handle) {
@@ -264,9 +279,10 @@ const plugin = {
                     pos: tick.now.pos,
                     hasOpcode: ("opcode" in tick.now) ? 1 : 0,
                     opcode: tick.now.opcode,
-                    flatScript: tick.script,
-                    flatPos: tick.pos,
-                    flatOpcode: tick.opcode,
+                    // ★ P2b：Tick 的 deprecated 平铺已删除 ⇒ 这里断言**缺席**（1 = 仍在）。
+                    flatScript: ("script" in tick) ? 1 : 0,
+                    flatPos: ("pos" in tick) ? 1 : 0,
+                    flatOpcode: ("opcode" in tick) ? 1 : 0,
                     id: tick.id,
                 };
             });
@@ -628,6 +644,13 @@ const plugin = {
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
     dump(ctx) {
+        const done = this.dumpBody(ctx);
+        dumpSeq += 1;
+        log.info("dump#" + String(dumpSeq) + " " + dumpLine(dumpOut));
+        dumpOut = {};
+        return done;
+    },
+    dumpBody(ctx) {
         const mode = ctx.params.mode;
         if (mode === "chain-order") {
             put(ctx, OUT_A, order[0]);
@@ -688,7 +711,7 @@ const plugin = {
             put(ctx, OUT_C, r.hasOpcode);
             put(ctx, OUT_N, r.opcode);
             put(ctx, OUT_F0, r.flatPos);
-            put(ctx, OUT_F1, r.flatScript === SCRIPT ? 1 : 0);
+            put(ctx, OUT_F1, r.flatScript);
             put(ctx, OUT_F2, r.flatOpcode);
             put(ctx, OUT_F3, r.id);
             ctx.off(hNow);
@@ -856,9 +879,8 @@ const plugin = {
             put(ctx, OUT_C, r.applied ? 1 : 0);
             put(ctx, OUT_N, r.hasId ? 1 : 0);
             put(ctx, OUT_F0, inputStatusInTick === "queued" ? 1 : 0);
-            // 本回调里查（泵的 drain 在回调**之后**）仍是 queued；C++ 在 pump 之后用宿主队列判 applied。
-            inputStatusInDump = ctx.input.status(r.id);
-            put(ctx, OUT_F1, inputStatusInDump === "applied" ? 1 : 0);
+            // ★ P2b：RunCtx 没有 `input` ⇒ 读点任务里查不到 status；"下一读点 applied" 由 C++
+            //   直接读宿主队列（`queue().status(id) == Applied`，同一个不变量）。
             put(ctx, OUT_F2, r.id);
             ctx.off(hNow);
             return true;

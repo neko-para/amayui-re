@@ -79,12 +79,13 @@ quickjs-ng 的 quickts E1 补丁（纯类型擦除），补丁口径见
 ## 合同
 
 - 模块 specifier：`@amayui/lift-plugin`（`plugin.d.ts` 是 ambient module）。
-- 插件文件 = ES module：`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
-  ★ v2 的 `start(ctx)` 返回 `void`（只做 `ctx.at` / `ctx.once` / `ctx.task` 注册）；`onTrigger` 是
-  **deprecated 兼容层**（只有 start 返回了 v1 Trigger 集合时才会被调用）。
+- 插件文件 = ES module：`export default { render?, start? } satisfies PluginModule`。
+  `start(ctx)` 返回 `void`（只做 `ctx.at` / `ctx.once` / `ctx.task` 注册）；返回非 `undefined` ⇒ 装载失败。
+  `onTrigger` / `initialState` 已整条删除（出现即装载失败，退出码 2）。
 - 宿主 QJS 装载后只读 **default 导出**；不再读 `globalThis.render/start/onTrigger`，也没有运行时 `definePlugin`。
 - `sample` / `screenshot` 不在插件 API 里（它们是 `emu-ctl` 的控制面组合）；插件读 `scriptPos` 用 `ctx.read.scriptPos`。
-- **v1（deprecated）`ctx.hook.at(script, pos)` + `handle.patch(target, value)`**（只 `RunCtx`）：在**某条脚本指令执行前**覆盖它读到的一个 dword，**下一条脚本指令派发前恢复** ⇒ 净变化 0（⛔ 不是持久写；持久写是 `ctx.edit.global.set`）。`spec` 三选一目标（`ptrLocal` / `localInt` / `globalId`）+ `value`；`captureInts` / `capturePtrs` 采样本帧 local（`status()` 读）。v2 的触发面用 `ctx.at` / `ctx.once`，本拍瞬时覆盖用 `tick.patch`。合同见 `docs/03-emulator/plugin-runtime.md` §4.5 / §4.15。
+- guest 写**只走 `Tick`**：`tick.edit`（立即持久写）/ `tick.input`（入队、下一读点落地）/ `tick.patch`
+  （本拍瞬时覆盖、下一拍恢复）。`RunCtx` 没有 `edit` / `input`。合同见 `docs/03-emulator/plugin-runtime.md` §4.5 / §4.15。
 
 ## 内建插件的配置域
 
@@ -202,9 +203,9 @@ ctest --test-dir apps/emulator-lift/out -R 'quickts' --output-on-failure
 | `rearm.ts` | `ctx.off` + 新 `ctx.at`（新订阅）；v2 没有 Once / Reenter mode |
 | `timeout.ts` | `ctx.once(where, { timeoutMs })` + `try/catch`；timeout = 失败截止（catch 里只能 log） |
 
-- ★ **v1 的 `start` 返回 Trigger / `onTrigger` 是 deprecated 兼容层**（`plugin.d.ts` 里各成员都带
-  `@deprecated`）：v2 的 `start(ctx)` 返回 `void`，只做 `ctx.at` / `ctx.once` / `ctx.task` 的注册；
-  组合用 task、切换 Run 由控制层做。v1 兼容层仍按原语义工作（不要因此把新插件写成 v1）。
+- ★ **`start` 返回 Trigger 集合 / `onTrigger` 那一层已删除**：`start(ctx)` 返回 `void`，只做
+  `ctx.at` / `ctx.once` / `ctx.task` 的注册；组合用 task、切换 Run 由控制层做。返回非 `undefined`
+  或出现 `onTrigger` / `initialState` ⇒ 装载失败（⛔ 不静默忽略）。
 - 示例只依赖 `plugin.d.ts` 的类型，不需要运行时 shim。
 - ★ `script` 名是 **marker 文件名（含 `.BIN`）**、宿主**精确相等** ⇒ 示例里的 `"TITLE.BIN"` 等仍是
   **占位**，照抄进真插件要换成真实脚本名；`pos` 真实值从 1 开始、区间必须 `lo < hi`。

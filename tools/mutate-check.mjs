@@ -4473,11 +4473,6 @@ const MUTATIONS = [
   //     promise 永远 pending，而**没有任何症状**（旧复审 M1 就是删掉这支仍全绿）。
   //   ★ 红点 = `plugin/bare-once-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
 
-  // ── S2-3：`hasPendingWork` 的 `hook_handlers` 支（onTick 订阅是 Run 存活来源）────────────────
-  //   ★ 代表这一类错：把 sync 订阅从存活来源里删掉 ⇒ `ctx.hook.at(...).onTick(fn)` 之后返回 null
-  //     的 Run 第一拍就收口；S2a 的 onTick 订阅变成"永远等不到 on_released"的永久 pending。
-  //   ★ 红点 = `plugin/onTick-keeps-run`（第一拍 hook 表就空 / readout 已是 done）。
-
   // ── S2c：`ctx.at` 的链必须由 `next()` 控制（不调 = 截断后续 at 参与者）────────────────────────
   //   ★ 代表这一类错：`truncated` 永远 false ⇒ 每个 at handler 之后都继续 ⇒ "不调 next 也能继续"。
   //     它的症状只有**顺序 / 条数**（`order`），`hits` 是匹配数、看不出来 ⇒ 红点在 order。
@@ -4499,40 +4494,11 @@ const MUTATIONS = [
   //     （在 S2c-2 的写面上这等于"改错一帧"）；`now` 快照本来就可以读，所以判据只能看 local。
   //   ★ 红点 = `plugin/tick-stale`（local.int 不抛 ⇒ staleOk=0）。
 
-  // ── S2c：`duplicate` 只对 v1（`kind == V1At`）生效 ─────────────────────────────────────────────
-  //   ★ 代表这一类错：把 v1 的 `(script,pos)` 去重施加到 v2 的 Sub / Once ⇒ 同点第二条 `ctx.at`
-  //     返回 undefined（S2c 的核心用法当场坏掉）、`once` 与 v1 同点被拒。
-  //   ★ 红点 = `instr-hook/add-ex-shared`（Sub 第二次必须是 `duplicate` 而不是 0）；
-  //     同时 `plugin/at-multi-same-pos` 会红（4 条只装上 1 条）。
-  {
-    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
-    from:
-      '    if (kind == InstrHookKind::V1At) {\n' +
-      '        for (const Entry& e : state().entries) {\n' +
-      '            if (e.hook_kind == InstrHookKind::V1At && e.pos == where.pos && e.script == where.script) {\n' +
-      '                return fail("duplicate");\n' +
-      '            }\n' +
-      '        }\n' +
-      '    }\n',
-    to:
-      '    for (const Entry& e : state().entries) {  // 变异：对所有 kind 都去重\n' +
-      '        if (e.pos == where.pos && e.script == where.script) {\n' +
-      '            return fail("duplicate");\n' +
-      '        }\n' +
-      '    }\n',
-    guard: 'ctest:instr-hook',
-    ctest: 'instr-hook',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-instr-hook',
-    what:
-      '`instrHookAddEx` 的去重不看 `kind`（对 Sub / Once 也 `duplicate`）⇒ 同点第二条 `ctx.at` / ' +
-      '`once` 拿不到句柄；`instr-hook/add-ex-shared` 红（`plugin/at-multi-same-pos` 连带红）',
-  },
-
-  // ── S2c-1 复审 F1（S2）+ S2c-2b：v1 patch 写成功之后 ⛔ 不许 `break`（同点后面的订阅会被饿死）──
-  //   ★ 代表这一类错：写完立刻 `break;` ⇒ 同一点的 v2 `ctx.at` 既不 `hits += 1`、也进不了
-  //     `hit_ids` ⇒ handler 静默不跑、`hook.list().hits` 恒 0。
-  //   ★ 红点 = `instr-hook/v1-patch-does-not-starve-sub`（sub.hits 必须是 1、sink 必须 2 条）。
+  // ── S2c-1 复审 F1（S2）+ S2c-2b：patch 写成功之后 ⛔ 不许 `break`（同点后面的订阅会被饿死）──
+  //   ★ 代表这一类错：写完立刻 `break;` ⇒ 同一点后面的 `ctx.at` 既不 `hits += 1`、也进不了
+  //     `hit_ids` ⇒ handler 静默不跑。
+  //   ★ 红点 = `instr-hook/pending-same-addr`（同址两条 Sub 各写一次：guest 必须是后注册的 enc(9)；
+  //     break 之后停在第一条的 enc(7) ⇒ 当场红）。
   {
     file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
     from:
@@ -4547,8 +4513,8 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-instr-hook',
     what:
-      'v1 patch 写成功后 `break;`（立刻跳出遍历）⇒ 同点后面的 v2 订阅既不 `hits += 1` 也进不了 ' +
-      'sink；`instr-hook/v1-patch-does-not-starve-sub` 红',
+      'patch 写成功后 `break;`（立刻跳出遍历）⇒ 同点后面的 Sub 既不 `hits += 1` 也进不了 sink；' +
+      '`instr-hook/pending-same-addr` 红（guest 停在第一条的 enc(7)）',
   },
 
   // ── S2c-1 复审 F4（S3）：「Tick 的有效期**含本入口 drain**」的常驻变异 ─────────────────────────
@@ -4611,7 +4577,7 @@ const MUTATIONS = [
     buildTarget: 'lift-instr-hook',
     what:
       '`restorePendingLocked` 只结算**第一槽**（多槽退回单槽思维）⇒ 同拍第二条订阅的覆盖留在 guest 里；' +
-      '`instr-hook/pending-multi-slot` 红（`pending-slot-limit` / `v1-patch-does-not-starve-sub` 连带红）',
+      '`instr-hook/pending-multi-slot` 红（`pending-slot-limit` / `pending-same-addr` 连带红）',
   },
 
   // ── S2c-2b：`tick.patch` 的写必须在 handler **之后** ──────────────────────────────────────────

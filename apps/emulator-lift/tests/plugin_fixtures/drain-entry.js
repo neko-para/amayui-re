@@ -2,13 +2,14 @@
 //
 // 判据（红了意味着什么）：
 //   · `mode=ok`（`plugin/drain-per-entry`）：
-//     ① `start` 里排的 microtask 必须**在同一个入口内**跑完 ⇒ 第一个读点之后的 dump 写进
-//        guest 的 `phase` 是 **2**（没有 drain ⇒ 1）；
+//     ① `start` 里排的 microtask 必须**在同一个入口内**跑完 ⇒ 下一个入口（tick handler）里读到的
+//        `phase` 是 **2**（没有 drain ⇒ 1）；
 //     ② tick handler 里排的 microtask 必须**在 `runInstrHits` 内**跑完 ⇒ C++ 在 `instrHookProbe`
 //        返回后立刻看到那一行 log（没有 drain ⇒ 要等下一个入口）。
 //   · `mode=spin`（`plugin/drain-budget`）：`const f = () => Promise.resolve().then(f); f();`
 //     ⇒ 微任务里的无限链必须被**同一预算窗**打断（deadline / op_limit），Run fail、
 //     `pump()` 能返回（guest 不被卡死）。
+// ★ P2b：读点任务里没有 Tick（guest 写只走 Tick）⇒ phase 由 tick handler 用 `tick.edit` 写。
 const OUT_PHASE = 0xb110;
 
 let phase = 1;
@@ -28,16 +29,13 @@ const plugin = {
             phase = 2;
         });
         // ② `runInstrHits` 的 drain：tick handler 里排的 continuation 必须在本入口跑完。
+        //   ③ 读点上的读数（phase）也在这里用 Tick 写回。
         ctx.at({ script: "FIELD.BIN", pos: 0x100 }, (tick) => {
             Promise.resolve().then(() => {
                 tickLogs += 1;
                 log.info("tick-drained#" + tickLogs);
             });
-        });
-        // ③ 读点上的 dump：写 phase（Run 侧入口；ctx.edit 可用）。
-        ctx.task(async (t) => {
-            await t.delay(0);
-            ctx.edit.global.set("int", OUT_PHASE, phase);
+            tick.edit.global.set("int", OUT_PHASE, phase);
         });
     },
 };

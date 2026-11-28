@@ -13,7 +13,8 @@
 //   · `bare-once`       ：**裸** `ctx.once`（不进 `ctx.task`）+ start 不注册 ⇒ Run 靠 once 活着。
 //
 // ★ guest 写回统一放在「dump 循环」里：start 起一个 task，每次读点 `await ctx.delay(0)` 之后
-//   把模块变量写进 guest（pump 是 Run 侧入口 ⇒ ctx.edit 可用）。⛔ 不是 v1 的 onTrigger。
+//   把模块变量**打成一行日志**（P2b：读点任务里没有 Tick ⇒ guest 写只走 Tick；C++ 用
+//   `PluginHost::lastLogLine()` + `dumpInt` 解析）。⛔ 不是 v1 的 onTrigger。
 const SCRIPT = "FIELD.BIN";
 const POS = 0x0100;
 const OUT_POS = 0xb120;
@@ -24,9 +25,21 @@ const OUT_PHASE = 0xb125;
 
 let lastTick = null;
 let phase = 0;
+let dumpOut = {};
+let dumpSeq = 0;
 
 function put(ctx, id, value) {
-    ctx.edit.global.set("int", id, value);
+    dumpOut[id] = value === undefined ? 0x7ffffffe : value;
+}
+
+// ★ QJS 沙箱没有 `JSON` 全局 ⇒ 手写"数字值"序列化（键 = 数字 id）。
+function dumpLine(obj) {
+    let out = "";
+    for (const key in obj) {
+        if (out.length !== 0) out += ",";
+        out += '"' + key + '":' + String(obj[key]);
+    }
+    return "{" + out + "}";
 }
 
 function scheduleDump(ctx) {
@@ -45,6 +58,9 @@ function scheduleDump(ctx) {
         } else if (mode === "task-await") {
             put(ctx, OUT_PHASE, phase);
         }
+        dumpSeq += 1;
+        log.info("dump#" + String(dumpSeq) + " " + dumpLine(dumpOut));
+        dumpOut = {};
     });
 }
 
@@ -57,11 +73,11 @@ const plugin = {
                 const tick = await pending;
                 lastTick = {
                     id: tick.id,
-                    script: tick.script,
-                    pos: tick.pos,
-                    opcode: tick.opcode,
+                    script: tick.now.script,
+                    pos: tick.now.pos,
+                    opcode: tick.now.opcode,
                 };
-                log.info("once-resolve: resumed pos=" + String(tick.pos) + " id=" + String(tick.id));
+                log.info("once-resolve: resumed pos=" + String(tick.now.pos) + " id=" + String(tick.id));
             });
             log.info("once-resolve: armed");
             scheduleDump(ctx);
@@ -71,7 +87,7 @@ const plugin = {
             ctx.task(async () => {
                 try {
                     const tick = await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 1 });
-                    log.info("unexpected resolve pos=" + String(tick.pos));
+                    log.info("unexpected resolve pos=" + String(tick.now.pos));
                 } catch (e) {
                     log.info("once-timeout caught: " + String(e && e.message ? e.message : e));
                 }
@@ -101,8 +117,8 @@ const plugin = {
         if (mode === "task-keeps-run") {
             ctx.task(async () => {
                 const tick = await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
-                lastTick = { id: tick.id, script: tick.script, pos: tick.pos, opcode: tick.opcode };
-                log.info("task-keeps-run: resumed pos=" + String(tick.pos));
+                lastTick = { id: tick.id, script: tick.now.script, pos: tick.now.pos, opcode: tick.now.opcode };
+                log.info("task-keeps-run: resumed pos=" + String(tick.now.pos));
             });
             log.info("task-keeps-run: armed");
             return;
@@ -132,7 +148,7 @@ const plugin = {
         if (mode === "bare-once") {
             const pending = ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
             pending.then((tick) => {
-                log.info("bare-once: resolved pos=" + String(tick.pos) + " id=" + String(tick.id));
+                log.info("bare-once: resolved pos=" + String(tick.now.pos) + " id=" + String(tick.id));
             });
             log.info("bare-once: armed");
             return;

@@ -187,7 +187,11 @@ public:
     bool finished() const { return finished_; }
     int finishCode() const { return finish_code_; }
     const std::string& finishReason() const { return finish_reason_; }
-    bool quitRequested() const { return quit_requested_; }
+    bool quitRequested() const override { return quit_requested_; }
+
+    // ★ F3（v2 延伸）：tick handler / 本入口 drain 里 `ctx.fail` / `ctx.quit` ⇒ 立刻丢已提交的
+    //   input（与 Run 回调同一条裁决；`ctx.finish` 不丢）。
+    void releaseAbortedInput() override { releaseRunInput(); }
     // 给 `AotRunOptions::stop_requested` 的**非拥有**指针（生命周期 = 本对象）。
     const bool* quitFlag() const { return &quit_requested_; }
     std::uint64_t callbacks() const { return callbacks_; }

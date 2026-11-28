@@ -260,7 +260,7 @@ void ensureDispatchTable() {
     // ★ S0（缺陷 3）：把"这一趟到底注入了几个 `lift_instr_hook` 站点"从构建期带到运行期。
     //   调用点 = 本函数（AOT 臂唯一的初始化路径，`AotHost::run()` 在起 feeder 之前调它；
     //   `lift_pin.h` 就在本 TU 里，⛔ 不在别处再解析一次 pin）。
-    //   0 ⇒ `ctx.hook.at` 当场 `no_injection`（⛔ 不是"装上了、永远 hits=0"）。
+    //   0 ⇒ `ctx.at` / `ctx.once` 当场 `no_injection`（⛔ 不是"装上了、永远 hits=0"）。
     lift::instrHookSetInjectionSites(pinnedInstrHookSites());
 }
 

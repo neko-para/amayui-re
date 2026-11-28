@@ -23,7 +23,7 @@ const plugin = {
             for (let i = 0; i < 50000000; i = i + 1) {
                 x = x + i;
             }
-            ctx.edit.global.set("int", BUDGET_MARK, x);
+            log.info("hook-release: budget loop finished x=" + String(x));  // 走到这里 = 预算没触发
             return;
         }
         if (mode === "done") {

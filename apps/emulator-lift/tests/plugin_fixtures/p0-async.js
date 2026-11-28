@@ -31,23 +31,23 @@ const plugin = {
         if (mode === "once-where-range-lo" || mode === "once-where-range-hi") {
             ctx.task(async (t) => {
                 const tick = await ctx.once({ script: SCRIPT, lo: LO, hi: HI }, { timeoutMs: 60000 });
-                log.info("once-where: range resolved mode=" + mode + " pos=" + String(tick.pos));
+                log.info("once-where: range resolved mode=" + mode + " pos=" + String(tick.now.pos));
             });
             return null;
         }
         if (mode === "once-where-script") {
             ctx.task(async (t) => {
                 const a = await ctx.once({ script: SCRIPT }, { timeoutMs: 60000 });
-                log.info("once-where: script first pos=" + String(a.pos));
+                log.info("once-where: script first pos=" + String(a.now.pos));
                 const b = await ctx.once({ script: SCRIPT }, { timeoutMs: 60000 });
-                log.info("once-where: script second pos=" + String(b.pos));
+                log.info("once-where: script second pos=" + String(b.now.pos));
             });
             return null;
         }
         if (mode === "once-where-opcode") {
             ctx.task(async (t) => {
                 const tick = await ctx.once({ opcode: OPCODE }, { timeoutMs: 60000 });
-                log.info("once-where: opcode resolved pos=" + String(tick.pos));
+                log.info("once-where: opcode resolved pos=" + String(tick.now.pos));
             });
             return null;
         }
@@ -84,10 +84,10 @@ const plugin = {
         if (mode === "once-from-task") {
             ctx.task(async (t) => {
                 const a = await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
-                log.info("once-from-task: first pos=" + String(a.pos));
+                log.info("once-from-task: first pos=" + String(a.now.pos));
                 // ★ H1 取消的判据：这一行在**第一次 await 之后**（continuation 里）注册第二个 once。
                 const b = await ctx.once({ script: SCRIPT, pos: POS2 }, { timeoutMs: 60000 });
-                log.info("once-from-task: second pos=" + String(b.pos));
+                log.info("once-from-task: second pos=" + String(b.now.pos));
             });
             return null;
         }
@@ -105,7 +105,7 @@ const plugin = {
                 await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
                 // ★ H1/H2 取消的判据：continuation 里装同步订阅；它让 Run 保持存活。
                 atHandle = ctx.at({ script: SCRIPT, pos: POS2 }, (tick, next) => {
-                    log.info("at-from-task: hit pos=" + String(tick.pos));
+                    log.info("at-from-task: hit pos=" + String(tick.now.pos));
                     ctx.off(atHandle);
                     next();
                 });

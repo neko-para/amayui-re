@@ -6,8 +6,6 @@
 //
 // ★ 这些断言写在**插件自己**里：宿主侧读不到 JS 对象，而 `ctx.fail` 会把名字带进 readout。
 const REQUIRED = [
-    "edit",
-    "input",
     "read",
     // ★ 异步面（`once` 返回 Promise<Tick>；`task` 登记协程；`delay` / `waitAny`）。
     "once",
@@ -27,6 +25,8 @@ const REQUIRED = [
 ];
 
 const FORBIDDEN = [
+    "edit",
+    "input",
     "trigger",
     "hook",
     "now",
@@ -57,20 +57,35 @@ const plugin = {
         // ---- EngineRead 的形状（C2a 只有 global.get）----
         if (typeof ctx.read.global.get !== "function") bad.push("missing:read.global.get");
 
-        // ---- 回执形状：Edit（立即）与 Input（只入队）----
-        const edit = ctx.edit.global.set("int", 0xb1b6, 0);
-        if (!("accepted" in edit) || !("queued" in edit) || !("applied" in edit)) {
-            bad.push("edit.receipt.shape");
-        }
-        if (edit.accepted !== true || edit.applied !== true || edit.queued !== false) {
-            bad.push(`edit.receipt.values:accepted=${edit.accepted},applied=${edit.applied},queued=${edit.queued}`);
-        }
-        const click = ctx.input.click(10, 20);
-        if (!("id" in click) || typeof click.id !== "number" || click.id <= 0) {
-            bad.push("input.receipt.id");
-        }
-        const status = ctx.input.status(click.id);
-        if (status !== "queued") bad.push(`input.status:${status}`);
+        // ---- guest 写只走 Tick（P2b）：在 at handler 里判 Tick 成员表 + 回执形状 ----
+        //   ★ 不在 start 里写 guest（RunCtx 没有 edit/input）；handler 命中一次就 finish。
+        const handle = ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, (tick) => {
+            const tbad = [];
+            for (const key of ["id", "now", "local", "edit", "input", "patch"]) {
+                if (!(key in tick)) tbad.push("tick.missing:" + key);
+            }
+            // deprecated 平铺已删除（1 = 仍在）。
+            for (const key of ["script", "pos", "opcode"]) {
+                if (typeof tick[key] !== "undefined") tbad.push("tick.present:" + key);
+            }
+            // 回执：Edit（立即）与 Input（只入队）
+            const edit = tick.edit.global.set("int", 0xb1b6, 0);
+            if (!("accepted" in edit) || !("queued" in edit) || !("applied" in edit)) {
+                tbad.push("edit.receipt.shape");
+            }
+            if (edit.accepted !== true || edit.applied !== true || edit.queued !== false) {
+                tbad.push(`edit.receipt.values:accepted=${edit.accepted},applied=${edit.applied},queued=${edit.queued}`);
+            }
+            const click = tick.input.click(10, 20);
+            if (!("id" in click) || typeof click.id !== "number" || click.id <= 0) {
+                tbad.push("input.receipt.id");
+            }
+            const status = tick.input.status(click.id);
+            if (status !== "queued") tbad.push(`input.status:${status}`);
+            if (tbad.length !== 0) ctx.fail("api-surface", tbad.join(","));
+            else ctx.finish(0);
+        });
+        if (typeof handle !== "number" || handle <= 0) bad.push("at.install:" + String(handle));
 
         // ---- ctx.params（只读；宿主给了什么就有什么）----
         if (ctx.params.probe !== "api-surface") bad.push(`params.probe:${String(ctx.params.probe)}`);
@@ -126,7 +141,7 @@ const plugin = {
 
         // ---- S2b：异步面的**输入校验**（都是 TypeError，⛔ 不静默接受）----
         //   `once`：where 必须是 {script,pos}；script 非空、pos > 0；timeoutMs **必填且 > 0**。
-        //   ★ 这里只喂**非法**参数 ⇒ 校验在 `instrHookAdd` 之前抛，不会留下真的临时 hook。
+        //   ★ 这里只喂**非法**参数 ⇒ 形状校验在注册之前抛，不会留下真的临时 hook。
         const badOnce = [
             () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }),
             () => ctx.once({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, {}),

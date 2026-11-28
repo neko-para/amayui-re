@@ -7,31 +7,27 @@
 //   ② `instr-hook/patch-restore-clean`：窗口里没人写 ⇒ 恢复成**原 raw**、`restores == 1`、
 //      `restore_conflicts == 0`。红了 = CAS 把正常恢复也拒了（净变化不再是 0）。
 //   ③ `instr-hook/no-injection`：`instrHookSetInjectionSites(0)`（= `--no-s7` / 闭包没覆盖派发 EA）
-//      ⇒ `instrHookAdd` **失败**且 `err == "no_injection"`；恢复非 0 后又能装。
+//      ⇒ `instrHookAddEx` **失败**且 `err == "no_injection"`；恢复非 0 后又能装。
 //      红了 = 返回一个"永远 hits=0"的假句柄（S0 缺陷 3 复发：插件只看到"什么都没发生"）。
 //   ④ `instr-hook/owner-release`：`instrHookReleaseOwner(a)` 只删 a 的（b 还在）；
 //      `instrHookClear()` 全清。红了 = Run 收口无法只撤自己的 hook（S0 缺陷 1 的机制面）。
 //   ⑤ `instr-hook/patch-edit-cancels-pending`：窗口里走**持久写**（`GuestEditSink::globalSet`，
-//      即 `ctx.edit.global.set` 的唯一实现）写同一地址 ⇒ pending 被**主动撤销**：下一拍既不写回、
+//      即 `tick.edit.global.set` 的唯一实现）写同一地址 ⇒ pending 被**主动撤销**：下一拍既不写回、
 //      也不记 `restores` / `restore_conflicts`，地址保持持久写的值。
 //      红了 = 持久写被瞬时覆盖的恢复盖掉（"持久写赢过瞬时覆盖"只在 CAS 下"碰巧"成立）。
 //   ⑥ `instr-hook/sink-hit-fields`（S2a）：命中后 `InstrHookSink::on_hits` 收到的
 //      handle / script / pos / opcode / hits / local counts 逐项正确；pos 过滤仍有效；
 //      注销 sink 之后不再分发、但 `stats().hits` 照旧（计数不依赖 sink）。
-//      红了 = 指令点 → ui 的反向通道断了或字段漂（`handle.onTick` 永远不跑 / 参数错）。
+//      红了 = 指令点 → ui 的反向通道断了或字段漂（`ctx.at` 的 handler 永远不跑 / 参数错）。
 //   ⑦ `instr-hook/sink-release-events`（S2a）：remove / releaseOwner / clear 摘条目时
 //      `on_released` 各发**恰好一次**、按安装顺序、互不重复；不存在的句柄不发。
 //      红了 = ui 层的 JS handler 泄漏（条目没了、JS 值还在）。
 //   ⑧ `instr-hook/sink-hit-batch`（S2c）：同一点 3 条订阅 ⇒ 一次派发 `on_hits` **恰好一次**、
 //      `count == 3`、顺序 = handle 升序、脚本名 = **本次派发名**；另一个 pos 不命中。
 //      红了 = 分发退回逐条（链拿不到"这批就是全部"）或批量只发第一条。
-//   ⑨ `instr-hook/add-ex-shared`（S2c）：`duplicate` **只对 V1At**；Sub / Once 同点可重复；
+//   ⑨ `instr-hook/add-ex-shared`（S2c）：同点多条 v2 订阅（Sub / Once）可共存、handle 互异；
 //      `{Range}` + `{Pos}` 同拍各命中一次；`range_empty` / `bad_where` 两条形状校验。
-//      红了 = v2 同点多订阅被 v1 去重拒掉（`at-multi-same-pos` 会连带红）或形状校验缺失。
-//   ⑩ `instr-hook/v1-patch-does-not-starve-sub`（S2c-1 复审 F1 + S2c-2 多槽）：同点 V1At+patch 写成功之后，
-//      后面的 v2 `Sub` 仍必须 `hits += 1` 并进 sink 的批量；★ S2c-2 起**两条都写**（多槽 + 同址合并）：
-//      地址 = 最后一次写、下一拍恢复回**最初** raw。
-//      红了 = probe 又退回"写成功就 break/跳过"⇒ 同点后面的 `ctx.at` 静默不跑（S2 复发）或多槽丢一条。
+//      红了 = v2 同点多订阅被去重拒掉（`at-multi-same-pos` 会连带红）或形状校验缺失。
 //   ⑪ `instr-hook/add-ex-opcode`（S2c-1 复审 F6）：`{opcode}` 真按 opcode 匹配；撤掉 opcode 条目后
 //      `has_opcode_entry` 归 false ⇒ 普通 probe **不读 pc**（用 `g_access` 判）。
 //      红了 = opcode 匹配是假面 / 闸门恒 true（每拍多付一次 `rd32(pc)`）。
@@ -54,7 +50,7 @@
 #include <string>
 
 #include "check.h"
-#include "runtime/edit_sink.h"       // ★ ctx.edit 的唯一实现（持久写那条判据）
+#include "runtime/edit_sink.h"       // ★ tick.edit 的唯一实现（持久写那条判据）
 #include "runtime/engine_marker.h"   // Engine 单例 / 帧记录 / 名字表（与实现同一份偏移）
 #include "runtime/instr_hook.h"
 #include "runtime/memory.h"
@@ -142,7 +138,7 @@ bool makeFakeEngine(L::GuestMemory& mem) {
     if (!put32(mem, kFileDbEa + L::kFileRootNameBaseOffset, kNameBase)) return false;
     if (!putName(mem, kNameBase, kScriptId, kScript)) return false;
     if (!putName(mem, kNameBase, kOtherScriptId, "OTHER.BIN")) return false;
-    // int 池 + ENC key（`ctx.edit` 与 `GlobalInt` 覆盖共用这一份几何）。
+    // int 池 + ENC key（`tick.edit` 与 `GlobalInt` 覆盖共用这一份几何）。
     if (!put32(mem, kEngine + L::kScriptGlobalIntBaseOffset, kIntPool)) return false;
     if (!put32(mem, kEngine + L::kScriptGlobalIntCountOffset, kIntCount)) return false;
     if (!put32(mem, kEngine + L::kScriptGlobalIntKeyOffset, kKey)) return false;
@@ -165,11 +161,15 @@ void foreignWrite(L::GuestMemory& mem, std::uint32_t ea, std::uint32_t raw) {
     LIFT_CHECK(put32(mem, ea, raw));
 }
 
+std::uint32_t addExHook(std::uint64_t owner, L::InstrHookForm form, const std::string& script,
+                        std::uint32_t a, std::uint32_t b, L::InstrHookKind kind, bool* ok);
+
 std::uint32_t addHook(std::uint64_t owner, std::uint32_t pos, bool* ok) {
-    const char* err = nullptr;
-    const std::uint32_t h = L::instrHookAdd(owner, kScript, pos, &err);
-    if (ok != nullptr) *ok = (h != 0 && err == nullptr);
-    if (h == 0) std::fprintf(stderr, "  instrHookAdd err=%s\n", err != nullptr ? err : "(null)");
+    // v2 只有 Sub / Once 两种用途；`{script,pos}` 的纯观察订阅 = Sub。
+    bool ex_ok = false;
+    const std::uint32_t h =
+        addExHook(owner, L::InstrHookForm::Pos, kScript, pos, 0, L::InstrHookKind::Sub, &ex_ok);
+    if (ok != nullptr) *ok = ex_ok;
     return h;
 }
 
@@ -277,7 +277,11 @@ void caseNoInjection() {
     L::instrHookClear();
     L::instrHookSetInjectionSites(0u);
     const char* err = nullptr;
-    const std::uint32_t denied = L::instrHookAdd(3u, kScript, kPosA, &err);
+    L::InstrHookWhere denial;
+    denial.form = L::InstrHookForm::Pos;
+    denial.script = kScript;
+    denial.pos = kPosA;
+    const std::uint32_t denied = L::instrHookAddEx(3u, denial, L::InstrHookKind::Sub, &err);
     LIFT_CHECK_EQ_U32(denied, 0u);
     LIFT_CHECK(err != nullptr && std::strcmp(err, "no_injection") == 0);
     LIFT_CHECK(L::instrHookList().empty());
@@ -329,7 +333,7 @@ void caseOwnerRelease() {
 }
 
 // =====================================================================================
-// ⑤ 持久写（`ctx.edit.global.set`）赢过瞬时覆盖：pending 被主动撤销
+// ⑤ 持久写（`tick.edit.global.set`）赢过瞬时覆盖：pending 被主动撤销
 // =====================================================================================
 void caseEditCancelsPending() {
     lift_test::g_current_case = "instr-hook/patch-edit-cancels-pending";
@@ -344,12 +348,12 @@ void caseEditCancelsPending() {
     const std::uint32_t h = addHook(4u, kPosA, &added);
     LIFT_CHECK(added);
     const char* err = nullptr;
-    // 目标 = `globalId 4`（与 `ctx.edit.global.set("int", 4, …)` 同一个 id 空间）。
+    // 目标 = `globalId 4`（与 `tick.edit.global.set("int", 4, …)` 同一个 id 空间）。
     LIFT_CHECK(L::instrHookSetPatch(h, true, L::InstrPatchKind::GlobalInt, kGlobalIndex, 7u, 0u, &err));
     dispatchAt(mem, cpu, kPosA);
     LIFT_CHECK_EQ_U32(mem.rd32(targetGlobalAddr()), enc(7u));
 
-    // 窗口内走**持久写**（`ctx.edit` 的唯一实现）写同一地址。
+    // 窗口内走**持久写**（`tick.edit` 的唯一实现）写同一地址。
     L::plugin::GuestEditSink sink(mem);
     L::GlobalValue value;
     value.kind = L::GlobalKind::Int;
@@ -372,7 +376,7 @@ void caseEditCancelsPending() {
 // =====================================================================================
 // ⑥ S2a · sink 的命中字段（`instr-hook/sink-hit-fields`）
 //
-//   红 = 指令点命中后 ui 层收不到"现场"（或收到错的值）⇒ `handle.onTick` 永远不跑 / 参数漂。
+//   红 = 指令点命中后 ui 层收不到"现场"（或收到错的值）⇒ `ctx.at` 的 handler 永远不跑 / 参数漂。
 //   判据：一次 dispatch ⇒ 恰好 1 条 hit，且 handle / script / pos / opcode / hits / counts 逐项相等；
 //   再 dispatch ⇒ hits 递增；**另一个 pos** ⇒ 0 条新 hit（pos 过滤没被破坏）；
 //   注销 sink 之后 ⇒ 0 条新 hit，但 `stats().hits` 照旧 +1（**计数不依赖 sink**）。
@@ -469,7 +473,7 @@ void caseSinkHitFields() {
 // =====================================================================================
 // ⑦ S2a · `on_released` 的三个调用点（`instr-hook/sink-release-events`）
 //
-//   红 = 摘条目时 ui 层收不到通知 ⇒ `Impl::hook_handlers` 里的 JSValue 泄漏 / 一直跑到下一个 Run。
+//   红 = 摘条目时 ui 层收不到通知 ⇒ `Impl` 里的 JSValue 泄漏 / 一直跑到下一个 Run。
 //   判据：remove / releaseOwner / clear 各发**恰好一次**、互不重复；不存在的句柄不发。
 //   ★ 顺序也判：releaseOwner 与 clear 都是**安装顺序**（entries 顺序）。
 // =====================================================================================
@@ -527,7 +531,7 @@ void caseSinkReleaseEvents() {
 // ⑧ S2c · `instr-hook/sink-hit-batch`：一次派发**一次** `on_hits`，批次 = 全部命中
 //
 //   红 = 分发退回逐条（链拿不到"这批就是全部"）/ 批量只发第一条 / 顺序不是注册序。
-//   判据：同点 3 条（V1At + Sub + Once）⇒ `batches==1`、`count==3`、handle 升序、脚本名 = 派发名；
+//   判据：同点 3 条（Sub ×2 + Once）⇒ `batches==1`、`count==3`、handle 升序、脚本名 = 派发名；
 //   另一个 pos ⇒ 不再调用。
 // =====================================================================================
 void caseSinkHitBatch() {
@@ -547,18 +551,18 @@ void caseSinkHitBatch() {
     cpu.mem = &mem;
     LIFT_CHECK(put32(mem, kPcA, kOpcode));
 
-    bool v1_ok = false;
+    bool s1_ok = false;
     bool sub_ok = false;
     bool once_ok = false;
-    const std::uint32_t v1 = addHook(0x21u, kPosA, &v1_ok);
+    const std::uint32_t s1 = addHook(0x21u, kPosA, &s1_ok);
     const std::uint32_t sub = addExHook(0x21u, L::InstrHookForm::Pos, kScript, kPosA, 0,
                                         L::InstrHookKind::Sub, &sub_ok);
     const std::uint32_t once = addExHook(0x21u, L::InstrHookForm::Pos, kScript, kPosA, 0,
                                          L::InstrHookKind::Once, &once_ok);
-    LIFT_CHECK(v1_ok);
+    LIFT_CHECK(s1_ok);
     LIFT_CHECK(sub_ok);
     LIFT_CHECK(once_ok);
-    LIFT_CHECK(v1 < sub && sub < once);  // 注册序 = handle 升序（runtime 只 push_back）
+    LIFT_CHECK(s1 < sub && sub < once);  // 注册序 = handle 升序（runtime 只 push_back）
 
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 0);
     dispatchAt(mem, cpu, kPosA);
@@ -566,7 +570,7 @@ void caseSinkHitBatch() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.last_count), 3);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 3);
     if (sink.hits.size() == 3) {
-        LIFT_CHECK_EQ_U32(sink.hits[0].handle, v1);
+        LIFT_CHECK_EQ_U32(sink.hits[0].handle, s1);
         LIFT_CHECK_EQ_U32(sink.hits[1].handle, sub);
         LIFT_CHECK_EQ_U32(sink.hits[2].handle, once);
         for (const L::InstrHit& hit : sink.hits) {
@@ -580,7 +584,7 @@ void caseSinkHitBatch() {
             LIFT_CHECK_EQ_U32(hit.codec_key, kKey);
         }
     }
-    for (const std::uint32_t h : {v1, sub, once}) {
+    for (const std::uint32_t h : {s1, sub, once}) {
         L::InstrHookStatus st;
         LIFT_CHECK(L::instrHookStats(h, &st));
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 1);
@@ -594,10 +598,10 @@ void caseSinkHitBatch() {
 }
 
 // =====================================================================================
-// ⑨ S2c · `instr-hook/add-ex-shared`：去重只对 V1At；四种 form 的准入
+// ⑨ S2c · `instr-hook/add-ex-shared`：同点多条 v2 订阅可共存；四种 form 的准入
 //
-//   红 = v2 同点多订阅被 v1 的 duplicate 拒掉（`at-multi-same-pos` 连带红）/ 形状校验缺失。
-//   判据：V1At 同点第二条 ⇒ `duplicate`；Sub / Once 各两条都成功且 handle 互异；
+//   红 = v2 同点多订阅被去重拒掉（`at-multi-same-pos` 连带红）/ 形状校验缺失。
+//   判据：同一 `{script,pos}` 上两条 Sub + 两条 Once 都成功且 handle 互异（v2 每条订阅独立）；
 //         `{Range,[0x100,0x108)}` + `{Pos,0x100}` 同拍各命中一次；`lo==hi` ⇒ `range_empty`；
 //         `{Script}` + 空 script ⇒ `bad_where`。
 // =====================================================================================
@@ -611,19 +615,7 @@ void caseAddExShared() {
     cpu.mem = &mem;
     LIFT_CHECK(put32(mem, kPcA, kOpcode));
 
-    // ---- ① V1At 的 duplicate 逐字保留（v1 已发布语义）----
-    bool a_ok = false;
-    const std::uint32_t v1 = addHook(0x31u, kPosA, &a_ok);
-    LIFT_CHECK(a_ok);
-    L::InstrHookWhere pos_where;
-    pos_where.form = L::InstrHookForm::Pos;
-    pos_where.script = kScript;
-    pos_where.pos = kPosA;
-    const char* err = nullptr;
-    LIFT_CHECK_EQ_U32(L::instrHookAddEx(0x31u, pos_where, L::InstrHookKind::V1At, &err), 0u);
-    LIFT_CHECK(err != nullptr && std::strcmp(err, "duplicate") == 0);
-
-    // ---- ② Sub / Once 同点可重复（各自 handle 互异；去重不看它们）----
+    // ---- ① Sub / Once 同点可重复（各自 handle 互异；v2 没有 duplicate）----
     bool s1_ok = false;
     bool s2_ok = false;
     bool o1_ok = false;
@@ -639,7 +631,7 @@ void caseAddExShared() {
     LIFT_CHECK(s1_ok && s2_ok && o1_ok && o2_ok);
     LIFT_CHECK(s1 != s2);
     LIFT_CHECK(o1 != o2);
-    LIFT_CHECK(v1 < s1 && o2 > o1);
+    LIFT_CHECK(s1 < o2);  // 注册序 = handle 升序
 
     // ---- ③ Range + Pos 在同一拍各命中一次；hi 是开区间 ----
     L::instrHookClear();
@@ -668,7 +660,7 @@ void caseAddExShared() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(rs.hits), 2);
 
     // ---- ④ 形状校验 ----
-    err = nullptr;
+    const char* err = nullptr;
     L::InstrHookWhere bad;
     bad.form = L::InstrHookForm::Range;
     bad.script = kScript;
@@ -694,75 +686,7 @@ void caseAddExShared() {
 }
 
 // =====================================================================================
-// ⑩ S2c-1 复审 F1 · `instr-hook/v1-patch-does-not-starve-sub`
-//
-//   红 = v1 的 patch 写成功后 `break` ⇒ 同点**后面**的 v2 订阅既不 `hits += 1`、也进不了
-//   `hit_ids`（`ctx.at` handler 静默不跑、`hook.list().hits` 恒 0）。
-//   判据：同点 V1At+patch + Sub+patch 各一条 ⇒ 一次 probe 后两条 hits 都是 1、sink 恰好 2 条；
-//   ★ S2c-2 起**两条都写**（多槽 + 同址合并）：地址 = **后注册的 sub** 的 patch 值（最后一次写），
-//   下一拍恢复回**最初**的 raw（v1 的 3）—— 同址合并保留第一个开窗者的 raw。它同时是
-//   `instr-hook/pending-same-addr` 的另一个入口（v1 + v2 各写一次）。
-// =====================================================================================
-void caseV1PatchDoesNotStarveSub() {
-    lift_test::g_current_case = "instr-hook/v1-patch-does-not-starve-sub";
-    L::instrHookClear();
-    L::instrHookSetInjectionSites(1u);
-    RecordingSink sink;
-    L::InstrHookSink hooks;
-    hooks.user = &sink;
-    hooks.on_hits = &recordingOnHits;
-    L::instrHookAddSink(hooks);
-
-    L::GuestMemory mem;
-    LIFT_CHECK(makeFakeEngine(mem));
-    L::X86 cpu;
-    cpu.mem = &mem;
-    LIFT_CHECK(put32(mem, kPcA, kOpcode));
-
-    bool v1_ok = false;
-    bool sub_ok = false;
-    const std::uint32_t v1 = addHook(0x41u, kPosA, &v1_ok);
-    LIFT_CHECK(v1_ok);
-    const char* err = nullptr;
-    LIFT_CHECK(L::instrHookSetPatch(v1, true, L::InstrPatchKind::PtrDword, 0u, 7u, 0u, &err));
-    const std::uint32_t sub = addExHook(0x41u, L::InstrHookForm::Pos, kScript, kPosA, 0,
-                                        L::InstrHookKind::Sub, &sub_ok);
-    LIFT_CHECK(sub_ok);
-    LIFT_CHECK(v1 < sub);
-    // 第二条也装 patch（值不同）⇒ 两条都要写；同址合并后 `written` = 后注册的 9。
-    LIFT_CHECK(L::instrHookSetPatch(sub, true, L::InstrPatchKind::PtrDword, 0u, 9u, 0u, &err));
-
-    dispatchAt(mem, cpu, kPosA);
-    L::InstrHookStatus v1_st;
-    L::InstrHookStatus sub_st;
-    LIFT_CHECK(L::instrHookStats(v1, &v1_st));
-    LIFT_CHECK(L::instrHookStats(sub, &sub_st));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.hits), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.hits), 1);  // ★ 修前 = 0（被 break 饿死）
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.batches), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.last_count), 2);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sink.hits.size()), 2);
-    if (sink.hits.size() == 2) {
-        LIFT_CHECK_EQ_U32(sink.hits[0].handle, v1);  // 注册序 = handle 升序
-        LIFT_CHECK_EQ_U32(sink.hits[1].handle, sub);
-    }
-    // ★ S2c-2：多槽 ⇒ 第二条 patch 也生效（同址合并：written = 最后一次的 9）。
-    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(9u));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.skips), 0);  // 第二条也真写了
-    // 窗口结束：下一拍恢复**最初**的 raw（enc(3)），账记在**第一个开窗者**（v1）身上。
-    dispatchAt(mem, cpu, kPosB);
-    LIFT_CHECK_EQ_U32(mem.rd32(kTarget), enc(3u));
-    LIFT_CHECK(L::instrHookStats(v1, &v1_st));
-    LIFT_CHECK(L::instrHookStats(sub, &sub_st));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.restores), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(sub_st.restores), 0);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(v1_st.restore_conflicts), 0);
-    L::instrHookClear();
-    L::instrHookRemoveSink(&sink);
-}
-
-// =====================================================================================
-// ⑪ S2c-1 复审 F6 · `instr-hook/add-ex-opcode`
+// ⑩ S2c-1 复审 F6 · `instr-hook/add-ex-opcode`
 //
 //   红 = `{opcode}` 的匹配 / `has_opcode_entry` 闸门是"写了但永不生效"的假面：
 //   · Opcode=X 的条目：pc 上是 X ⇒ 命中；换成 Y ⇒ 不命中（判据是**按 opcode 匹配**，不是"装上了"）；
@@ -1291,8 +1215,7 @@ int main() {
     // ---- S2c（批量 sink；addEx 的 kind / form 准入）----
     caseSinkHitBatch();
     caseAddExShared();
-    // ---- S2c-1 复审收口（F1 的 break 饿死 / F6 的 opcode 路径）----
-    caseV1PatchDoesNotStarveSub();
+    // ---- S2c-1 复审收口（F6 的 opcode 路径）----
     caseAddExOpcode();
     // ---- S2c-2（where 过滤的 C++ 面：Range / Script / opcode 闸门）----
     caseAddExRange();

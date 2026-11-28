@@ -18,7 +18,7 @@ const FLAG = 0xb1b4;    // 宿主线程恢复后写 1：JS 据此退出
 const plugin = {
     start(ctx) {
         if (ctx.params.mode === "stall") {
-            ctx.edit.global.set("int", SIGNAL, 1);
+            ctx.profile.begin("stall");  // ★ P2b：RunCtx 没有 edit ⇒ 用宿主桥把 SIGNAL 交给测试线程（见 C++）
             while (ctx.read.global.get("int", FLAG) !== 1) {
                 // 空转等宿主线程：它会在挂起 6 ms 之后写 FLAG。
                 // ⚠ 若宿主线程不响应，这里会被**CPU deadline**（2 ms）打断 ⇒ 用例红，不是挂死。
@@ -35,7 +35,7 @@ const plugin = {
                 s = new Array(150001).join("ab");
             }
             // 走到这里 = 没被打断（正确：本模式就是要"跑完"）；写长度只为别让引擎把负载当死代码。
-            ctx.edit.global.set("int", SIGNAL, s.length);
+            log.info("js-band: len=" + String(s.length));  // 走到这里 = 没被打断（负载没被当死代码）
             return;
         }
         // busy：只烧 CPU（没有宿主调用 ⇒ 打断只能来自预算）。
@@ -44,7 +44,7 @@ const plugin = {
         for (let i = 0; i < 50000000; i = i + 1) {
             x = x + i;
         }
-        ctx.edit.global.set("int", SIGNAL, x);  // 走到这里 = 预算没触发（用例会因此红）
+        log.info("busy: x=" + String(x));  // 走到这里 = 预算没触发（用例会因此红）
     },
 };
 

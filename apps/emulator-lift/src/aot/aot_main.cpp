@@ -533,7 +533,7 @@ int main(int argc, char** argv) {
             // ★ M0：窗口参数（`--present headless` 下由 `present_window_flag` 拒绝）。
             overlay_flag = true;
         } else if (a == "--plugin") {
-            // ★ C2a：ES module 插件（`export default { render?, start?, onTrigger? }`）。
+            // ★ C2a：ES module 插件（`export default { render?, start? }`）。
             //   · **重复 `--plugin` 两份不同路径 ⇒ exit 2**（F6：⛔ 不静默只取一个；
             //     同一路径重复给是幂等的，允许）；
             //   · ⛔ **不**设 `overlay`（D-C2-5：是否开窗由 `--present` 决定 ⇒ headless 也能跑）；
@@ -1159,7 +1159,7 @@ int main(int argc, char** argv) {
         //   `PointerCore::kCallbackFramesBeforeRelease` 一份）。⛔ 不按插件 / 场景开特判。
         plugin_host->executor().setFrameSource(&host, &presentFrameCount);
         // ★ `ctx.quit()` 的归因（D-C2-9）：run 循环在下一个块边界看到 `Stopped` + `plugin: quit`。
-        //   ★ S2：只有**有 Run**（`start`/`onTrigger`）的插件才可能调 `ctx.quit`（`RenderCtx` 没有
+        //   ★ S2：只有**有 Run**（`start`）的插件才可能调 `ctx.quit`（`RenderCtx` 没有
         //     `quit`）⇒ 纯 render 插件（含内置 `hud`）**不覆盖** `run_opts.stop_requested`
         //     （否则 `--overlay` 的输入队列会被一个永远为 false 的 flag 顶掉）。
         if (plugin_host->script() != nullptr && plugin_host->script()->hasStart()) {
