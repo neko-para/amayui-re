@@ -25,8 +25,6 @@ const plugin = {
                 if (typeof log[name] !== "function") throw new Error("global-log: 缺方法 " + name);
             }
             log.info("global-log: start");
-            // ★ 正控制：`ctx.log` 保持现状（S3 不删 / 不改它）。
-            ctx.log("info", "global-log: ctx-log");
             ctx.task(async () => {
                 await Promise.resolve();
                 log.warn("global-log: task");
@@ -37,7 +35,7 @@ const plugin = {
                 next();
             });
             if (typeof handle !== "number") throw new Error("global-log: ctx.at failed");
-            return null;  // runner done；Run 靠 at 订阅活着（下面还要 dispatch / render）
+            return null;  // Run 靠 at 订阅活着（下面还要 dispatch / render）
         }
         if (mode === "timeout") {
             ctx.task(async () => {

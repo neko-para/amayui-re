@@ -32,7 +32,7 @@ function start(ctx: RunCtx): void {
         try {
             const tick = await gate;
             tick.input.click(NEXT_X, NEXT_Y);
-            t.log("info", "timeout: gate passed @" + String(tick.now.pos));
+            log.info("info", "timeout: gate passed @" + String(tick.now.pos));
         } catch (err) {
             // 到点：宿主先 reject（本 catch 在同一泵里 drain 到）、随后 fail Run。
             // 这里只能 log；写类（含 ctx.fail）在泵里 TypeError。
@@ -43,7 +43,7 @@ function start(ctx: RunCtx): void {
         }
     });
 
-    ctx.log("info", "timeout: task registered; timeoutMs is a failure deadline");
+    log.info("info", "timeout: task registered; timeoutMs is a failure deadline");
 }
 
 const plugin = { start } satisfies PluginModule;

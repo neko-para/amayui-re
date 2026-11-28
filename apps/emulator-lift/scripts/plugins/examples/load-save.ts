@@ -58,7 +58,7 @@ function slotFrom(params: Readonly<Record<string, string>>): number {
 
 function start(ctx: RunCtx): void {
     const slot = slotFrom(ctx.params);
-    ctx.log("info", "load-save: start slot=" + String(slot));
+    log.info("info", "load-save: start slot=" + String(slot));
 
     ctx.task(async (t) => {
         // ★ 四个 once 要在第一个 await 之前注册（once 的门 = Run 回调，task 的同步首段）。
@@ -70,7 +70,7 @@ function start(ctx: RunCtx): void {
         // 旧配方：await script TITLE → click LoadData
         const titleTick = await title;
         titleTick.input.click(LOAD_MENU_X, LOAD_MENU_Y); // 入队；下一读点落地
-        t.log("info", "load-save: LoadData clicked @" + String(titleTick.now.pos));
+        log.info("info", "load-save: LoadData clicked @" + String(titleTick.now.pos));
 
         // 旧配方：await position SAVE → click 第 slot 槽
         const saveTick = await save;
@@ -79,12 +79,12 @@ function start(ctx: RunCtx): void {
         // 旧配方：await position SBUNKI（第一次询问）→ click「否」
         const dialogTick = await dialog;
         dialogTick.input.click(DIALOG_NO_X, DIALOG_NO_Y);
-        t.log("debug", "load-save: tutorial no @" + String(dialogTick.now.pos));
+        log.info("debug", "load-save: tutorial no @" + String(dialogTick.now.pos));
 
         // 旧配方：await position SBUNKI（确认框）→ click 确认
         const confirmTick = await confirm;
         confirmTick.input.click(DIALOG_OK_X, DIALOG_OK_Y);
-        t.log("info", "load-save: confirm clicked @" + String(confirmTick.now.pos));
+        log.info("info", "load-save: confirm clicked @" + String(confirmTick.now.pos));
 
         // task 返回 ⇒ settle；没有 at 订阅 ⇒ Run 收口（不需要 finish）。
     });

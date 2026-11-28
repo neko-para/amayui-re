@@ -169,17 +169,23 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("DRAWOBJ_ENTRY_LO") != std::string::npos);
     LIFT_CHECK(code.find("DRAWOBJ_ENTRY_HI") != std::string::npos);
     LIFT_CHECK(code.find("\"fp:draw\"") != std::string::npos);
-    // ★ 判据是**已知脚本位置** ⇒ 位置触发（reenter），⛔ 不是轮询。
-    LIFT_CHECK(code.find("afterPosition") != std::string::npos);
-    LIFT_CHECK(code.find("reenter") != std::string::npos);
+    // ★ 判据是**已知脚本位置** ⇒ 指令点订阅（`ctx.at` + 精确 pos），⛔ 不是轮询。
+    //   v2 用 `ctx.at({script,pos})` / `ctx.at({script,lo,hi})`；`tick.patch` 做静态门覆盖。
+    LIFT_CHECK(code.find("ctx.at(") != std::string::npos);
+    LIFT_CHECK(code.find("tick.patch(") != std::string::npos);
+    // ★ v1 兼容层已删除：出现这些写法 ⇒ 静态契约红（⛔ 不靠注释 / 死分支通过）。
+    LIFT_CHECK(code.find("ctx.hook") == std::string::npos);
+    LIFT_CHECK(code.find("ctx.trigger") == std::string::npos);
+    LIFT_CHECK(code.find("onTrigger") == std::string::npos);
     LIFT_CHECK(code.find("FIELD_MAIN_LOOP") == std::string::npos);
     LIFT_CHECK(code.find("afterDelay") == std::string::npos);
+    LIFT_CHECK(code.find("reenter") == std::string::npos);
     LIFT_CHECK(code.find("DEFAULT_POLL_MS") == std::string::npos);
     // ★ `poll` 这个子串在代码里出现 ⇒ 有人把"每拍重读"的轮询又接回来了（注释已剥 ⇒ 不会误伤）。
     LIFT_CHECK(code.find("poll") == std::string::npos);
     // 日志前缀是外部可判面（下面 ② 与文档都按它抓）。
     LIFT_CHECK(source.find("field-points:") != std::string::npos);
-    const std::size_t forbidden_tokens = sizeof(kForbiddenOutput) / sizeof(kForbiddenOutput[0]) + 8;
+    const std::size_t forbidden_tokens = sizeof(kForbiddenOutput) / sizeof(kForbiddenOutput[0]) + 11;
     std::printf("plugin-field-switch: static checks done（source=%zu B / code=%zu B / %zu 个禁令 token；"
                 "failures=%d）\n",
                 source.size(), code.size(), forbidden_tokens, g_failures);

@@ -47,7 +47,7 @@ function start(ctx: RunCtx): void {
 
         // task 返回（settle）且没有其它订阅 ⇒ Run 自然收口（不需要 finish）。
     });
-    ctx.log("info", "concurrent: task registered");
+    log.info("info", "concurrent: task registered");
 }
 
 const plugin = { start } satisfies PluginModule;

@@ -42,12 +42,6 @@ std::uint64_t testNowMs() { return g_now_ms; }
 std::uint64_t g_frames = 0;
 std::uint64_t testFrameCount(void* /*ctx*/) { return g_frames; }
 
-// ⑥ 插件 executor 的采样源：本用例只判 click 时序（不装 trigger）⇒ 读数全空。
-//   `atPoint` 在没有 armed trigger 时**根本不会采样**，但接口要求一个实现。
-struct NullReadings final : lift::plugin::ReadingsSource {
-    lift::plugin::TriggerReadings sample(lift::InputPoint /*point*/) override { return {}; }
-};
-
 // ⑥ 一条 click intent（1280×720 参考坐标；owner = 本切片的单 owner）。
 lift::plugin::Intent clickIntent(int x, int y, lift::MouseButton button) {
     lift::plugin::Intent intent;
@@ -103,8 +97,7 @@ void caseExecutorClickCrossesCallback() {
     LIFT_CHECK(f.ok);
     if (!f.ok) return;
     lift::plugin::IntentQueue queue;
-    NullReadings source;
-    lift::plugin::IntentExecutor exec(queue, source);
+    lift::plugin::IntentExecutor exec(queue);
     exec.setClockForTest(&testNowMs);
     exec.setFrameSource(&g_frames, &testFrameCount);  // 与 `aot_main` 的 `setFrameSource` 同一句
     g_now_ms = 7000;
@@ -167,8 +160,7 @@ void caseExecutorWithoutFrameLineReleasesEarly() {
     LIFT_CHECK(f.ok);
     if (!f.ok) return;
     lift::plugin::IntentQueue queue;
-    NullReadings source;
-    lift::plugin::IntentExecutor exec(queue, source);  // ★ **不**调 setFrameSource = 修复前的形状
+    lift::plugin::IntentExecutor exec(queue);  // ★ **不**调 setFrameSource = 修复前的形状
     exec.setClockForTest(&testNowMs);
     g_now_ms = 8000;
     g_frames = 0;

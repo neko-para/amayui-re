@@ -40,9 +40,9 @@ function start(ctx: RunCtx): void {
         // 写新值：立即持久写。回执的 applied 才代表写进去了。
         const receipt = tick.edit.global.set("int", GLOBAL_ID, after);
         if (!receipt.applied) {
-            tick.log("warn", "global-edit: write rejected code=" + String(receipt.code));
+            log.info("warn", "global-edit: write rejected code=" + String(receipt.code));
         } else {
-            tick.log(
+            log.info(
                 "debug",
                 "global-edit: " + String(before) + " -> " + String(after),
             );

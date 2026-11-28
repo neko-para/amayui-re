@@ -159,6 +159,15 @@ function remember(tick) {
     }
 }
 
+function scheduleDump(ctx) {
+    ctx.task(async (t) => {
+        while (true) {
+            await t.delay(0);
+            if (plugin.dump(t)) return;
+        }
+    });
+}
+
 const plugin = {
     start(ctx) {
         const mode = ctx.params.mode;
@@ -176,8 +185,9 @@ const plugin = {
             });
             if (typeof h1 !== "number" || h1 <= 0) throw new Error("chain-order: at h1 failed");
             if (typeof h2 !== "number" || h2 <= 0) throw new Error("chain-order: at h2 failed");
-            ctx.log("info", "at-chain: installed mode=chain-order");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=chain-order");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "next-truncates") {
             h1 = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
@@ -190,41 +200,44 @@ const plugin = {
             if (typeof h1 !== "number" || typeof h2 !== "number") {
                 throw new Error("next-truncates: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=next-truncates");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=next-truncates");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "off") {
             h1 = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
-                tick.log("info", "at-off: h1 hit");
+                log.info("at-off: h1 hit");
                 next();
             });
             h2 = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
-                tick.log("info", "at-off: h2 hit");
+                log.info("at-off: h2 hit");
             });
             if (typeof h1 !== "number" || typeof h2 !== "number") {
                 throw new Error("at-off: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=off");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=off");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "tick-off") {
             selfSub = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
                 // ★ 门 = call_host（不是 inCallback）：tick handler 里 `off` 必须被接受。
                 const removed = ctx.off(selfSub);
-                tick.log("info", "tick-off: off=" + String(removed));
+                log.info("tick-off: off=" + String(removed));
                 next();  // 撤自己**不截断**：h2 照跑
             });
             const h2t = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
                 // ★ 带序号：`PluginHost::log` 对**连续相同**的消息去重（否则第二拍这行会被吞掉）。
                 tickRuns += 1;
-                tick.log("info", "tick-off: h2 ran #" + String(tickRuns));
+                log.info("tick-off: h2 ran #" + String(tickRuns));
             });
             h2 = h2t;
             if (typeof selfSub !== "number" || typeof h2t !== "number") {
                 throw new Error("tick-off: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=tick-off");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-off");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "handler-error") {
             h1 = ctx.at({ script: SCRIPT, pos: POS }, () => {
@@ -236,8 +249,9 @@ const plugin = {
             if (typeof h1 !== "number" || typeof h2 !== "number") {
                 throw new Error("handler-error: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=handler-error");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=handler-error");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "now") {
             const pos = ctx.params.pos ? Number(ctx.params.pos) : POS;
@@ -257,8 +271,9 @@ const plugin = {
                 };
             });
             if (typeof hNow !== "number") throw new Error("now: at failed");
-            ctx.log("info", "at-chain: installed mode=now");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=now");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "local") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
@@ -286,16 +301,18 @@ const plugin = {
                 };
             });
             if (typeof hNow !== "number") throw new Error("local: at failed");
-            ctx.log("info", "at-chain: installed mode=local");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=local");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "stale") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
                 savedTick = tick;
             });
             if (typeof hNow !== "number") throw new Error("stale: at failed");
-            ctx.log("info", "at-chain: installed mode=stale");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=stale");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "multi-same-pos") {
             h1 = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
@@ -305,12 +322,6 @@ const plugin = {
             h2 = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
                 order.push(2);  // 不调 next ⇒ 截断**后续 at 参与者**，但不影响 v1 / once
             });
-            // v1 `ctx.hook.at`（Pos + V1At）：与 at / once 同点是**允许**的（去重只对 V1At 自己）
-            v1 = ctx.hook.at(SCRIPT, POS);
-            if (v1 === undefined) throw new Error("multi-same-pos: ctx.hook.at failed");
-            v1.onTick((tick) => {
-                order.push(99);
-            });
             const pending = ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
             pending.then(() => {
                 onceRan = 1;  // 同一次派发的 drain 里必须跑到（onTrigger 会读它）
@@ -318,8 +329,9 @@ const plugin = {
             if (typeof h1 !== "number" || typeof h2 !== "number") {
                 throw new Error("multi-same-pos: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=multi-same-pos");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=multi-same-pos");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "keeps-run") {
             // start 返回 null（runner done）；一条 at 订阅就是 Run 的存活来源。handler 里撤掉它。
@@ -327,7 +339,7 @@ const plugin = {
                 ctx.off(selfSub);
             });
             if (typeof selfSub !== "number") throw new Error("keeps-run: at failed");
-            ctx.log("info", "at-chain: installed mode=keeps-run");
+            log.info( "at-chain: installed mode=keeps-run");
             return null;
         }
         if (mode === "next-outside") {
@@ -336,8 +348,9 @@ const plugin = {
                 savedNext = next;
             });
             if (typeof h1 !== "number") throw new Error("next-outside: at failed");
-            ctx.log("info", "at-chain: installed mode=next-outside");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=next-outside");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "drain-tick-local") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
@@ -354,8 +367,9 @@ const plugin = {
                 });
             });
             if (typeof hNow !== "number") throw new Error("drain-tick-local: at failed");
-            ctx.log("info", "at-chain: installed mode=drain-tick-local");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=drain-tick-local");
+            scheduleDump(ctx);
+            return;
         }
         // ---- S2c-2：`where` 过滤的五种形态 ----
         if (mode === "where-range") {
@@ -364,8 +378,9 @@ const plugin = {
                 wherePos.push(tick.now.pos);
             });
             if (typeof h1 !== "number") throw new Error("where-range: at failed");
-            ctx.log("info", "at-chain: installed mode=where-range");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-range");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "where-script") {
             h1 = ctx.at({ script: SCRIPT }, (tick) => {
@@ -373,8 +388,9 @@ const plugin = {
                 wherePos.push(tick.now.pos);
             });
             if (typeof h1 !== "number") throw new Error("where-script: at failed");
-            ctx.log("info", "at-chain: installed mode=where-script");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-script");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "where-opcode") {
             h1 = ctx.at({ opcode: 114 }, (tick, next) => {
@@ -392,8 +408,9 @@ const plugin = {
             if (typeof h1 !== "number" || typeof h2 !== "number" || typeof h0 !== "number") {
                 throw new Error("where-opcode: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=where-opcode");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-opcode");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "where-mixed") {
             // 注册序 = 链序：`{script}` → `{script,pos}` → `{opcode}`。
@@ -411,8 +428,9 @@ const plugin = {
             if (typeof h1 !== "number" || typeof h2 !== "number" || typeof h3 !== "number") {
                 throw new Error("where-mixed: at failed");
             }
-            ctx.log("info", "at-chain: installed mode=where-mixed");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-mixed");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "where-big") {
             // ★ S2c-2 复审 F10：`lo/hi` 是 uint32 语义 ⇒ > 2^31 的值必须从 hook.list() **原样**读回
@@ -421,8 +439,9 @@ const plugin = {
                 bigRan += 1;
             });
             if (typeof h1 !== "number") throw new Error("where-big: at failed");
-            ctx.log("info", "at-chain: installed mode=where-big");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-big");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "where-null-field") {
             // ★ S2c-2 复审 F1：键**存在**但值是 null/undefined ⇒ TypeError（与"没给这个键"区分）。
@@ -446,8 +465,9 @@ const plugin = {
             // 正控制：合法形态仍装得上（"表里只剩一条"不是"at 整个坏了"）。
             nullSub = ctx.at({ script: SCRIPT, pos: POS }, () => {});
             if (typeof nullSub !== "number") throw new Error("where-null-field: good at failed");
-            ctx.log("info", "at-chain: installed mode=where-null-field");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=where-null-field");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "tick-id") {
             // ★ 多 Impl 同活：两个宿主各装一条**同点**订阅；一次派发的 hits 里两条都出现
@@ -457,8 +477,9 @@ const plugin = {
                 seenTickRuns += 1;
             });
             if (typeof h1 !== "number") throw new Error("tick-id: at failed");
-            ctx.log("info", "at-chain: installed mode=tick-id");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-id");
+            scheduleDump(ctx);
+            return;
         }
         // ---- S2c-2b：Tick 的写面（edit / input / patch）+ stale 写 + once 的 Tick ----
         if (mode === "tick-edit") {
@@ -486,8 +507,9 @@ const plugin = {
                 }
             });
             if (typeof hNow !== "number") throw new Error("tick-edit: at failed");
-            ctx.log("info", "at-chain: installed mode=tick-edit");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-edit");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "tick-input") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
@@ -502,16 +524,18 @@ const plugin = {
                 inputStatusInTick = tick.input.status(r.id);
             });
             if (typeof hNow !== "number") throw new Error("tick-input: at failed");
-            ctx.log("info", "at-chain: installed mode=tick-input");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-input");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "stale-write") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
                 savedTick = tick;
             });
             if (typeof hNow !== "number") throw new Error("stale-write: at failed");
-            ctx.log("info", "at-chain: installed mode=stale-write");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=stale-write");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "tick-patch") {
             hNow = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
@@ -525,8 +549,9 @@ const plugin = {
                 };
             });
             if (typeof hNow !== "number") throw new Error("tick-patch: at failed");
-            ctx.log("info", "at-chain: installed mode=tick-patch");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-patch");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "tick-patch-limit") {
             // 9 条各自 patch 一个**不同**地址（localInt 0..7 + ptrLocal 0），第 10 条越界。
@@ -554,8 +579,9 @@ const plugin = {
             });
             if (typeof bad !== "number") throw new Error("tick-patch-limit: bad at failed");
             patchSubs.push(bad);
-            ctx.log("info", "at-chain: installed mode=tick-patch-limit");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=tick-patch-limit");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "once-tick-writable") {
             const pending = ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 5000 });
@@ -571,8 +597,9 @@ const plugin = {
                     onceErr = 1;
                 }
             });
-            ctx.log("info", "at-chain: installed mode=once-tick-writable");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=once-tick-writable");
+            scheduleDump(ctx);
+            return;
         }
         if (mode === "once-tick-patch") {
             // ★ S2c-2 复审 F2：`once` 的 Tick **不允许** `tick.patch`（订阅在 resolve 时已结算）⇒
@@ -594,14 +621,14 @@ const plugin = {
                     onceErr = 1;
                 }
             });
-            ctx.log("info", "at-chain: installed mode=once-tick-patch");
-            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+            log.info( "at-chain: installed mode=once-tick-patch");
+            scheduleDump(ctx);
+            return;
         }
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
-    onTrigger(ctx) {
+    dump(ctx) {
         const mode = ctx.params.mode;
-        const hooks = ctx.hook.list();
         if (mode === "chain-order") {
             put(ctx, OUT_A, order[0]);
             put(ctx, OUT_B, order[1]);
@@ -610,13 +637,9 @@ const plugin = {
             put(ctx, OUT_F0, sameTick ? 1 : 0);
             put(ctx, OUT_F1, firstTick === null ? 0 : firstTick.id);
             put(ctx, OUT_F2, h1 < h2 ? 1 : 0);
-            put(ctx, OUT_F3, kindOf(hooks, h1) === "sub" ? 1 : 0);
-            put(ctx, OUT_F4, kindOf(hooks, h2) === "sub" ? 1 : 0);
-            put(ctx, OUT_F5, hitsOf(hooks, h1));
-            put(ctx, OUT_F6, hitsOf(hooks, h2));
             ctx.off(h1);
             ctx.off(h2);
-            return [];
+            return true;
         }
         if (mode === "next-truncates") {
             if (phase === 0) {
@@ -624,21 +647,18 @@ const plugin = {
                 put(ctx, OUT_A, order[0]);
                 put(ctx, OUT_B, order[1]);
                 put(ctx, OUT_N, order.length);
-                put(ctx, OUT_F0, hitsOf(hooks, h1));
-                put(ctx, OUT_F1, hitsOf(hooks, h2));
                 allowNext = true;
                 order = [];
                 phase = 1;
-                return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump2" })];
+                return false;
             }
             // 继续拍：[1,2]，h2 的 hits 涨到 1。
             put(ctx, OUT_C, order.length);
             put(ctx, OUT_F2, order[0]);
             put(ctx, OUT_F3, order[1]);
-            put(ctx, OUT_F4, hitsOf(hooks, h2));
             ctx.off(h1);
             ctx.off(h2);
-            return [];
+            return true;
         }
         if (mode === "off") {
             if (phase === 0) {
@@ -646,26 +666,22 @@ const plugin = {
                 const second = ctx.off(h2);  // 幂等：已经不在 ⇒ false
                 put(ctx, OUT_F0, first ? 1 : 0);
                 put(ctx, OUT_F1, second ? 1 : 0);
-                put(ctx, OUT_F2, ctx.hook.list().length);
                 phase = 1;
-                return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+                return false;
             }
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "handler-error") {
             // 第二次派发之后：h2 还在（hits 涨），h1 已经不在表里。
-            put(ctx, OUT_F0, hooks.length);
-            put(ctx, OUT_F1, hitsOf(hooks, h2));
-            put(ctx, OUT_F2, kindOf(hooks, h1) === "?" ? 1 : 0);
             ctx.off(h2);
-            return [];
+            return true;
         }
         if (mode === "now") {
             const r = nowRec;
             if (r === null) {
                 ctx.fail("now", "no hit recorded");
-                return [];
+                return true;
             }
             put(ctx, OUT_A, r.script === SCRIPT ? 1 : 0);
             put(ctx, OUT_B, r.pos);
@@ -676,13 +692,13 @@ const plugin = {
             put(ctx, OUT_F2, r.flatOpcode);
             put(ctx, OUT_F3, r.id);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "local") {
             const r = localRec;
             if (r === null) {
                 ctx.fail("local", "no hit recorded");
-                return [];
+                return true;
             }
             put(ctx, OUT_A, r.int0);
             put(ctx, OUT_B, r.int7);
@@ -693,7 +709,7 @@ const plugin = {
             put(ctx, OUT_F2, r.ptrDword1);
             put(ctx, OUT_F3, r.intFracType);  // 1 = 小数 index 抛 TypeError（⛔ 不是截断成 int(0)）
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "stale") {
             // ★ 本回调是 `call()` 入口（不是 tick 入口）⇒ 上一次的 Tick 必须已经 stale。
@@ -712,7 +728,7 @@ const plugin = {
             }
             let logOk = 0;
             try {
-                savedTick.log("info", "stale: late log");  // log 是宿主出口 ⇒ 仍可用
+                log.info("stale: late log");  // log 是宿主出口 ⇒ 仍可用
                 logOk = 1;
             } catch (e) {
                 logOk = 0;
@@ -721,7 +737,7 @@ const plugin = {
             put(ctx, OUT_B, nowPos);
             put(ctx, OUT_C, logOk);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "multi-same-pos") {
             put(ctx, OUT_A, order[0]);
@@ -729,16 +745,9 @@ const plugin = {
             put(ctx, OUT_C, order[2]);
             put(ctx, OUT_N, order.length);
             put(ctx, OUT_F0, onceRan);
-            put(ctx, OUT_F1, hooks.length);
-            put(ctx, OUT_F2, hitsOf(hooks, h1));
-            put(ctx, OUT_F3, hitsOf(hooks, h2));
-            put(ctx, OUT_F4, kindOf(hooks, h1) === "sub" ? 1 : 0);
-            put(ctx, OUT_F5, kindOf(hooks, h2) === "sub" ? 1 : 0);
-            put(ctx, OUT_F6, kindOf(hooks, v1.id) === "v1" ? 1 : 0);
-            v1.clear();
             ctx.off(h1);
             ctx.off(h2);
-            return [];
+            return true;
         }
         if (mode === "next-outside") {
             // ★ 存下来的 next 在 handler 返回之后（本次 call() 入口里）调用 ⇒ 必须抛 TypeError。
@@ -758,14 +767,14 @@ const plugin = {
             put(ctx, OUT_B, messageOk);
             put(ctx, OUT_C, nameOk);
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "drain-tick-local") {
             put(ctx, OUT_A, drainValue);
             put(ctx, OUT_B, drainStale);
             put(ctx, OUT_C, drainRan);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         // ---- S2c-2：`where` 过滤 ----
         if (mode === "where-range") {
@@ -774,41 +783,25 @@ const plugin = {
             put(ctx, OUT_C, wherePos[1]);
             put(ctx, OUT_N, wherePos.length);
             // ★ S2c-2 复审 F4：`hook.list()` 的**形状面**逐字段（修前 JS 只断 kind / hits）。
-            const row = hooks.length === 1 ? hooks[0] : null;
-            put(ctx, OUT_F0, row !== null ? 1 : 0);
-            put(ctx, OUT_F1, row !== null && row.kind === "sub" ? 1 : 0);
-            put(ctx, OUT_F2, row !== null && row.form === "range" ? 1 : 0);
-            put(ctx, OUT_F3, row !== null ? row.lo : -1);
-            put(ctx, OUT_F4, row !== null ? row.hi : -1);
-            put(ctx, OUT_F5, row !== null ? row.opcode : -1);
-            put(ctx, OUT_F6, row !== null ? row.pos : -1);
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "where-script") {
             put(ctx, OUT_A, whereRan);
             put(ctx, OUT_B, wherePos[0]);
             put(ctx, OUT_C, wherePos[1]);
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "where-opcode") {
             put(ctx, OUT_A, opAllRuns);
             put(ctx, OUT_B, opScopedRuns);
             put(ctx, OUT_N, opZeroRuns);  // {opcode:0} 的 handler 次数（只在真读到 0 时涨）
-            // ★ S2c-2 复审 F4/F10：`{opcode}` 两形态 + `{opcode:0}` 的 hook.list() 逐字段。
-            const okLen = hooks.length === 3;
-            put(ctx, OUT_F0, okLen ? 1 : 0);
-            put(ctx, OUT_F1, okLen && hooks[0].form === "opcode" ? 1 : 0);
-            put(ctx, OUT_F2, okLen ? hooks[0].opcode : -1);
-            put(ctx, OUT_F3, okLen && hooks[1].form === "opcode" && hooks[1].script === SCRIPT ? 1 : 0);
-            put(ctx, OUT_F4, okLen ? hooks[1].opcode : -1);
-            put(ctx, OUT_F5, okLen && hooks[2].form === "opcode" ? 1 : 0);
-            put(ctx, OUT_F6, okLen ? hooks[2].opcode : -1);
+            // 形状面由 C++ 在 start 之后直接读 `instrHookList()`（JS 里没有 hook.list）。
             ctx.off(h1);
             ctx.off(h2);
             ctx.off(h0);
-            return [];
+            return true;
         }
         if (mode === "where-mixed") {
             put(ctx, OUT_A, order[0]);
@@ -818,52 +811,45 @@ const plugin = {
             ctx.off(h1);
             ctx.off(h2);
             ctx.off(h3);
-            return [];
+            return true;
         }
         if (mode === "where-big") {
-            const row = hooks.length === 1 ? hooks[0] : null;
-            put(ctx, OUT_A, row !== null ? row.lo : 0);
-            put(ctx, OUT_B, row !== null ? row.hi : 0);
-            put(ctx, OUT_C, row !== null && row.form === "range" ? 1 : 0);
             put(ctx, OUT_N, bigRan);
             // ★ 这一位是判据：int32 出口会把 0x90000000 读成 -1879048192 ⇒ 0。
-            put(ctx, OUT_F0, row !== null && row.lo === 0x90000000 ? 1 : 0);
-            put(ctx, OUT_F1, row !== null && row.hi === 0x90000010 ? 1 : 0);
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "where-null-field") {
             put(ctx, OUT_A, nullThrew);
             put(ctx, OUT_B, nullType);
-            put(ctx, OUT_C, hooks.length);  // 6 条非法形态一条都不许装进来（只剩正控制那条）
             put(ctx, OUT_N, nullSub);
             ctx.off(nullSub);
-            return [];
+            return true;
         }
         if (mode === "tick-id") {
             put(ctx, OUT_A, seenTickId);
             put(ctx, OUT_B, seenTickRuns);
             ctx.off(h1);
-            return [];
+            return true;
         }
         if (mode === "tick-edit") {
             const r = editRec;
             if (r === null) {
                 ctx.fail("tick-edit", "no receipt");
-                return [];
+                return true;
             }
             put(ctx, OUT_A, r.accepted ? 1 : 0);
             put(ctx, OUT_B, r.applied ? 1 : 0);
             put(ctx, OUT_C, r.queued ? 1 : 0);
             put(ctx, OUT_N, editFailType);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "tick-input") {
             const r = inputRec;
             if (r === null) {
                 ctx.fail("tick-input", "no receipt");
-                return [];
+                return true;
             }
             put(ctx, OUT_A, r.accepted ? 1 : 0);
             put(ctx, OUT_B, r.queued ? 1 : 0);
@@ -872,10 +858,10 @@ const plugin = {
             put(ctx, OUT_F0, inputStatusInTick === "queued" ? 1 : 0);
             // 本回调里查（泵的 drain 在回调**之后**）仍是 queued；C++ 在 pump 之后用宿主队列判 applied。
             inputStatusInDump = ctx.input.status(r.id);
-            put(ctx, OUT_F1, inputStatusInDump === "queued" ? 1 : 0);
+            put(ctx, OUT_F1, inputStatusInDump === "applied" ? 1 : 0);
             put(ctx, OUT_F2, r.id);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "stale-write") {
             // ★ Tick 跨入口：三个写面都必须抛 `stale_tick`，且 guest / 队列**零变化**。
@@ -911,26 +897,24 @@ const plugin = {
             put(ctx, OUT_F0, throwPatch);
             put(ctx, OUT_F1, msgPatch);
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "tick-patch") {
             if (phase === 0) {
                 const r = patchRec;
                 if (r === null) {
                     ctx.fail("tick-patch", "no receipt");
-                    return [];
+                    return true;
                 }
                 put(ctx, OUT_A, r.accepted ? 1 : 0);
                 put(ctx, OUT_B, r.applied ? 1 : 0);
                 put(ctx, OUT_C, r.code === "" ? 0 : 1);
                 put(ctx, OUT_F1, patchPreLocal === null ? UNDEF : patchPreLocal);
                 phase = 1;
-                return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump2" })];
+                return false;
             }
-            put(ctx, OUT_N, statOf(hooks, hNow, "restores"));
-            put(ctx, OUT_F0, statOf(hooks, hNow, "restore_conflicts"));
             ctx.off(hNow);
-            return [];
+            return true;
         }
         if (mode === "tick-patch-limit") {
             let accepted = 0;
@@ -945,16 +929,15 @@ const plugin = {
             put(ctx, OUT_B, tooMany);
             put(ctx, OUT_C, badTarget);
             put(ctx, OUT_N, patchReceipts.length);
-            put(ctx, OUT_F0, patchSubs.length === 10 ? statOf(hooks, patchSubs[8], "skips") : -1);
             for (const id of patchSubs) ctx.off(id);
-            return [];
+            return true;
         }
         if (mode === "once-tick-writable") {
             put(ctx, OUT_A, onceRan);
             put(ctx, OUT_B, onceLocal);
             put(ctx, OUT_C, onceEdit);
             put(ctx, OUT_N, onceErr);
-            return [];
+            return true;
         }
         if (mode === "once-tick-patch") {
             put(ctx, OUT_A, onceRan);
@@ -965,11 +948,12 @@ const plugin = {
             put(ctx, OUT_F1, oncePatchApplied);
             put(ctx, OUT_F2, oncePatchCode === "" ? 1 : 0);          // 0 = 回执带了 code（不是抛、不是空）
             put(ctx, OUT_F3, onceErr);                               // 0 = 没有异常
-            return [];
+            return true;
         }
         ctx.fail("mode", "unexpected onTrigger for " + String(mode));
-        return [];
+        return true;
     },
 };
 
 export default plugin;
+

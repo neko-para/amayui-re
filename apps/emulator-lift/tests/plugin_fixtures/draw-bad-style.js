@@ -4,11 +4,12 @@
 //   d.ts 声明了它们，而 `Element`（`ui/element.h`：只有 fill/color/bold/z）没有表示。
 //   静默忽略会让"声明与实现"长期说谎，而且**没有症状**（少一圈描边没人知道是谁吞的）。
 //
-// 参数 `bad` 点名一条非法调用；`render` 必须**抛**（宿主侧断言 render 返回 false 且 err 里
-// 有 `ctx.draw: style.<field> is not supported`）。
+// 参数 `bad` 由 C++ 侧替换源码里的占位符（RenderCtx 没有 `params`）；`render` 必须**抛**。
+let badField = "__BAD__";
+
 const plugin = {
     render(ctx) {
-        switch (ctx.params.bad) {
+        switch (badField) {
             case "rect.stroke":
                 ctx.draw.rect(0, 0, 10, 10, { stroke: "#FFFFFF" });
                 break;
@@ -39,7 +40,7 @@ const plugin = {
                 break;
             default:
                 // 参数没给 / 拼错 ⇒ 也抛（⛔ 不许"什么都没画"静默通过）。
-                throw new Error("unknown bad: " + ctx.params.bad);
+                throw new Error("unknown bad: " + badField);
         }
     },
 };

@@ -31,31 +31,31 @@ const plugin = {
         if (mode === "once-where-range-lo" || mode === "once-where-range-hi") {
             ctx.task(async (t) => {
                 const tick = await ctx.once({ script: SCRIPT, lo: LO, hi: HI }, { timeoutMs: 60000 });
-                t.log("info", "once-where: range resolved mode=" + mode + " pos=" + String(tick.pos));
+                log.info("once-where: range resolved mode=" + mode + " pos=" + String(tick.pos));
             });
             return null;
         }
         if (mode === "once-where-script") {
             ctx.task(async (t) => {
                 const a = await ctx.once({ script: SCRIPT }, { timeoutMs: 60000 });
-                t.log("info", "once-where: script first pos=" + String(a.pos));
+                log.info("once-where: script first pos=" + String(a.pos));
                 const b = await ctx.once({ script: SCRIPT }, { timeoutMs: 60000 });
-                t.log("info", "once-where: script second pos=" + String(b.pos));
+                log.info("once-where: script second pos=" + String(b.pos));
             });
             return null;
         }
         if (mode === "once-where-opcode") {
             ctx.task(async (t) => {
                 const tick = await ctx.once({ opcode: OPCODE }, { timeoutMs: 60000 });
-                t.log("info", "once-where: opcode resolved pos=" + String(tick.pos));
+                log.info("once-where: opcode resolved pos=" + String(tick.pos));
             });
             return null;
         }
         if (mode === "delay") {
             ctx.task(async (t) => {
-                t.log("info", "delay: before");
+                log.info("delay: before");
                 await ctx.delay(5);
-                t.log("info", "delay: after");
+                log.info("delay: after");
             });
             return null;
         }
@@ -77,24 +77,24 @@ const plugin = {
             ctx.task(async (t) => {
                 // 0 合法：到期 = 下一个泵（本用例不动 wait 语义）。
                 await ctx.delay(0);
-                t.log("info", "delay-validation: ok");
+                log.info("delay-validation: ok");
             });
             return null;
         }
         if (mode === "once-from-task") {
             ctx.task(async (t) => {
                 const a = await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
-                t.log("info", "once-from-task: first pos=" + String(a.pos));
+                log.info("once-from-task: first pos=" + String(a.pos));
                 // ★ H1 取消的判据：这一行在**第一次 await 之后**（continuation 里）注册第二个 once。
                 const b = await ctx.once({ script: SCRIPT, pos: POS2 }, { timeoutMs: 60000 });
-                t.log("info", "once-from-task: second pos=" + String(b.pos));
+                log.info("once-from-task: second pos=" + String(b.pos));
             });
             return null;
         }
         if (mode === "finish-from-task") {
             ctx.task(async (t) => {
                 await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
-                t.log("info", "finish-from-task: finishing");
+                log.info("finish-from-task: finishing");
                 // ★ H2 取消的判据：continuation 里 finish（Run 侧入口）。
                 ctx.finish(5, "task-finish");
             });
@@ -105,11 +105,11 @@ const plugin = {
                 await ctx.once({ script: SCRIPT, pos: POS }, { timeoutMs: 60000 });
                 // ★ H1/H2 取消的判据：continuation 里装同步订阅；它让 Run 保持存活。
                 atHandle = ctx.at({ script: SCRIPT, pos: POS2 }, (tick, next) => {
-                    t.log("info", "at-from-task: hit pos=" + String(tick.pos));
+                    log.info("at-from-task: hit pos=" + String(tick.pos));
                     ctx.off(atHandle);
                     next();
                 });
-                t.log("info", "at-from-task: installed id=" + String(atHandle));
+                log.info("at-from-task: installed id=" + String(atHandle));
             });
             return null;
         }
@@ -120,3 +120,4 @@ const plugin = {
 let atHandle = null;
 
 export default plugin;
+

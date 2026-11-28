@@ -59,7 +59,7 @@ function start(ctx: RunCtx): void {
         try {
             const tick = await t.once(CHILD_POINT, { timeoutMs: CHILD_TIMEOUT_MS });
             child.phase = "done";
-            t.log("info", "composed child: reached " + tick.now.script + " @" + String(tick.now.pos));
+            log.info("info", "composed child: reached " + tick.now.script + " @" + String(tick.now.pos));
         } catch (err) {
             child.phase = "failed";
             // 想让 Run 以这条原因失败：重新抛出即可（task 拒绝 ⇒ 宿主 fail Run）。
@@ -74,7 +74,7 @@ function start(ctx: RunCtx): void {
     });
     if (watchId === undefined) ctx.fail("dispatch", "ctx.at 未装（no_injection）");
 
-    ctx.log("info", "dispatch: composed in one Run; no nested Run / no dispatch");
+    log.info("info", "dispatch: composed in one Run; no nested Run / no dispatch");
 }
 
 function render(rctx: RenderCtx): void {

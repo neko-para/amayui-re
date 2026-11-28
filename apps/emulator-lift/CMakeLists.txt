@@ -129,21 +129,16 @@ add_library(emulator-lift-runtime STATIC
     #     与（C1b）executor 共用它 ⇒ 放进本 target（同 `control_input.cpp` 的理由；纯 CTest 只链它）。
     #     ⛔ 同样不在执行循环里被调用。
     src/runtime/pointer_core.cpp
-    #   ★ **插件运行时 C1b 的核心**（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
-    #     `trigger_runner.cpp`（armed 集合 / 一读点最多一个事件 / timeout / owner / budget）、
-    #     `trigger_factory.cpp`（造 trigger 值 + **新**运行期状态）、`budget.cpp`（回调墙钟预算的
-    #     唯一读数来源）。归属本 target 的理由与 `control_input.cpp` / `pointer_core.cpp` 相同：
-    #     纯 CTest `trigger-runner` **只链本 target**（⛔ 放进 AOT target 会让它链接失败）。
+    #   ★ **插件运行时**的核心（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
+    #     `budget.cpp`（回调 CPU 预算的唯一读数来源）。归属本 target 的理由与
+    #     `control_input.cpp` / `pointer_core.cpp` 相同：纯 CTest 只链本 target。
     #     ⛔ 它们同样不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ① 与
     #     `tools/test/core-shape.test.mjs`）。
-    src/runtime/trigger_runner.cpp
-    src/runtime/trigger_factory.cpp
     src/runtime/budget.cpp
     #   ★ **插件运行时 C1c 的核心**（`docs/03-emulator/plugin-runtime.md` §4.3 / §4.4a / §5 C1）：
-    #     `intent_queue.cpp`（staged→ready 两级 / 回执 / owner）、`intent_executor.cpp`（七步 pump：
-    #     写预算 → beginReadPoint → poll → releaseDue → pressDue → drainQueue → 收口）、
-    #     `edit_sink.cpp`（Edit 的**立即**写；⛔ 不排进 Input）。归属本 target 的理由同上一段：
-    #     纯 CTest `trigger-runner` 只链本 target（⛔ 放进 AOT target 会让它链接失败）。
+    #     `intent_queue.cpp`（staged→ready 两级 / 回执 / owner）、`intent_executor.cpp`（六步 pump：
+    #     写预算 → beginReadPoint → releaseDue → pressDue → drainQueue → 收口）、
+    #     `edit_sink.cpp`（Edit 的**立即**写；⛔ 不排进 Input）。
     src/runtime/intent_queue.cpp
     src/runtime/intent_executor.cpp
     src/runtime/edit_sink.cpp
@@ -1516,21 +1511,9 @@ add_test(NAME input-anchor COMMAND lift-input-anchor)
 #   与产品入口 `--input-plan` / `--input-plan-trace` 同批删除。
 #   ⚠ 台账里仍有 4 条 `done` 单的 `verify:` 指着旧 CTest 名 —— 那几行**预期红**（父级改锚）。
 
-# ---- pure：插件运行时的 **TriggerRunner**（C1b；`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）----
-# ★ 判据（红了意味着什么）：
-#   ① `after-position-once`：`[lo,hi)` 的**两端**（`pos==lo` 触发 / `pos==hi` 不）、Once 只一次、
-#      无效读数**不改变状态**、done 之后不再 poll；
-#   ② `after-script-once`：只比脚本名（**无区间**）、`script_ok=false` 不算匹配、Reenter 的 false→true、
-#      重新 arm **不清**边沿；
-#   ③ `named-set`：多具名 / 一读点**最多一个**事件（注册顺序、**不级联**）/ 返回集合 = **完整替换** /
-#      `[]` = done / 重复 name ⇒ fail 并点名 / `maxFires` **续计** + 耗尽再放回 ⇒ fail + 新对象新预算 /
-#      **fire 优先于 timeout**（同拍只一个事件、timeout 不计 fires、per-arm 重置 deadline）/ 超预算 ⇒ fail；
-#   ④ `rearm`：Once 放回 = fail / Reenter 需新的有效外→内（不会立刻再触发）/ `AfterDelay` 计时从头 /
-#      `AtReadPoint` 从**下一个**匹配读点重新计 / `releaseOwner` 只抹 armed（owner 由 runner 盖章）。
-# ★ 顶层无条件注册 ⇒ **pure** 档（夹具零 guest：`TriggerReadings` 是值输入，两把钟都注入）。
-add_executable(lift-trigger-runner tests/trigger_runner.cpp)
-target_link_libraries(lift-trigger-runner PRIVATE emulator-lift-runtime)
-add_test(NAME trigger-runner COMMAND lift-trigger-runner)
+# ---- 2026-11-28：`tests/trigger_runner.cpp` 随 v1 兼容层删除（TriggerRunner / armed 集合）----
+#   `ctx.at` / `once` / `waitAny` 的行为由 `plugin-runtime` 覆盖；`IntentExecutor` 的一读点一条
+#   由 `input-inject-visible` 与 `plugin-runtime` 的 Tick.input 用例覆盖。
 
 # ---- pure：**注入真的能被引擎看见**（2026-11-19 裁决；`tests/input_inject_visible.cpp`）----
 # ★ 判据（红了意味着什么）：
@@ -3092,8 +3075,7 @@ target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
 # ★ 落点（全部**新增**文件；`src/plugin/**` 是适配层，⛔ 不 include `quickjs.h`、⛔ 不调
 #   `input::` / `writeGlobal`）：
 #   · `src/plugin/guest_read.{h,cpp}`   —— `EngineRead::globalGet` 的生产实现（`readGlobal`）
-#   · `src/plugin/readings.{h,cpp}`     —— 生产 `ReadingsSource`（marker 身份 + 位置 + 鼠标）
-#   · `src/plugin/plugin_host.{h,cpp}`  —— `TriggerHandler` + `ReadPointObserver` + `PluginCallHost`
+#   · `src/plugin/plugin_host.{h,cpp}`  —— `ReadPointObserver` + `PluginCallHost`
 #   · `src/runtime/read_point.h`        —— 读点观察者（核心面；已进 `core-shape` 白名单）
 # ★ 为什么用 `target_sources` 追加：与上面 A / E / H 同一条并发编辑口径（顶部大列表是"别改"区，
 #   两条车道最容易撞的公共面；本单只在文件末尾追加自己的块）。
@@ -3106,7 +3088,6 @@ target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE
     src/plugin/guest_read.cpp
-    src/plugin/readings.cpp
     src/plugin/plugin_host.cpp
     src/plugin/plugin_appdata.cpp
     # ★ 2026-11-25：`ctx.config`（`<--appdata>/plugin-config.json`）的宿主实现。**唯一** include

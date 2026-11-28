@@ -45,13 +45,13 @@ let flagId: number | undefined;
 function start(ctx: RunCtx): void {
     showId = ctx.at({ script: SHOW_SCRIPT, lo: SHOW_LO, hi: SHOW_HI }, (tick, next) => {
         hud.visible = true;
-        tick.log("debug", "keep-others: show");
+        log.info("debug", "keep-others: show");
         next();
     });
 
     hideId = ctx.at({ script: HIDE_SCRIPT, lo: HIDE_LO, hi: HIDE_HI }, (tick, next) => {
         hud.visible = false;
-        tick.log("debug", "keep-others: hide");
+        log.info("debug", "keep-others: hide");
         next();
     });
 
@@ -61,7 +61,7 @@ function start(ctx: RunCtx): void {
 
         // 只停这一条（v1 的「一次性」）：show / hide 两条订阅不受影响。
         if (flagId !== undefined) ctx.off(flagId);
-        tick.log("info", "keep-others: flag written; this subscription removed");
+        log.info("info", "keep-others: flag written; this subscription removed");
         next();
     });
 
