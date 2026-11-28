@@ -3,10 +3,10 @@
 //
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.5 / §4.6 / §5 C2。
 // 最终形态（2026-11-28 父级裁决）：**只剩 v2** —— RunCtx = `at/once/waitAny/task/off/finish/
-//   quit/fail/config/appdata/read/params/profile`（+ 回调期写面 `edit/input`）；
-//   Tick = `now/local/edit/input/patch`；RenderCtx = `draw/ui/config/game`。
+//   quit/fail/config/appdata/read/params/profile`；Tick = `now/local/edit/input/patch`
+//   （guest 写**只**走 Tick）；RenderCtx = `draw/ui/config/game`。
 //   v1 兼容层（`onTrigger` / Trigger 工厂 / armed 集合 / `ctx.hook` / `ctx.now` / `ctx.state` /
-//   `ctx.ui` / `ctx.log`）已整条删除。
+//   `ctx.ui` / `ctx.log` / `ctx.edit` / `ctx.input`）已整条删除。
 //
 // ★ 本头是**语言无关**的：`quickjs.h` ⛔ **不许**出现在这里（唯一 TU 是 `ui/script_quickjs.cpp`，
 //   守卫 `tools/test/core-shape.test.mjs` 行 11）。⇒ 本头只认 `Receipt` / `GlobalValue` /
@@ -109,6 +109,16 @@ public:
 
     // ★ 本 Run 是否**已经**失败。泵 / task settle 用它做"不重复 fail"。
     virtual bool failed() const { return false; }
+
+    // ★ 本 Run 是否**请求停机**（`ctx.quit`）。`runInstrHits` 的收口用它判"要不要丢已提交的 input"。
+    virtual bool quitRequested() const { return false; }
+
+    /**
+     * ★ F3 裁决的 v2 延伸：`ctx.fail` / `ctx.quit` 从**任意 Run 侧入口**（Run 回调 / task
+     * continuation / tick handler）返回后，本入口已提交的 input 必须被丢掉（⛔ 不许在下一读点落地）。
+     * 默认 no-op（没有输入面的实现）；`PluginHost` 覆盖为 `releaseRunInput()`。
+     */
+    virtual void releaseAbortedInput() {}
 
     // ★ 本 Run 是否**已经到终态**（`failed` / `finished` / `quit`）。
     //   为什么不能只判 `failed()`：`ctx.finish()` / `ctx.quit()` **不**置 `failed_` ⇒ 一个在

@@ -168,8 +168,9 @@ export const FIELD_MAIN_LOOP_HI = 0x5860;
 // `field-point-visible` 的 `fp:draw` 在这里补 `50ff9f` 的 bit0：它是**所有** `call-script 5117` 的唯一入口
 // （4 处调用点：`RENDERMAP` #118 @`0x0B04`、`FIELD` #2722 @`0x0F034` / #9688 @`0x0392BC`、
 // `RESETMAPAN` #1 @`0x0050`）⇒ 一条钩子覆盖全部调用者（含逐帧那条 `FIELD` #838 的 DRAWOBJ）。
-// 触发点 = guest 读点（`TriggerRunner` 只在读点 poll）；实测 DRAWOBJ 体内有 `peekMsg` 读点
-// （pos `0x64` / `0x2C4`），都在第一条 `draw-texture`（#58 @`0x66C`）之前。
+// 触发点 = `ctx.at` 的**指令点**（`DRAWOBJ.BIN` 入口 `0x003C`），⛔ 不依赖 guest 读点。
+// （DRAWOBJ 体内有 `peekMsg` 读点 pos `0x64` / `0x2C4`，只服务输入/泵，不影响本订阅；
+//   它们都在第一条 `draw-texture`（#58 @`0x66C`）之前。）
 export const DRAWOBJ_ENTRY_LO = 0x003c;
 export const DRAWOBJ_ENTRY_HI = 0x06bc;
 

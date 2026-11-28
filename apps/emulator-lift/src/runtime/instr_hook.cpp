@@ -60,8 +60,8 @@ struct Entry {
     // ★ S0：归属（`PluginHost` 传本 Run 的序号）⇒ Run 收口能只撤自己那批（见 `instrHookReleaseOwner`）。
     std::uint64_t owner = 0;
     // ★ S2c：用途 + 形状（去重 / 链 / matching 各读自己那几位；见头文件的三种 kind）。
-    //   ⛔ 不能叫 `kind`：下面还有 **patch** 的 `InstrPatchKind kind`（v1 语义，逐字保留）。
-    InstrHookKind hook_kind = InstrHookKind::V1At;
+    //   ⛔ 不能叫 `kind`：下面还有 **patch** 的 `InstrPatchKind kind`（历史命名，逐字保留）。
+    InstrHookKind hook_kind = InstrHookKind::Sub;
     InstrHookForm form = InstrHookForm::Pos;
     std::string script;
     std::uint32_t script_id = 0;  // 0 = 还没解析（首次命中时按名字解析并缓存）
@@ -99,7 +99,7 @@ struct Entry {
 };
 
 // ★ S2c-2：pending 从"单槽"变成"多槽 + 同址合并"。
-//   为什么必须多槽：一条链上两个 handler 各 `tick.patch` 一个不同 local，或 v1 的持久 patch 与
+//   为什么必须多槽：一条链上两个 handler 各 `tick.patch` 一个不同 local，或持久 patch 与
 //   `tick.patch` 同时存在 —— 单槽会把前一次的待恢复**提前写回**（静默丢一次覆盖）。
 //   同址合并的语义：**保留最初 raw**（窗口内多次改同一地址 ⇒ 恢复回最初的 raw），`written` 更新为
 //   最后一次写入的编码值（CAS 比的就是它）。`entry_id` 归属 = **第一个开窗的条目**（保留 raw 的那条）：
@@ -434,16 +434,6 @@ void instrHookRemoveSink(void* user) {
 
 bool instrHookHasSink() { return !state().sinks.empty(); }
 
-std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err) {
-    // ★ S2c：v1 的 `at(script,pos)` = `instrHookAddEx` 的**薄包装**（Pos + V1At）。判据逐字不变：
-    //   v1 的 `duplicate` 只对 `kind == V1At` 生效（见 `instrHookAddEx`）⇒ 别的 shape 不受影响。
-    InstrHookWhere where;
-    where.form = InstrHookForm::Pos;
-    where.script = script;
-    where.pos = pos;
-    return instrHookAddEx(owner, where, InstrHookKind::V1At, err);
-}
-
 std::uint32_t instrHookAddEx(std::uint64_t owner, const InstrHookWhere& where, InstrHookKind kind,
                              const char** err) {
     auto fail = [err](const char* why) {
@@ -471,15 +461,6 @@ std::uint32_t instrHookAddEx(std::uint64_t owner, const InstrHookWhere& where, I
             break;  // opcode 可带可选 script（`{script, opcode}`）
         default:
             return fail("bad_where");
-    }
-    // ★ 去重**只对 v1**：`(script,pos)` 一条是已发布语义（合同 §4.5）；v2 的 Sub / Once 是
-    //   新面，同点多条正是它的用法（多 handler / 链）。
-    if (kind == InstrHookKind::V1At) {
-        for (const Entry& e : state().entries) {
-            if (e.hook_kind == InstrHookKind::V1At && e.pos == where.pos && e.script == where.script) {
-                return fail("duplicate");
-            }
-        }
     }
     Entry entry;
     entry.id = state().next_id++;
@@ -753,7 +734,7 @@ void instrHookProbe(X86& cpu) {
     st.probe_serial += 1;
 
     // ★ S2a：有 sink 才收集命中 id。为什么**不在遍历里**直接分发：
-    //   sink 会跑 JS；JS 一旦能调 `instrHookAdd`（`push_back` ⇒ 重分配）或 `instrHookRemove`
+    //   sink 会跑 JS；JS 一旦能调 `instrHookAddEx`（`push_back` ⇒ 重分配）或 `instrHookRemove`
     //   （`erase`），遍历中的 `Entry& e` 立刻悬垂 ⇒ UB 且没有症状。把分发挪到循环结束之后，
     //   就把它从"语义门"变成**结构保证**（S2c 放开写能力也不会踩）。
     const bool want_sink = instrHookHasSink();
@@ -767,7 +748,7 @@ void instrHookProbe(X86& cpu) {
     std::vector<std::uint32_t> hit_overflow;  // 只在 >8 命中时才分配（S2c 起可达：同点多条）
 
     for (Entry& e : st.entries) {
-        // ★ S2c：四种 form 的统一判定（v1 的 Pos 仍是"先比 pos"那一支，代价同阶）。
+        // ★ S2c：四种 form 的统一判定（`Pos` 仍是"先比 pos"那一支，代价同阶）。
         if (!matchEntry(cpu, f, e)) continue;
         // 身份缓存写回：首次命中按名字解析过（`matchEntry` 里），之后只比 id。
         if (e.script_id == 0 && !e.script.empty()) e.script_id = f.id;
@@ -800,7 +781,7 @@ void instrHookProbe(X86& cpu) {
             continue;
         }
         // ★ S2c-2：多槽 —— 每条 entry 各写一个 slot（同址合并）。槽满 ⇒ 跳过**这一次写**
-        //   （⛔ 不写一个没有槽可恢复的值）、记 `skips`。v1 的"写成功后不 break"保持不变：
+        //   （⛔ 不写一个没有槽可恢复的值）、记 `skips`。"写成功后 ⛔ 不 break"：
         //   上面的 hits / hit_ids / capture 已经记完，后面的条目继续跑（且它自己的 patch 也生效）。
         bool covered = false;
         for (const PendingSlot& slot : st.pendings) {

@@ -60,7 +60,7 @@ AotIntrinsic pinnedIntrinsic(std::size_t index);
 
 // ★ S0（缺陷 3）：这一趟构建**实际注入**的 `lift_instr_hook` 站点数
 //   （`lift_pin.h` 的 `LIFT_AOT_PIN_INSTR_HOOK_SITES`；没有生成物 ⇒ 0）。
-//   0 = `--no-s7` 或闭包没覆盖脚本派发 EA ⇒ `ctx.hook.*` 永不命中。
+//   0 = `--no-s7` 或闭包没覆盖脚本派发 EA ⇒ `ctx.at` / `ctx.once` 永不命中。
 //   ★ 它只被 `ensureDispatchTable()` 消费一次（`instrHookSetInjectionSites`），⛔ 不是运行期读数。
 std::uint32_t pinnedInstrHookSites();
 

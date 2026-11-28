@@ -10,8 +10,8 @@
 //    （Run 回调 / task continuation / 泵）；render 里 TypeError。
 // 3. 指令点回调 / `once` 的 resolve 给一个 `Tick`：`now` / `local` / `edit` / `input` / `patch`。
 //    Tick 只在产生它的那次入口内有效（跨入口 `local`/`edit`/`input`/`patch` ⇒ stale_tick）。
-// 4. `ctx.edit` / `ctx.input`（Run 回调 / task continuation 里）与 `tick.edit` / `tick.input`
-//    （tick handler 里）是同一个宿主方法；render 里都不做 guest 写。
+// 4. guest 写只走 `Tick`：`tick.edit` / `tick.input` / `tick.patch`（RunCtx 没有 `edit` / `input`；
+//    render 里也不做 guest 写）。
 // 5. `ctx.fail` = 当前 Run 失败；`ctx.finish` = 结束 Run + 记 exit（**不改进程 exit**）；
 //    `ctx.quit` = 请求宿主停机。
 // 6. `render(rctx)` 只画：`rctx = { draw, ui, config, game }`（⛔ 没有 read/log/profile/params）。
@@ -112,23 +112,6 @@ declare module "@amayui/lift-plugin" {
         | { readonly localInt: number }
         | { readonly ptrLocal: number }
         | { readonly globalId: number };
-    /** `tick.patch` 的回执（`code`：`once_tick` / `too_many_slots` / `bad_target` …）。 */
-    export interface InstrHookStats {
-        readonly id: number;
-        readonly script: string;
-        readonly pos: number;
-        readonly kind: string;
-        readonly form: string;
-        readonly lo: number;
-        readonly hi: number;
-        readonly opcode: number;
-        readonly patch: boolean;
-        readonly hits: number;
-        readonly restores: number;
-        readonly restore_conflicts: number;
-        readonly skips: number;
-    }
-
     /** 指令点回调 / `once` resolve 的 Tick。 */
     export interface Tick {
         /** 链里第一条订阅的句柄（要自己的 id 就在 `at` 时存返回值）。 */
@@ -139,10 +122,6 @@ declare module "@amayui/lift-plugin" {
         readonly input: InputApi;
         /** 本拍 one-shot 覆盖（下一拍按 CAS 恢复；`once` 的 Tick 回 `once_tick`）。 */
         patch(target: InstrHookTarget, value: number): Receipt;
-        /** deprecated 平铺（与 `now` 同值；新代码用 `tick.now`）。 */
-        readonly script: string;
-        readonly pos: number;
-        readonly opcode?: number;
     }
 
     /** `ctx.profile.begin/end`：宿主 profile 桥（RunCtx 的 `end` 返回 void）。 */
@@ -182,8 +161,6 @@ declare module "@amayui/lift-plugin" {
 
     /** RunCtx：`start(ctx)` 的参数，也是 `ctx.task(async (t) => …)` 的 continuation 参数。 */
     export interface RunCtx {
-        readonly edit: EditApi;
-        readonly input: InputApi;
         readonly read: ReadApi;
         readonly params: Readonly<Record<string, string>>;
         readonly appdata: AppDataApi;

@@ -2,7 +2,7 @@
 //
 // 判据（每个 mode 对应一条 C++ 用例；红了意味着什么）：
 //   · `two-arms`   ：两条臂 `{script,pos:0x200}`（第 0 条） / `{script,pos:0x100}`（第 1 条）；
-//                    派发 0x100 ⇒ **第 1 条胜出** ⇒ resolve 的 `index = 1`、`tick.pos = 0x100`；
+//                    派发 0x100 ⇒ **第 1 条胜出** ⇒ resolve 的 `index = 1`、`tick.now.pos = 0x100`；
 //                    两条临时 hook **都**撤掉（赢家自己 + 输的那条都不留 pending）。
 //                    红了 = `index` 张冠李戴（当成第一条臂）/ 输的那条没撤（Run 只能等超时）。
 //   · `timeout`    ：两条都等不到 + `timeoutMs=1` ⇒ 泵先 reject（catch 能 log，**不 rethrow**）、
@@ -41,7 +41,7 @@ const plugin = {
                 // ★ 这条 log 是"task 的 continuation 在**本入口** drain 里跑完"的证据；
                 //   C++ 侧断言它的文本（`index=1`）与 `lastLogLine()`。
                 log.info(
-                    "wait-any: index=" + String(hit.index) + " pos=" + String(hit.tick.pos) +
+                    "wait-any: index=" + String(hit.index) + " pos=" + String(hit.tick.now.pos) +
                         " script=" + String(hit.tick.now.script),
                 );
             });

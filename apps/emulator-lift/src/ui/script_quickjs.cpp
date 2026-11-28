@@ -197,7 +197,7 @@ struct WaitAnyArmRef {
 };
 
 // ---- 插件（S2c）：`ctx.at` 的一条同步订阅 ----
-// ★ 与 `hook_handlers`（v1 `onTick`：1 句柄 : 1 handler、被动）**分开**：at 订阅参与链、算 Run 存活、
+// ★ 与 `once`（被动观察者）**分开**：at 订阅参与链、算 Run 存活、
 //   失败摘**整条**订阅。`serial` 只给日志唯一性（`at #N`；`PluginHost::log` 会对连续同文去重）。
 struct AtSub {
     Value handler;
@@ -273,15 +273,12 @@ struct Impl {
     // ⛔ 不要拿 `PluginHost::inCallback()` 当这个门：它只在 `start` / `onTrigger` 里为真，而 v2 的
     //   task continuation / 泵 / tick handler 都要求这些面可用（父级裁决 H1/H2 取消）。
     bool in_run_entry = false;
-    // ★ tick handler 也是 Run 侧入口（`in_run_entry=true`），但它的写面只有 `Tick`
-    //   （`tick.edit/input/patch`）；RunCtx 的 `ctx.edit/input` 在 tick handler 里仍 TypeError。
-    bool in_tick_entry = false;
     std::uint64_t pump_serial = 0;  // 泵里的失败日志唯一性（`pump #N`；`PluginHost::log` 会去重）
     std::vector<Value> tasks;
     Value current_run_ctx;
     // ---- 插件（S2c）：同步订阅面（`ctx.at` / `ctx.off`）+ Tick 代际 ----
     // ★ `at_subs`：handle → 订阅（参与链、算 Run 存活、失败摘整条）。
-    //   erase / clear ⇒ `Value` 析构 ⇒ 必须在 `JS_FreeContext` 之前清（与 `hook_handlers` 同一纪律）。
+    //   erase / clear ⇒ `Value` 析构 ⇒ 必须在 `JS_FreeContext` 之前清（`once` / `ticks` 同一纪律）。
     std::map<std::uint32_t, AtSub> at_subs;
     std::uint64_t next_at_serial = 1;  // `at #N`（日志唯一性；⛔ 不复用）
     // ★ `chain_step`：只在一个 at handler 的 `JS_Call` 期间 `active` ⇒ `next()` 在链外必然抛。
@@ -426,18 +423,8 @@ struct RunEntryScope {
     RunEntryScope& operator=(const RunEntryScope&) = delete;
 };
 
-// ★ tick handler 的写面只有 `Tick`：这一位让 RunCtx 的 `ctx.edit/input` 在 tick handler 里仍
-//   抛 TypeError（与"tick 是 Run 侧入口"正交；嵌套派发保存-恢复）。
-struct TickEntryScope {
-    Impl* impl = nullptr;
-    bool prev = false;
-    explicit TickEntryScope(Impl* i) : impl(i), prev(i->in_tick_entry) { i->in_tick_entry = true; }
-    ~TickEntryScope() {
-        if (impl != nullptr) impl->in_tick_entry = prev;
-    }
-    TickEntryScope(const TickEntryScope&) = delete;
-    TickEntryScope& operator=(const TickEntryScope&) = delete;
-};
+// ★ tick handler 的写面只有 `Tick`（`tick.edit/input/patch`）：RunCtx 没有写面，所以这里不需要
+//   额外的"tick 入口禁止写"开关。
 
 // ★ S2a/S2c：sink 的自由函数（`createImpl` 要用，所以前置声明；定义在 hook trampoline 段之后，
 //   因为 `runInstrHits` 要用 `defineReadOnly` / `setFunction` / `drainPendingJobs`）。
@@ -1935,7 +1922,7 @@ public:
 //       §6 行 9·11·12·26·30·34。
 // 父级裁决：`.tmp/plugin-runtime/c2-decisions.md` D-C2-3（不支持的 style ⇒ TypeError）、
 //       D-C2-5（headless + render 只警告一次）、D-C2-6（`ctx.read.frameHash` **不安装**）、
-//       D-C2-7（`ctx.now` 每回调新建值对象；`initialState` 浅拷贝；`ctx.run`/`ctx.dispatch`
+//       D-C2-7（`Tick.now` 是命中那一拍的快照；`ctx.run`/`ctx.dispatch`
 //       不安装）、D-C2-9（`finish`/`quit` 的出口）。
 //
 // ★ **两条入口按 flag 选择**（⛔ 不按"有没有 default 猜"，测绘 §6-③）：
@@ -1943,10 +1930,11 @@ public:
 //   `--plugin` 走 `makeQuickJsPlugin`（**强制 module**，只读 default 导出）。
 //   ⇒ 一个同时带 `export default` 与 `globalThis.render` 的文件，行为不随实现漂。
 //
-// ★ **`ctx` 是每次回调新建的值对象**（`ctx.now` 更是每回调一个新快照，D-C2-7）：
-//   RunCtx 的成员 = `edit/input/read/trigger/ui/profile/state/params/appdata/log/fail/finish/quit` + `now`；
-//   ⛔ **没有** `draw`（C2b 只装在 RenderCtx 上；`onTrigger` 不画）、`run`/`dispatch`（C5）、
-//   `sample`/`screenshot`（永远不做）。`api-surface` 用例断言这些**缺席**（不是"有但抛"）。
+// ★ **`ctx` 是每次回调新建的值对象**（`Tick.now` 是命中那一拍的快照，D-C2-7）：
+//   RunCtx 的成员 = `at/once/waitAny/task/off/delay/finish/quit/fail/config/appdata/read/params/profile`；
+//   ⛔ **没有** `draw`（C2b 只装在 RenderCtx 上）、`run`/`dispatch`（C5）、
+//   `sample`/`screenshot`（永远不做）、`edit`/`input`（guest 写只走 `Tick`）。
+//   `api-surface` 用例断言这些**缺席**（不是"有但抛"）。
 //   RenderCtx（C2b，**每帧新建**）= `ui/draw/read/game/params/log/profile/config`
 //   （见下面的 `buildRenderCtx`；`config` = 2026-11-26 加回的第 8 个成员）。
 //
@@ -1975,7 +1963,7 @@ constexpr PluginPointName kPluginPointNames[] = {
     {"dispatch", lift::InputPoint::Dispatch},       {"setCursorPos", lift::InputPoint::SetCursorPos},
     // ★ F5-R2（父级裁决）：`fileRead` **也是**名字表的一员 —— `InputPoint::FileRead` 是 11 个投递点
     //   之一（`kernel32!ReadFile` 的"文件读完"事件源），d.ts 的并集已经在 F5-R1 里补上它
-    //   ⇒ 运行期词表必须能**解析**它（否则 `atReadPoint("fileRead", …)` 与 `ctx.now.point` 的
+    //   ⇒ 运行期词表必须能**解析**它（否则 `atReadPoint("fileRead", …)` 与 `Tick.now.point` 的
     //   同一个名字一边能给、一边抛 TypeError）。⛔ 不要只让 `pluginPointName()`（输出侧）认它。
     {"fileRead", lift::InputPoint::FileRead},
 };
@@ -2012,7 +2000,7 @@ bool parsePluginPoint(JSContext* ctx, JSValueConst value, lift::InputPoint* out,
     return false;
 }
 
-// `ctx.edit/input/read.…` 的 `kind` 参数（d.ts 的 `GlobalKind` = "int" | "uint" | "float" | "string"）。
+// `tick.edit` / `ctx.read.global.get` 的 `kind` 参数（d.ts 的 `GlobalKind` = "int" | "uint" | "float" | "string"）。
 bool parseGlobalKindArg(JSContext* ctx, JSValueConst value, lift::GlobalKind* out, std::string* why) {
     std::string text;
     if (!JS_IsString(value) || !qjs::toString(ctx, value, &text)) {
@@ -2061,8 +2049,7 @@ bool runSideAllowed(Impl* impl, lift::ui::PluginCallHost* host) {
 // ★ 为什么需要：`buildRunCtx` / `makeUiObject` 比它们的定义**先用**。这个匿名命名空间里没有
 //   "头文件里统一声明"这回事 ⇒ 显式列一次（⛔ 不要靠挪定义顺序凑）。
 //   函数体在下面（`ctx` 的成员构造之后），顺序与 d.ts 的成员顺序一致。
-JSValue jsCtxEditGlobalSet(JSContext*, JSValueConst, int, JSValueConst*);
-// ★ S2c-2：Tick 写面（与 v1 **同一个宿主方法**，门不同：`editAttached()` + tick 未 stale）。
+// ★ S2c-2：Tick 的写面（门 = `editAttached()` / `inputAttached()` + tick 未 stale）。
 JSValue jsTickEditGlobalSet(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsTickInputClick(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsTickInputMove(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2070,11 +2057,6 @@ JSValue jsTickInputDown(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsTickInputUp(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsTickInputStatus(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsTickPatch(JSContext*, JSValueConst, int, JSValueConst*);
-JSValue jsCtxInputClick(JSContext*, JSValueConst, int, JSValueConst*);
-JSValue jsCtxInputMove(JSContext*, JSValueConst, int, JSValueConst*);
-JSValue jsCtxInputDown(JSContext*, JSValueConst, int, JSValueConst*);
-JSValue jsCtxInputUp(JSContext*, JSValueConst, int, JSValueConst*);
-JSValue jsCtxInputStatus(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxReadGlobalGet(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- S2b：异步面（`once` 返回 Promise；`task` 登记一个协程）----
 JSValue jsCtxOnce(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2193,7 +2175,7 @@ bool defineReadOnly(JSContext* ctx, JSValueConst obj, const char* name, Value va
     return true;
 }
 
-// `ctx.input.*` / `ctx.edit` 的回执对象（d.ts `Receipt` 的五个字段；`code` 只在失败时给）。
+// `tick.input.*` / `tick.edit` 的回执对象（d.ts `Receipt` 的五个字段；`code` 只在失败时给）。
 Value makeReceiptObject(JSContext* ctx, bool accepted, bool queued, bool applied, const char* code,
                         std::uint64_t seq, std::uint64_t id) {
     Value obj = qjs::newObject(ctx);
@@ -2229,10 +2211,9 @@ Value makeUiObject(Impl& impl) {
     return ui;
 }
 
-// ★ S2c-2：`edit` / `input` 两个 API 对象**一份实现、两个入口**（RunCtx 与 Tick）：
-//   形状与宿主方法都逐字相同；**门不同**（v1 = `*Wired()` 含 `in_callback_`；tick = `*Attached()`
-//   + `tickRefOf` 未 stale）。⛔ 不复制第二套校验 / 回执。
-Value makeEditApi(Impl& impl, bool tick_mode) {
+// ★ S2c-2：`edit` / `input` 两个 API 对象**只挂在 Tick 上**（guest 写的唯一入口）：
+//   门 = `*Attached()` + `tickRefOf` 未 stale。⛔ 不复制第二套校验 / 回执。
+Value makeEditApi(Impl& impl) {
     JSContext* ctx = impl.ctx;
     Value edit = qjs::newObject(ctx);
     Value global = qjs::newObject(ctx);
@@ -2240,8 +2221,7 @@ Value makeEditApi(Impl& impl, bool tick_mode) {
         qjs::clearException(ctx);
         return Value::exception(ctx);
     }
-    if (!setFunction(ctx, global.raw(), "set",
-                     tick_mode ? jsTickEditGlobalSet : jsCtxEditGlobalSet, 3, nullptr) ||
+    if (!setFunction(ctx, global.raw(), "set", jsTickEditGlobalSet, 3, nullptr) ||
         !qjs::setProperty(ctx, edit.raw(), "global", std::move(global))) {
         qjs::clearException(ctx);
         return Value::exception(ctx);
@@ -2249,7 +2229,7 @@ Value makeEditApi(Impl& impl, bool tick_mode) {
     return edit;
 }
 
-Value makeInputApi(Impl& impl, bool tick_mode) {
+Value makeInputApi(Impl& impl) {
     JSContext* ctx = impl.ctx;
     Value input = qjs::newObject(ctx);
     if (input.isException()) {
@@ -2257,11 +2237,11 @@ Value makeInputApi(Impl& impl, bool tick_mode) {
         return Value::exception(ctx);
     }
     const bool ok =
-        setFunction(ctx, input.raw(), "click", tick_mode ? jsTickInputClick : jsCtxInputClick, 3, nullptr) &&
-        setFunction(ctx, input.raw(), "move", tick_mode ? jsTickInputMove : jsCtxInputMove, 2, nullptr) &&
-        setFunction(ctx, input.raw(), "down", tick_mode ? jsTickInputDown : jsCtxInputDown, 1, nullptr) &&
-        setFunction(ctx, input.raw(), "up", tick_mode ? jsTickInputUp : jsCtxInputUp, 1, nullptr) &&
-        setFunction(ctx, input.raw(), "status", tick_mode ? jsTickInputStatus : jsCtxInputStatus, 1, nullptr);
+        setFunction(ctx, input.raw(), "click", jsTickInputClick, 3, nullptr) &&
+        setFunction(ctx, input.raw(), "move", jsTickInputMove, 2, nullptr) &&
+        setFunction(ctx, input.raw(), "down", jsTickInputDown, 1, nullptr) &&
+        setFunction(ctx, input.raw(), "up", jsTickInputUp, 1, nullptr) &&
+        setFunction(ctx, input.raw(), "status", jsTickInputStatus, 1, nullptr);
     if (!ok) {
         qjs::clearException(ctx);
         return Value::exception(ctx);
@@ -2279,28 +2259,6 @@ bool buildRunCtx(Impl& impl, Value* out) {
     }
     bool ok = true;
 
-    // ---- edit = { global: { set } }（Tick.edit 与这份**同一个宿主方法**；见 `makeEditApi`）----
-    if (ok) {
-        Value edit = makeEditApi(impl, /*tick_mode=*/false);
-        if (edit.isException()) {
-            qjs::clearException(ctx);
-            ok = false;
-        } else {
-            ok = qjs::setProperty(ctx, obj.raw(), "edit", std::move(edit));
-        }
-        if (!ok) qjs::clearException(ctx);
-    }
-    // ---- input = { click, move, down, up, status } ----
-    if (ok) {
-        Value input = makeInputApi(impl, /*tick_mode=*/false);
-        if (input.isException()) {
-            qjs::clearException(ctx);
-            ok = false;
-        } else {
-            ok = qjs::setProperty(ctx, obj.raw(), "input", std::move(input));
-        }
-        if (!ok) qjs::clearException(ctx);
-    }
     // ---- read = { global: { get } }（⛔ frameHash / frames / scriptPos 在 C2a 不存在）----
     if (ok) {
         Value read = qjs::newObject(ctx);
@@ -2908,16 +2866,14 @@ bool buildRenderCtx(Impl& impl, Value* out) {
 // `ctx.*` 的 trampoline（每个都：取 impl → 判装配 → catch(...)）
 // =======================================================================================
 
-// ★ S2c-2：`tickRefOf` 定义在 Tick 那一节（本函数之后）⇒ 前置声明（`Tick` 的写面要在
-//   `edit/input` 的公共壳里先查 stale，再进与 v1 同一条宿主方法）。
+// ★ S2c-2：`tickRefOf` 定义在 Tick 那一节（本函数之后）⇒ 前置声明（`Tick` 的
+//   `edit/input` 公共壳里先查 stale，再进宿主方法）。
 TickRef* tickRefOf(JSContext* ctx, JSValueConst obj, Impl* impl);
 
 // ★ S2c-2：`Tick.edit.global.set` 的门 = `tickRefOf`（这一拍没 stale）+ `host->editAttached()`
-//   （**装配**，不含 `in_callback_`）。⛔ 不把 `in_callback_` 打开：那会一次放开 v1 写面
-//   （`ctx.edit` / `ctx.input` / `ctx.trigger` / `ctx.hook.*`）。★ P0 起 Run 侧控制面
+//   （**装配**，不含 `in_callback_`）。P0 起 Run 侧控制面
 //   （`fail` / `finish` / `quit` / `profile` / `config` / `once` / `at` / `task` / `delay`）走的是
-//   `in_run_entry`（tick 里**允许**），与 `in_callback_` 正交 ⇒ "写面不是把 in_callback_ 打开"的
-//   可判读数仍是同一个 tick handler 里 v1 `ctx.edit` 抛 TypeError（见 `at-chain` 的 tick-edit）。
+//   `in_run_entry`（tick 里**允许**），与写面正交 ⇒ 写只能走 `tick.edit` / `tick.input` / `tick.patch`。
 bool tickStaleError(JSContext* ctx, JSValueConst this_val, Impl* impl, const char* fn) {
     if (impl == nullptr || tickRefOf(ctx, this_val, impl) == nullptr) {
         JS_ThrowPlainError(ctx, "%s: 这个 Tick 已过期（stale_tick：Tick 只在产生它的那次入口内有效）",
@@ -2927,27 +2883,14 @@ bool tickStaleError(JSContext* ctx, JSValueConst this_val, Impl* impl, const cha
     return false;
 }
 
-JSValue editGlobalSetTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                                bool tick_mode) {
+JSValue editGlobalSetTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
         Impl* impl = implOf(ctx);
-        // ★ S2c-2 复审 F8：错误文案必须点名**调用它的那条面**（tick 面写 `tick.*`，⛔ 不让用户
-        //   看到 `ctx.edit.global.set` 的报错却查 `ctx`）。
-        const char* api = tick_mode ? "tick.edit.global.set" : "ctx.edit.global.set";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->editAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 EditSink（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->editAttached()) {
+        const char* api = "tick.edit.global.set";
+        if (tickStaleError(ctx, this_val, impl, api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->editAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 EditSink（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         if (argc < 3) return JS_ThrowTypeError(ctx, "%s(kind, id, value)", api);
         lift::GlobalKind kind = lift::GlobalKind::Int;
@@ -2991,16 +2934,12 @@ JSValue editGlobalSetTrampoline(JSContext* ctx, JSValueConst this_val, int argc,
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.edit.global.set" : "ctx.edit.global.set");
+                                 "tick.edit.global.set");
     }
 }
 
-JSValue jsCtxEditGlobalSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return editGlobalSetTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickEditGlobalSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return editGlobalSetTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return editGlobalSetTrampoline(ctx, this_val, argc, argv);
 }
 
 // =====================================================================================
@@ -3015,7 +2954,7 @@ JSValue jsTickEditGlobalSet(JSContext* ctx, JSValueConst this_val, int argc, JSV
 //       `atReadPoint("any")` 的"下一拍采样"（save 翻页链用它重读页号；频率是脚本指令而非读点）。
 //   · `timeoutMs` **必填且 > 0**（缺省 / 非法 ⇒ TypeError）：与 v1 `AtReadPoint.max_fires` 一样
 //     "不给你一个永不结束的等待"；
-//   · 命中 ⇒ resolve 一个**与 `onTick` 同形**的只读 Tick（`makeTickObject` 的唯一实现）；
+//   · 命中 ⇒ resolve 一个**与 `ctx.at` 同形**的只读 Tick（`makeTickObject` 的唯一实现）；
 //   · 超时 = **失败截止**：`pump()` 里先 reject（让 `catch` 在同一个泵里 drain 到、可以 `log`），
 //     随后宿主 `fail("once-timeout", …)` —— 即使 rejection 被 catch 也照样 fail Run。
 //   · 门 = **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation / 泵）；render 里仍 TypeError。
@@ -3056,8 +2995,8 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 
         // ★ S3（复审）：**先建 Promise 再注册 hook**。失败路径都必须**返回 Promise**（类型面是
         //   `Promise<Tick>`；⛔ 不返回 undefined 让调用方 `await` 到 undefined）。反过来（先
-        //   `instrHookAdd`）时 Promise 创建失败会让那条临时 hook 泄漏（Run 收口前一直挂在表里、
-        //   `ctx.hook.list()` 可见、hits 会涨）。注册失败 ⇒ 已拒绝的 promise（宿主已打过一行 error
+        //   `instrHookAddEx`）时 Promise 创建失败会让那条临时 hook 泄漏（Run 收口前一直挂在表里、
+        //   `instrHookList()` 可见、hits 会涨）。注册失败 ⇒ 已拒绝的 promise（宿主已打过一行 error
         //   点名 code）；它不会自己 fail Run（除非调用方 await 的 task 抛）。
         JSValue funcs[2] = {JS_UNDEFINED, JS_UNDEFINED};
         Value promise(ctx, JS_NewPromiseCapability(ctx, funcs));
@@ -3068,7 +3007,7 @@ JSValue jsCtxOnce(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         Value resolve_fn(ctx, funcs[0]);
         Value reject_fn(ctx, funcs[1]);
         const char* code = nullptr;
-        // ★ S2c：once 的临时 hook 走 `instrHookAddWhere(..., Once)` —— **不再**与 v1 `ctx.hook.at`
+        // ★ S2c：once 的临时 hook 走 `instrHookAddWhere(..., Once)` —— **不再**走 v1 的 `(script,pos)`
         //   共用 `(script,pos)` 去重（那是 v1 的已发布语义；once 是新面，同点共存是它的用法）。
         // ★ P0：`where` 直接来自 `readAtWhere`（五种形态与 `ctx.at` 逐条一致）⇒ `{script}` 的
         //   "下一条指令"就是 Script 形态的第一次命中。
@@ -3433,7 +3372,7 @@ std::string describeAtWhere(const lift::InstrHookWhere& where) {
 //     同一条；用户 catch 了也照样 fail —— 除非它自己 `finish`）；
 //   · 门 = **Run 侧入口**（`runSideAllowed`：Run 回调 / task continuation / 泵）；render 里 TypeError；
 //   · 计入 `hasPendingWork`（等待期间 Run 保持存活）；Run 收口清账（`onRunClosed`）；
-//   · `ctx.hook.clear()` / `handle.clear()` / owner release 撤掉臂 ⇒ 整组被外部清掉时 reject
+//   · `ctx.off` / owner release 撤掉臂 ⇒ 整组被外部清掉时 reject
 //     （⛔ 不留下永不 settle 的 Promise —— 否则 Run 只能等 `--time-limit`）。
 // ★ 实现 = 一组 `InstrHookKind::Once` 临时 hook（被动观察者、与 `once` 同一个 kind）+ 一条组账；
 //   ⛔ 不用 `ctx.at` 多订阅：那需要 JS 侧 `off` 竞态（`waitFirst` 的老实现），且超时只能靠 guest 状态。
@@ -3719,7 +3658,7 @@ JSValue jsTickPatch(JSContext* ctx, JSValueConst this_val, int argc, JSValueCons
 //     log(level, message, data?),         // 复用 jsCtxLog（一份实现、两条出口）
 //     script, pos, opcode?                // ★ deprecated 平铺（S2a/S2b 的夹具与 d.ts 用着；S4 删）
 //   }
-// ★ 三个入口（`handle.onTick` / `ctx.once` / `ctx.at`）**共用**这一个：三处 Tick 逐字段同形。
+// ★ 两个入口（`ctx.once` / `ctx.at`）**共用**这一个：两处 Tick 逐字段同形。
 // ★ 有效期 = 产生它的那一次 tick 入口（**含该入口的 drain**）：`Impl::ticks` 在入口末尾 clear
 //   ⇒ 之后任何 `local.*` 抛 `stale_tick`；`now` 是快照、`log` 是宿主出口 ⇒ 仍可用。
 // =====================================================================================
@@ -3804,7 +3743,7 @@ JSValue jsTickLocalPtrDword(JSContext* ctx, JSValueConst this_val, int argc, JSV
 
 /** 组一个 Tick（值表 + JS 对象）；失败 ⇒ false（调用方一行 error，不 fail Run）。
  *  `once` = 这个 Tick 由 `runOnceResolve` 造（`ctx.once` 的 resolve 值）⇒ `tick.patch` 回执
- *  `once_tick`（S2c-2 复审 F2）。`onTick` / `ctx.at` 的 Tick 一律 `once=false`。 */
+ *  `once_tick`（S2c-2 复审 F2）。`ctx.at` 的 Tick 一律 `once=false`。 */
 bool makeTickObject(Impl& impl, const lift::InstrHit& hit, bool once, Value* out) {
     JSContext* ctx = impl.ctx;
     // ★ 先把**值**拷进表（Tick 的唯一 owner）：⛔ 不存 `InstrHit*` / `hit.script` 指针 ——
@@ -3858,11 +3797,10 @@ bool makeTickObject(Impl& impl, const lift::InstrHit& hit, bool once, Value* out
     if (ok) ok = setFunction(ctx, local.raw(), "ptr", jsTickLocalPtr, 1, nullptr);
     if (ok) ok = setFunction(ctx, local.raw(), "ptrDword", jsTickLocalPtrDword, 1, nullptr);
     // ---- S2c-2：写面（`edit` / `input` / `patch`）----
-    //   `edit` / `input` 与 RunCtx 的**同一份构造**（`makeEditApi` / `makeInputApi`），只是 trampoline
-    //   换成 tick 版（门 = `*Attached()` + tick 未 stale）。★ 子对象也必须带 `__tick`：trampoline
-    //   的 `this_val` 是 `edit.global` / `input` 本身（不是 tick 对象）。
-    Value edit = makeEditApi(impl, /*tick_mode=*/true);
-    Value input = makeInputApi(impl, /*tick_mode=*/true);
+    //   `edit` / `input` 是 guest 写的**唯一**入口（RunCtx 没有）。★ 子对象也必须带 `__tick`：
+    //   trampoline 的 `this_val` 是 `edit.global` / `input` 本身（不是 tick 对象）。
+    Value edit = makeEditApi(impl);
+    Value input = makeInputApi(impl);
     if (ok && !edit.isException() && !input.isException()) {
         Value edit_global = qjs::getProperty(ctx, edit.raw(), "global");
         if (edit_global.isException() || !edit_global.isObject()) {
@@ -3884,13 +3822,6 @@ bool makeTickObject(Impl& impl, const lift::InstrHit& hit, bool once, Value* out
     if (ok) ok = defineReadOnly(ctx, obj.raw(), "edit", std::move(edit));
     if (ok) ok = defineReadOnly(ctx, obj.raw(), "input", std::move(input));
     if (ok) ok = setFunction(ctx, obj.raw(), "patch", jsTickPatch, 2, nullptr);
-    // ---- deprecated 平铺（S4 删；S2a/S2b 的夹具与 d.ts 用着）----
-    if (ok) ok = defineReadOnly(ctx, obj.raw(), "script", qjs::newString(ctx, tick.script));
-    if (ok) ok = defineReadOnly(ctx, obj.raw(), "pos", qjs::newInt32(ctx, static_cast<std::int32_t>(tick.pos)));
-    if (ok && tick.opcode_ok) {
-        ok = defineReadOnly(ctx, obj.raw(), "opcode",
-                            qjs::newInt32(ctx, static_cast<std::int32_t>(tick.opcode)));
-    }
     if (!ok) {
         qjs::clearException(ctx);
         impl.ticks.erase(serial);
@@ -3904,7 +3835,7 @@ bool makeTickObject(Impl& impl, const lift::InstrHit& hit, bool once, Value* out
 // S2b · once 的结算 / task settle / 泵
 // =====================================================================================
 
-// 命中：组 Tick（与 `onTick` 同一个 `makeTickObject`）→ resolve → 撤临时 hook → 删账。
+// 命中：组 Tick（与 `ctx.at` 同一个 `makeTickObject`）→ resolve → 撤临时 hook → 删账。
 // ★ 顺序是**承重**的（S2 复审 S3）：`makeTickObject` 必须先把 `hit.script` 拷进 JS 字符串，
 //   **再** `instrHookRemove` —— `InstrHit::script` 指回 hook 表里的条目，摘掉之后就是悬垂指针。
 // ★ S2b-4（复审 S2-4）：`instrHookRemove` 会经 `on_released` 回到本实例；**先**把账摘掉再撤 hook，
@@ -4073,9 +4004,9 @@ void settleTasks(Impl& impl, lift::ui::PluginCallHost* host) {
  *   ④ 若刚才有 timeout ⇒ **现在** fail Run（`catch` 已经有机会 log；用户 catch 了也照样 fail）。
  *
  * ★ P0：泵是 **Run 侧入口**（`RunEntryScope`）⇒ 里面的 continuation 可以 `once` / `at` / `task` /
- *   `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat` / `delay`。v1 写面
- *   （`ctx.edit/input/trigger/hook.*`）的 `inCallback` 门**没动**。`in_callback_` 仍 false
- *   （那一位在 `PluginHost` 手里，本函数够不到）—— 两套门正交，⛔ 不要合并。
+ *   `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat` / `delay`。guest 写仍只能走
+ *   `Tick`（`tick.edit/input/patch`）—— 泵里没有当前 Tick。`in_callback_` 仍 false
+ *   （那一位在 `PluginHost` 手里，本函数够不到）。
  * ★ **预算保存-恢复**：render 边界调用时 `deadline_ns` 是 present_sdl 给本帧的墙钟预算，
  *   ⛔ 不能被泵清掉；泵自己只用 CPU 窗（与 S2a 的入口一致）。`overran` 取**或**：泵自己超预算要
  *   留下读数（guard `plugin/pump-budget`），但不能把外层入口的标记冲掉。
@@ -4188,11 +4119,10 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
 // S2c · 链（`ctx.at`）：一次派发 = 一个 host→JS 入口 = 一条链
 //
 // 与 `call()` 的对齐（施工图 §D 的表）：
-//   · `in_callback_` **保持 false** ⇒ v1 写面（`ctx.edit/input/trigger/hook.*`）仍 TypeError；
+//   · race 写面：RunCtx 没有 `edit/input`；tick handler 里写只能走 `Tick`（`tick.edit/input/patch`）；
 //   · ★ P0：tick 入口是 **Run 侧入口**（`Impl::in_run_entry = true`）⇒ 存下来的 RunCtx 上的
 //     `once` / `at` / `task` / `finish` / `fail` / `quit` / `profile` / `config*` / `appdata.stat`
 //     **允许**（父级裁决：tick handler 没有 RunCtx 参数，但"存到模块变量再用"按 Run 侧处理）；
-//     tick 自己的写面仍是 `Tick`（`tick.edit/input/patch`）；
 //   · `call_host` = `call_host_persistent`（同 render；`tick.log` / 只读来路）；
 //   · 预算 = `Budget{}` 生产缺省（sink 拿不到 runner 的预算；tick 是观察者）；
 //   · 失败 = **摘 handler / 撤订阅 + 一行 log**，**不 fail Run**（观察者挂了让 guest 继续跑）。
@@ -4200,7 +4130,7 @@ void pumpImpl(Impl& impl, lift::ui::PluginCallHost* host, const lift::plugin::Bu
 //   微任务里的忙等一样被中断（方案 A）。`deadline_ns` 也必须清（R3：上一帧 render 的墙钟
 //   deadline 早已过期，不清就会在第一次中断误判）。
 // ★ 链的顺序 = 注册序（`InstrHit` 数组的顺序 = entries 顺序 = handle 升序，runtime 保证）。
-//   `once` / v1 `onTick` 是**被动**观察者：截断**不**影响它们（B-1）。
+//   `once` 是**被动**观察者：截断**不**影响它（B-1）。
 // =====================================================================================
 
 /** `next()`：只在一个 at handler 的**同步** `JS_Call` 期间有效（`chain_step.active`）。 */
@@ -4221,7 +4151,7 @@ JSValue jsTickNext(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSVa
  * S2c 的 host→JS 入口：**一次指令点派发**（probe 的一次 `on_hits`，`hits[0..n)` 按注册序）。
  *
  * ① 组一个 Tick（一次派发一个，全链共享同一个快照；缺它 ⇒ 一行 error、本拍不跑 handler）；
- * ② 同一预算窗里按注册序跑链：`at` 参与者受截断影响，`once` / v1 `onTick` **不受**；
+ * ② 同一预算窗里按注册序跑链：`at` 参与者受截断影响，`once` **不受**；
  * ③ 同一预算窗 drain 到静止（`plugin/drain-per-entry` 的 tick 方向）+ settleTasks；
  * ④ 恢复 7 个预算字段 + `ticks` / `chain_step`（嵌套派发）；**末尾 `ticks.clear()`** —— Tick 的
  *   有效期到此结束（之后 `local.*` = stale），再把外层入口的表搬回来（正常档 = 空）。
@@ -4229,10 +4159,16 @@ JSValue jsTickNext(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSVa
 void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
     if (impl.ctx == nullptr || hits == nullptr || n == 0) return;
     // ★ P0：tick handler 是 **Run 侧入口**（脚本把 RunCtx 存到模块变量后在 tick 里用它 = 允许；
-    //   `once` / `at` / `task` / `finish` / … 都可调）。tick 自己的**写面**仍是 `Tick`
-    //   （`tick.edit/input/patch`）；v1 `ctx.edit/input/trigger/hook.*` 的门没动（仍是 `inCallback`）。
+    //   `once` / `at` / `task` / `finish` / … 都可调）。写面只有 `Tick`（`tick.edit/input/patch`）。
     RunEntryScope run_entry(&impl, true);
-    TickEntryScope tick_entry(&impl);
+    // ★ F3（v2 延伸）：本入口（含 tick handler 与 drain 里的 continuation）fail / quit ⇒
+    //   已提交的 input 必须被立刻丢掉（`ctx.finish` 不丢 —— 那是正常收口）。
+    struct AbortInputScope {
+        lift::ui::PluginCallHost* host = nullptr;
+        ~AbortInputScope() {
+            if (host != nullptr && (host->failed() || host->quitRequested())) host->releaseAbortedInput();
+        }
+    } abort_input{impl.call_host_persistent};
     // ⓪ 这次派发里有没有**本实例**的订阅 / handler？没有 ⇒ 零成本早退
     //   （hook 表是进程级的：另一个存活的 Impl 的 sink 也会收到同一次 on_hits）。
     //   ★ S2c-2 复审 F2：顺带记下**第一条属于本实例的 hit** —— Tick / 入口 error 行必须用它，
@@ -4453,7 +4389,7 @@ void implOnInstrReleased(void* user, std::uint32_t handle) {
     try {
         Impl* impl = static_cast<Impl*>(user);
         if (impl == nullptr || impl->ctx == nullptr) return;
-        // ★ S2b-4（复审 S2-4）：`ctx.hook.clear()` / `handle.clear()` / `releaseRunHooks()` 会撤掉
+        // ★ S2b-4（复审 S2-4）：`ctx.off` / `releaseRunHooks()` 会撤掉
         //   once 的**临时** hook。`runOnceResolve` / `runOnceTimeout` 是"先摘账再撤 hook"⇒ 到这里
         //   仍留在账里的条目一定是被**别人**撤掉的 ⇒ 必须 reject 那条 promise：
         //   否则正在 `await` 它的 task 永远 pending，而 deadline 已随条目消失 ⇒ Run **永不收口**
@@ -4503,25 +4439,13 @@ Value makeInputReceipt(JSContext* ctx, const lift::plugin::Receipt& receipt) {  
                              receipt.id);
 }
 
-JSValue inputClickTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                             bool tick_mode) {
+JSValue inputClickTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        // ★ S2c-2 复审 F8：消息点名调用面（tick 面写 `tick.*`）。
-        const char* api = tick_mode ? "tick.input.click" : "ctx.input.click";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->inputAttached()) {
+        const char* api = "tick.input.click";
+        if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->inputAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         if (argc < 2) return JS_ThrowTypeError(ctx, "%s(x, y, button?)", api);
         double x = 0.0;
@@ -4556,36 +4480,21 @@ JSValue inputClickTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JS
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.input.click" : "ctx.input.click");
+                                 "tick.input.click");
     }
 }
 
-JSValue jsCtxInputClick(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputClickTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickInputClick(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputClickTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return inputClickTrampoline(ctx, this_val, argc, argv);
 }
 
-JSValue inputMoveTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                            bool tick_mode) {
+JSValue inputMoveTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        const char* api = tick_mode ? "tick.input.move" : "ctx.input.move";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->inputAttached()) {
+        const char* api = "tick.input.move";
+        if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->inputAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         if (argc < 2) return JS_ThrowTypeError(ctx, "%s(x, y)", api);
         double x = 0.0;
@@ -4603,16 +4512,12 @@ JSValue inputMoveTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSV
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.input.move" : "ctx.input.move");
+                                 "tick.input.move");
     }
 }
 
-JSValue jsCtxInputMove(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputMoveTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickInputMove(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputMoveTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return inputMoveTrampoline(ctx, this_val, argc, argv);
 }
 
 bool parseButtonArg(JSContext* ctx, JSValueConst value, lift::MouseButton* out) {
@@ -4634,24 +4539,13 @@ bool parseButtonArg(JSContext* ctx, JSValueConst value, lift::MouseButton* out) 
     return true;
 }
 
-JSValue inputDownTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                            bool tick_mode) {
+JSValue inputDownTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        const char* api = tick_mode ? "tick.input.down" : "ctx.input.down";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->inputAttached()) {
+        const char* api = "tick.input.down";
+        if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->inputAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         lift::MouseButton button = lift::MouseButton::Left;
         if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
@@ -4665,36 +4559,21 @@ JSValue inputDownTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSV
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.input.down" : "ctx.input.down");
+                                 "tick.input.down");
     }
 }
 
-JSValue jsCtxInputDown(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputDownTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickInputDown(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputDownTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return inputDownTrampoline(ctx, this_val, argc, argv);
 }
 
-JSValue inputUpTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                          bool tick_mode) {
+JSValue inputUpTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        const char* api = tick_mode ? "tick.input.up" : "ctx.input.up";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->inputAttached()) {
+        const char* api = "tick.input.up";
+        if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->inputAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         lift::MouseButton button = lift::MouseButton::Left;
         if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
@@ -4708,36 +4587,21 @@ JSValue inputUpTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSVal
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.input.up" : "ctx.input.up");
+                                 "tick.input.up");
     }
 }
 
-JSValue jsCtxInputUp(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputUpTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickInputUp(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputUpTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return inputUpTrampoline(ctx, this_val, argc, argv);
 }
 
-JSValue inputStatusTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv,
-                              bool tick_mode) {
+JSValue inputStatusTrampoline(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        const char* api = tick_mode ? "tick.input.status" : "ctx.input.status";
-        if (tick_mode) {
-            if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
-            if (host == nullptr || !host->inputAttached()) {
-                return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-            }
-        } else if (host == nullptr || !host->inputAttached()) {
+        const char* api = "tick.input.status";
+        if (tickStaleError(ctx, this_val, implOf(ctx), api)) return JS_EXCEPTION;
+        if (host == nullptr || !host->inputAttached()) {
             return JS_ThrowTypeError(ctx, "%s: 宿主没有接 IntentQueue（⛔ 不静默 no-op）", api);
-        }
-        if (!tick_mode) {
-            Impl* impl = implOf(ctx);
-            if (impl == nullptr || !impl->in_run_entry || impl->in_tick_entry) {
-                return JS_ThrowTypeError(ctx, "%s: 只用于 Run 回调 / task continuation 里", api);
-            }
         }
         if (argc < 1) return JS_ThrowTypeError(ctx, "%s(id)", api);
         double d = 0.0;
@@ -4749,16 +4613,12 @@ JSValue inputStatusTrampoline(JSContext* ctx, JSValueConst this_val, int argc, J
         return qjs::newString(ctx, lift::ui::pluginInputStateName(state)).take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "%s: 宿主异常（C++ exception at script boundary）",
-                                 tick_mode ? "tick.input.status" : "ctx.input.status");
+                                 "tick.input.status");
     }
 }
 
-JSValue jsCtxInputStatus(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputStatusTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/false);
-}
-
 JSValue jsTickInputStatus(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return inputStatusTrampoline(ctx, this_val, argc, argv, /*tick_mode=*/true);
+    return inputStatusTrampoline(ctx, this_val, argc, argv);
 }
 
 JSValue jsCtxReadGlobalGet(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {

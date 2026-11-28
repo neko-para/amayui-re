@@ -1,8 +1,8 @@
 // v2 夹具 · 指令点命中 → `ctx.at` handler（只读 + Tick 写面）
 //
 // 判据（红了意味着什么）：
-//   · `mode=hit`   ：探针命中后 handler 必须跑；`tick.{id,script,pos,opcode}` 与宿主侧逐项一致；
-//                    tick 入口的 **RunCtx 写面**（`ctx.edit`）必须 TypeError。
+//   · `mode=hit`   ：探针命中后 handler 必须跑；`tick.now.{script,pos,opcode}` 与宿主侧逐项一致；
+//                    RunCtx 的写面（`ctx.edit`）不存在 ⇒ TypeError；读数用 `tick.edit` 写回 guest。
 //   · `mode=throw` ：handler 抛错 ⇒ 宿主 = 一行 error + **撤整条订阅** + Run **不 fail**；
 //                    第二次命中不再有日志，但 entry 的 hits 继续涨。
 //   · `mode=done`  ：订阅在 start 内撤掉 ⇒ Run 收口 ⇒ hook 表空；之后的探针**不再跑 JS**。
@@ -15,29 +15,13 @@ const OUT_SCRIPT_OK = 0xb104;
 const OUT_ID = 0xb105;
 
 let seen = 0;
-let tickRec = null;
-
-function scheduleDump(ctx) {
-    ctx.task(async (t) => {
-        await t.delay(0);
-        if (tickRec === null) {
-            ctx.fail("tick", "no hit recorded");
-            return;
-        }
-        ctx.edit.global.set("int", OUT_SEEN, tickRec.seen);
-        ctx.edit.global.set("int", OUT_POS, tickRec.pos);
-        ctx.edit.global.set("int", OUT_OPCODE, tickRec.opcode);
-        ctx.edit.global.set("int", OUT_SCRIPT_OK, tickRec.script === SCRIPT ? 1 : 0);
-        ctx.edit.global.set("int", OUT_ID, tickRec.id);
-    });
-}
 
 const plugin = {
     start(ctx) {
         const mode = ctx.params.mode;
         if (mode === "hit") {
-            const handle = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
-                // ★ 写面硬边界：tick 入口里 RunCtx 的 `ctx.edit` 必须 TypeError。
+            ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                // ★ 写面硬边界：RunCtx 没有 `ctx.edit`（guest 写只走 Tick）⇒ TypeError。
                 let accepted = false;
                 try {
                     ctx.edit.global.set("int", 0xb1b0, 1);
@@ -45,19 +29,16 @@ const plugin = {
                 } catch (e) {
                     if (!e || e.name !== "TypeError") throw new Error("tick write gate: " + String(e));
                 }
-                if (accepted) throw new Error("tick write gate accepted a write");
+                if (accepted) throw new Error("RunCtx edit accepted a write");
                 seen += 1;
-                tickRec = {
-                    seen,
-                    id: tick.id,
-                    script: tick.script,
-                    pos: tick.pos,
-                    opcode: tick.opcode,
-                };
-                log.info("tick#" + seen + " @" + tick.pos);
+                // ★ P2b：回读用**本拍的 Tick**（读点任务里没有 Tick）。
+                tick.edit.global.set("int", OUT_SEEN, seen);
+                tick.edit.global.set("int", OUT_POS, tick.now.pos);
+                tick.edit.global.set("int", OUT_OPCODE, tick.now.opcode);
+                tick.edit.global.set("int", OUT_SCRIPT_OK, tick.now.script === SCRIPT ? 1 : 0);
+                tick.edit.global.set("int", OUT_ID, tick.id);
+                log.info("tick#" + seen + " @" + String(tick.now.pos));
             });
-            if (typeof handle !== "number") throw new Error("instr-tick: ctx.at failed");
-            scheduleDump(ctx);
             return;
         }
         if (mode === "throw") {
